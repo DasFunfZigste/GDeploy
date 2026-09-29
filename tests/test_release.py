@@ -97,7 +97,10 @@ def test_validate_requires_finished_dated_changelog(release_source, changelog, r
 
 
 def test_build_bundle_is_allowlisted_and_excludes_secrets_and_real_media(release_source, release_output):
-    secret_paths = [".env", "docker.env", "bootstrap-credentials.txt", "media/ubuntu.iso", "media/splunk.tgz", "data/state.db"]
+    secret_paths = [
+        ".env", "docker.env", "bootstrap.json", "bootstrap-credentials.txt",
+        "media/ubuntu.iso", "media/splunk.tgz", "data/state.db",
+    ]
     for name in secret_paths:
         path = release_source / name
         path.parent.mkdir(exist_ok=True)

@@ -20,4 +20,4 @@ jobs:
       - run: ruff check .
       - run: docker build -t gdeploy:test .
       - name: Verify image setup, Compose and Docker CLI
-        run: python scripts/smoke_image.py gdeploy:test
+        run: python scripts/smoke_image.py gdeploy:test --source-compose

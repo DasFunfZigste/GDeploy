@@ -4,7 +4,10 @@ services:
     restart: unless-stopped
     init: true
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      GDEPLOY_COOKIE_SECURE: ${GDEPLOY_COOKIE_SECURE:-false}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

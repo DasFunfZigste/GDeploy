@@ -1,6 +1,7 @@
 .git
 .env*
 bootstrap-credentials.txt
+bootstrap.json
 docker.env
 media
 data
