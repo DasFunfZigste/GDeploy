@@ -12,6 +12,8 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+from .bootstrap import verify_password
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -42,6 +44,10 @@ class Database:
                 );
                 CREATE TABLE IF NOT EXISTS login_attempts (ip TEXT NOT NULL, at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS audit (at TEXT NOT NULL, action TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS administrator (
+                    id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL, password_hash TEXT NOT NULL,
+                    must_change_credentials INTEGER NOT NULL CHECK(must_change_credentials IN (0,1))
+                );
             """)
         os.chmod(self.path, 0o600)
 
@@ -77,6 +83,58 @@ class Database:
     def audit(self, action):
         with self.connect() as c:
             c.execute("INSERT INTO audit VALUES(?,?)", (now(), action))
+
+    @staticmethod
+    def _administrator(row):
+        if row is None:
+            raise RuntimeError("The administrator account has not been initialized.")
+        return {
+            "username": row["username"],
+            "password_hash": row["password_hash"],
+            "must_change_credentials": bool(row["must_change_credentials"]),
+        }
+
+    def ensure_administrator(self, username: str, password_hash: str):
+        """Seed the application account once; later startup configuration cannot reset it."""
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT username,password_hash,must_change_credentials FROM administrator WHERE id=1").fetchone()
+            if row is None:
+                must_change = verify_password("admin", password_hash)
+                c.execute("INSERT INTO administrator VALUES(1,?,?,?)", (username, password_hash, int(must_change)))
+                # Sessions issued before persistent account initialization must authenticate again.
+                c.execute("DELETE FROM sessions")
+                row = c.execute("SELECT username,password_hash,must_change_credentials FROM administrator WHERE id=1").fetchone()
+            return self._administrator(row)
+
+    def administrator(self):
+        with self.connect() as c:
+            row = c.execute("SELECT username,password_hash,must_change_credentials FROM administrator WHERE id=1").fetchone()
+        return self._administrator(row)
+
+    def complete_initial_setup(self, session_token: str, username: str, password_hash: str) -> bool:
+        """Replace initial credentials and revoke every session in a single transaction."""
+        if not session_token:
+            return False
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT administrator.username FROM administrator JOIN sessions "
+                "ON sessions.username=administrator.username "
+                "WHERE administrator.id=1 AND administrator.must_change_credentials=1 "
+                "AND sessions.token=? AND sessions.expires>?",
+                (hashlib.sha256(session_token.encode()).hexdigest(), time.time()),
+            ).fetchone()
+            if current is None:
+                return False
+            c.execute(
+                "UPDATE administrator SET username=?,password_hash=?,must_change_credentials=0 WHERE id=1",
+                (username, password_hash),
+            )
+            c.execute("DELETE FROM sessions")
+            c.execute("DELETE FROM login_attempts")
+            c.execute("INSERT INTO audit VALUES(?,?)", (now(), "Administrator completed initial credential setup"))
+            return True
 
     def login_allowed(self, ip):
         with self.connect() as c:

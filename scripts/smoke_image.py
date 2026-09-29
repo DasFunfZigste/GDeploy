@@ -5,6 +5,7 @@ import argparse
 import http.cookiejar
 import json
 import os
+import secrets
 import subprocess
 import tempfile
 import time
@@ -53,6 +54,34 @@ def verify_login_and_storage(url, credentials, write=False):
 
     session = request("/api/login", {"username": username, "password": password}, "POST")
     assert session["authenticated"] is True
+    if session["must_change_credentials"]:
+        assert write, "The chosen administrator account did not survive container recreation"
+        assert request("/api/session")["must_change_credentials"] is True
+        for path in ("/api/settings", "/api/deployments"):
+            try:
+                request(path)
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
+                assert json.load(error)["detail"]["code"] == "credentials_change_required"
+            else:
+                raise AssertionError("Default credentials were allowed to access deployment features")
+        new_username, new_password = "smoke-operator", secrets.token_urlsafe(24)
+        result = request(
+            "/api/account/setup",
+            {"username": new_username, "password": new_password, "password_confirm": new_password},
+            "POST", session["csrf_token"],
+        )
+        assert result == {"ok": True}
+        assert request("/api/session") == {"authenticated": False}
+        try:
+            request("/api/login", {"username": username, "password": password}, "POST")
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+        else:
+            raise AssertionError("Initial credentials still work after account setup")
+        credentials = f"Username: {new_username}\nPassword: {new_password}\n"
+        session = request("/api/login", {"username": new_username, "password": new_password}, "POST")
+    assert session["must_change_credentials"] is False
     if write:
         request(
             "/api/settings",
@@ -64,6 +93,7 @@ def verify_login_and_storage(url, credentials, write=False):
     assert settings["host"] == "esxi.example.invalid" and settings["configured"] is True
     assert "password" not in settings
     request("/api/logout", {}, "POST", session["csrf_token"])
+    return credentials
 
 
 def smoke_configured(image):
@@ -109,7 +139,7 @@ def smoke_configured(image):
             wait_healthy(url)
             uid = run(*compose, "exec", "-T", "gdeploy", "id", "-u", env=env, capture=True).stdout.strip()
             assert uid == "10001"
-            verify_login_and_storage(url, credentials, write=True)
+            credentials = verify_login_and_storage(url, credentials, write=True)
             run(*compose, "down", env=env)
             run(
                 "docker",
@@ -137,7 +167,7 @@ def smoke_configured(image):
             )
             wait_healthy(url)
             verify_login_and_storage(url, credentials)
-            print("Image bootstrap, Compose, non-root operation, login, persistence and docker run checks passed.")
+            print("Image bootstrap, required account setup, Compose, login, persistence and docker run checks passed.")
         except BaseException:
             subprocess.run([*compose, "logs", "--tail", "60"], env=env, check=False)
             subprocess.run(["docker", "logs", "--tail", "60", unique], check=False)
@@ -211,11 +241,12 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
             saved = json.loads(bootstrap)
             username, password = credential_values(credentials)
             assert saved["admin_username"] == username
-            secrets = (password, saved["secret_key"], saved["admin_password_hash"])
-            assert all(secrets)
+            assert (username, password) == ("admin", "admin")
             verify_private_files()
-            verify_login_and_storage(url, credentials, write=True)
-            verify_logs(secrets)
+            chosen_credentials = verify_login_and_storage(url, credentials, write=True)
+            private_values = (credential_values(chosen_credentials)[1], saved["secret_key"], saved["admin_password_hash"])
+            assert all(private_values)
+            verify_logs(private_values)
 
             # Replace the container while retaining only its named data volume.
             # Saved ESXi settings must still decrypt and the login must not rotate.
@@ -225,11 +256,11 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
             assert read_file("/data/bootstrap.json") == bootstrap
             assert read_file("/data/bootstrap-credentials.txt") == credentials
             verify_private_files()
-            verify_login_and_storage(url, credentials)
-            verify_logs(secrets)
+            verify_login_and_storage(url, chosen_credentials)
+            verify_logs(private_values)
             mode = "blank .env.example" if blank_env else "no .env"
             layout = "source Compose" if source_compose else "release Compose"
-            print(f"Automatic first-start, login, permissions, logs and recreation passed ({layout}, {mode}).")
+            print(f"First-start, required setup, login, permissions and recreation passed ({layout}, {mode}).")
         except BaseException:
             # A failed first-start log check must not print the leaked secrets
             # into CI. Container state is useful and contains no credentials.

@@ -141,7 +141,7 @@ def main(argv=None):
             "Use --export-docker-env to refresh docker.env from .env."
         )
     root.mkdir(parents=True, exist_ok=True)
-    password = secrets.token_urlsafe(24)
+    password = "admin"
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
     encoded = "scrypt$" + base64.urlsafe_b64encode(salt).decode() + "$" + base64.urlsafe_b64encode(digest).decode()
@@ -178,7 +178,8 @@ def main(argv=None):
         credential_file,
         "GDeploy web-app sign-in\nURL: http://localhost:8000\nUsername: admin\nPassword: "
         + password
-        + "\n\nStore this in your password manager, then remove this file.\n"
+        + "\n\nThese are initial credentials. GDeploy requires replacement credentials at the first sign-in.\n"
+        "After setup, use your new username and password; these initial credentials no longer work.\n"
         "Guest credentials are in each deployment's Credentials panel.\n",
     )
     print(f"Created {destination} and {docker_destination} (owner access only).")

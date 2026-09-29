@@ -27,6 +27,8 @@ def test_bootstrap_creates_matching_compose_and_docker_credentials(tmp_path, cap
     assert docker_values == compose_values
     credentials = (setup / "bootstrap-credentials.txt").read_text()
     password = re.search(r"^Password: (.+)$", credentials, re.MULTILINE).group(1)
+    assert password == "admin"
+    assert "requires replacement credentials at the first sign-in" in credentials
     assert verify_password(password, docker_values["GDEPLOY_ADMIN_PASSWORD_HASH"])
     assert len(base64.urlsafe_b64decode(docker_values["GDEPLOY_SECRET_KEY"])) == 32
     assert "GDEPLOY_ADMIN_PASSWORD_HASH='scrypt$" in (setup / ".env").read_text()

@@ -216,7 +216,7 @@ def resolve_credentials(
                     "the original GDEPLOY_SECRET_KEY and GDEPLOY_ADMIN_PASSWORD_HASH, or the matching bootstrap.json. "
                     "GDeploy refuses to create a replacement encryption key."
                 )
-            password = secrets.token_urlsafe(24)
+            password = "admin"
             generated = Credentials(
                 Fernet.generate_key().decode(), hash_password(password), "admin" if username is None else username
             )
@@ -226,7 +226,8 @@ def resolve_credentials(
                 credential_file,
                 "GDeploy web-app sign-in\nURL: http://localhost:8000\n"
                 f"Username: {generated.admin_username}\nPassword: {password}\n\n"
-                "Store this in your password manager, then remove this file.\n"
+                "These are initial credentials. GDeploy requires replacement credentials at the first sign-in.\n"
+                "After setup, use your new username and password; these initial credentials no longer work.\n"
                 "Keep bootstrap.json backed up with the data volume; it contains the persistent encryption key.\n"
                 "Guest credentials are in each deployment's Credentials panel.\n",
             )

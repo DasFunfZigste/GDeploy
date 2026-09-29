@@ -12,22 +12,20 @@ With Git, Docker Engine and **Docker Compose 2.24 or later** installed, run:
 git clone https://github.com/DasFunfZigste/GDeploy.git
 cd GDeploy
 docker compose up --build -d --wait
-docker compose exec gdeploy cat /data/bootstrap-credentials.txt
 ```
 
-The private repository requires your existing GitHub access. Building from source does not require a GHCR login. Open **http://localhost:8000** and sign in with the displayed username and password. On a remote server, use the SSH tunnel in the [installation guide](docs/INSTALL.md).
+The private repository requires your existing GitHub access. Building from source does not require a GHCR login. Open **http://localhost:8000** and sign in with **username `admin` and password `admin`** on a fresh installation. The first sign-in requires a new username and password before you can use the app. After saving them, sign in again with your new credentials. On a remote server, use the SSH tunnel in the [installation guide](docs/INSTALL.md).
 
-On a fresh data volume, GDeploy generates and saves its administrator credentials and encryption key automatically. You can open the app before adding installation media; VM deployment requires the verified Ubuntu installer and checksum described below. No initial `.env` file or separate configuration command is required.
+On a fresh data volume, GDeploy creates the initial `admin`/`admin` account and a unique random encryption key automatically. Choose a username of 3–100 letters, digits, periods, underscores or hyphens, starting with a letter or digit; it cannot be `admin` in any capitalization. Choose a password of 12–1024 characters and enter it again to confirm. Completing setup signs out all sessions, and `admin`/`admin` no longer works. You can open the app before adding installation media; VM deployment requires the verified Ubuntu installer and checksum described below. No initial `.env` file or separate configuration command is required.
 
 **Already cloned, but startup failed with `GDEPLOY_SECRET_KEY is required`?** Run these commands from your existing GDeploy checkout:
 
 ```sh
 git pull --ff-only
 docker compose up --build -d --wait --force-recreate
-docker compose exec gdeploy cat /data/bootstrap-credentials.txt
 ```
 
-Keep your existing `.env` and data volume. A fresh installation will now bootstrap automatically. If you previously generated explicit credentials, your original password still applies and its initial copy is in the checkout's `bootstrap-credentials.txt`. If an existing database has lost its original key, restore that key from backup; GDeploy refuses to replace it with a new one.
+Keep your existing `.env` and data volume. A fresh installation starts with `admin`/`admin` and the required account setup. Existing random or custom credentials remain valid when upgrading; they are not reset to the default. If an existing database has lost its original key, restore that key from backup; GDeploy refuses to replace it with a new one. The installation guide includes initial-password lookup for older installations.
 
 ## Included
 
@@ -38,7 +36,7 @@ Keep your existing `.env` and data volume. A fresh installation will now bootstr
 - Unique generated guest/application credentials, encrypted storage and an explicit **Credentials** view in every deployment.
 - Stage progress, persisted events and deployment history. Interrupted work is identified on restart.
 - Failed-deployment **delete & redeploy**, with typed confirmation and strict resource ownership checks.
-- Web-app authentication, expiring sessions, CSRF protection and sign-in throttling.
+- Web-app authentication, required replacement of default sign-in credentials, expiring sessions, CSRF protection and sign-in throttling.
 
 Saved deployment profiles are outside this initial scope.
 
@@ -48,7 +46,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.1.2` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.1.3` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -56,12 +54,12 @@ See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/REL
 
 1. Use a Docker host that can reach both ESXi and the guest network. Allow several GiB of free local space for a temporary copy of the Ubuntu ISO.
 2. Place your vendor-verified **Ubuntu Server 24.04 amd64 live-server ISO** at `media/ubuntu.iso`. For Splunk, also place your licensed **Splunk Enterprise Linux x86_64 .tgz** at `media/splunk.tgz`. Verify downloads against the publishers' checksums before proceeding. GDeploy does not download Splunk or supply a license. On Linux, the container's UID 10001 must be able to read this bind mount: use directory mode 0755 and installer-file mode 0644, or equivalent ACLs. Keep secrets out of this public-media directory.
-3. Run `sha256sum media/ubuntu.iso` (and `sha256sum media/splunk.tgz` if used). Create or edit the optional `.env` and set `GDEPLOY_UBUNTU_SHA256` and, if used, `GDEPLOY_SPLUNK_SHA256` to those verified values. Keep one value per setting and preserve any existing contents. For an automatic installation, leave `GDEPLOY_SECRET_KEY` and `GDEPLOY_ADMIN_PASSWORD_HASH` absent or empty; the app reuses its saved credentials in the data volume. Do not generate a replacement key.
+3. Run `sha256sum media/ubuntu.iso` (and `sha256sum media/splunk.tgz` if used). Create or edit the optional `.env` and set `GDEPLOY_UBUNTU_SHA256` and, if used, `GDEPLOY_SPLUNK_SHA256` to those verified values. Keep one value per setting and preserve any existing contents. For an automatic installation, leave `GDEPLOY_SECRET_KEY` and `GDEPLOY_ADMIN_PASSWORD_HASH` absent or empty; the app reuses its saved encryption key and account in the data volume. Do not generate a replacement key.
 4. Apply the media settings with `docker compose up --build -d --wait --force-recreate`.
 5. Open **ESXi connection**, save your ESXi hostname, username and password, and use the connection check to load inventory.
 6. Select **New deployment**, choose application roles, and configure each separate VM. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
 
-If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations continue using their original `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
+If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
 
 The default Compose binding is loopback-only. For access from another machine, use the guide's SSH tunnel or an HTTPS reverse proxy. For a proxy, forward the original `Host` and `X-Forwarded-Proto`, set `GDEPLOY_COOKIE_SECURE=true`, and set `FORWARDED_ALLOW_IPS` to the actual proxy address or trusted proxy network as seen by the container. Keep the app port private to that proxy; the cookie setting must match how the browser accesses the application.
 
@@ -80,6 +78,7 @@ For an ESXi certificate signed by a private CA, make a PEM bundle containing the
 
 ## Credentials and application behavior
 
+- The chosen web-app username and password hash are stored in the database and survive container rebuilds. The initial `bootstrap-credentials.txt` is not updated after account setup; save your chosen credentials in your password manager. Account setup leaves the encryption key and bootstrap/environment files unchanged.
 - Each VM receives the OS administrator **`gdeploy`**, a different random password, and a separate automation SSH key. VM names remain hostnames; they are not passwords.
 - Open a deployment and select **Reveal credentials** to see the exact VM username/password, IP, SSH host key, application URL and application credentials. Reveals are recorded in the deployment events. The browser conceals the panel automatically after one minute and when navigating away. Copying a value leaves it in your operating-system clipboard until replaced.
 - ESXi credentials, guest passwords, SSH private keys and application secrets are encrypted using a persistent key. Automatic installations keep it in `/data/bootstrap.json` inside the data volume; manually configured installations use `.env`. Back up the data volume, including `bootstrap.json`, and any existing environment files; losing the original key prevents decryption. Application administrators can intentionally reveal deployment passwords.
@@ -99,9 +98,9 @@ A timed-out ESXi operation can still be running on the host. Inspect its tasks b
 
 ## Persistence and operation
 
-The Compose data volume mounted at `/data` contains SQLite history, encrypted secrets and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. Installation media is removed from the datastore after the OS is ready. Source files in `media/` are never modified. Deployment history is retained after cleanup.
+The Compose data volume mounted at `/data` contains the SQLite administrator account and history, encrypted secrets and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. Installation media is removed from the datastore after the OS is ready. Source files in `media/` are never modified. Deployment history is retained after cleanup.
 
-Run **one app container with one worker** against a data volume. Jobs are serialized; this release does not support multiple replicas. The container runs without root privileges or Linux capabilities, with a read-only root filesystem. Stop the app before taking a consistent backup of its complete data volume, including automatic bootstrap files, and any existing `.env`/`docker.env`. Store the initial password in your password manager; the private bootstrap credentials file is not a substitute for a backup. Do not use `docker compose down -v` unless you intend to erase the app's database and credentials.
+Run **one app container with one worker** against a data volume. Jobs are serialized; this release does not support multiple replicas. The container runs without root privileges or Linux capabilities, with a read-only root filesystem. Stop the app before taking a consistent backup of its complete data volume, including automatic bootstrap files, and any existing `.env`/`docker.env`. Store your chosen web-app credentials in your password manager; the private bootstrap credentials file is not a substitute for a backup. Do not use `docker compose down -v` unless you intend to erase the app's database and credentials.
 
 ## Development and validation
 

@@ -30,11 +30,30 @@
         <span class="eyebrow">WELCOME TO GDEPLOY</span>
         <h2>Sign in to your workspace</h2>
         <p class="muted">Use the administrator account configured for this instance.</p>
+        <div id="login-success" class="alert alert-success" role="status" hidden></div>
         <div id="login-error" class="alert alert-error" role="alert" hidden></div>
         <label class="field"><span>Username</span><input id="login-username" name="username" autocomplete="username" required autofocus placeholder="Your administrator username"></label>
         <label class="field"><span>Password</span><input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></label>
         <button id="login-submit" type="submit" class="button button-primary button-full">Sign in <span aria-hidden="true">→</span></button>
+        <p class="first-login-hint"><strong>New installation?</strong> Sign in with username <code>admin</code> and password <code>admin</code>, then choose your own login. Existing installations use their current credentials.</p>
         <p class="login-help">Account access is managed by your GDeploy administrator.</p>
+      </form>
+    </div>
+  </section>
+  <section id="setup-screen" class="setup-screen" hidden aria-labelledby="setup-title">
+    <div class="setup-card">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">G</span><span>GDeploy<span class="brand-dot">.</span></span></div>
+      <form id="setup-form" class="setup-form" novalidate>
+        <span class="eyebrow">FIRST SIGN-IN</span>
+        <h1 id="setup-title" tabindex="-1">Choose your administrator login</h1>
+        <p class="muted">Replace the default username and password to open your deployment workspace.</p>
+        <div id="setup-error" class="alert alert-error" role="alert" hidden></div>
+        <label class="field"><span>New username</span><input id="setup-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" minlength="3" maxlength="100" required placeholder="For example, lab-operator" aria-describedby="setup-username-help"><small id="setup-username-help">3–100 letters, numbers, dots, underscores or hyphens. Start with a letter or number and choose a name other than admin.</small></label>
+        <label class="field"><span>New password</span><input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required placeholder="Choose a password or passphrase" aria-describedby="setup-password-help"><small id="setup-password-help">Use 12–1,024 characters. A password cannot contain only spaces.</small></label>
+        <label class="field"><span>Confirm new password</span><input id="setup-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required placeholder="Enter the new password again"></label>
+        <button id="setup-submit" type="submit" class="button button-primary button-full">Save administrator login <span aria-hidden="true">→</span></button>
+        <p class="setup-note">You’ll sign in again with your new credentials after saving.</p>
+        <button id="setup-logout" type="button" class="button button-ghost button-full">Sign out</button>
       </form>
     </div>
   </section>

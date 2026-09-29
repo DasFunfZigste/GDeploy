@@ -4,6 +4,22 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-29
+
+### Added
+
+- Fresh automatic and manual installations now start with username `admin` and password `admin`, with a unique random encryption key for every installation.
+- The first sign-in requires a new username and password before ESXi settings, deployments or their APIs can be used. Usernames must be 3–100 letters, digits, periods, underscores or hyphens, start with a letter or digit, and differ from `admin` regardless of capitalization. Passwords must be 12–1024 characters with matching confirmation.
+- Completing account setup signs out every session. Sign in again with the new credentials; the default login no longer works. The chosen account persists across restarts and container rebuilds.
+
+### Installation and compatibility
+
+- Existing random/custom credentials are preserved on upgrade and are not reset to `admin`/`admin`. Only accounts still using the default password require the initial account change.
+- A new administrator record is initialized once in the existing database. Later starts use that saved account; the original encryption key, bootstrap files and environment files remain unchanged.
+- `bootstrap-credentials.txt` records only the initial login and is not updated with the chosen credentials. Back up the complete data volume and its matching encryption configuration.
+- Do not blindly roll back below **0.1.3** after account setup: older versions ignore the saved administrator record and use the old bootstrap/environment credentials, which may be `admin`/`admin`. Restore a matching backup and review the login configuration before starting an older version.
+- Docker Compose **2.24 or later**, `linux/amd64` images, installation-media requirements and live ESXi lab-validation requirements remain unchanged.
+
 ## [0.1.2] - 2026-09-29
 
 ### Fixed

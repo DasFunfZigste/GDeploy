@@ -8,6 +8,7 @@
     route: 'deployments', detailId: null, routeEpoch: 0, pollBusy: false,
     search: '', filter: 'all', wizard: null, secrets: null, secretTimer: null,
     secretDeadline: 0, secretRequest: 0, toastTimer: null,
+    setupBusy: false,
   };
   const roles = {
     ubuntu: {name: 'Ubuntu server', short: 'Ubuntu', description: 'A clean Linux server, ready for your own workloads.', cpu: 2, ram: 4, disk: 40, icon: 'terminal'},
@@ -102,10 +103,15 @@
     if (typeof data === 'string') return data;
     if (Array.isArray(data)) return data.map(item => `${Array.isArray(item.loc) ? item.loc.filter(v => v !== 'body').join(' · ') + ': ' : ''}${item.msg || 'Invalid value'}`).join('\n');
     if (data && typeof data.detail === 'string') return data.detail;
+    if (data?.detail && typeof data.detail.message === 'string') return data.detail.message;
     if (data && Array.isArray(data.detail)) return errorText(data.detail);
     return fallback;
   }
   async function api(path, options = {}) {
+    if (setupRequired() && !['/api/session', '/api/login', '/api/logout', '/api/account/setup'].includes(path)) {
+      throw new Error('Choose new administrator credentials before continuing.');
+    }
+    const requestSession = state.session;
     const method = options.method || 'GET';
     const headers = {Accept: 'application/json'};
     if (options.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -117,6 +123,9 @@
     const data = response.status === 204 ? null : await response.json().catch(() => null);
     if (!response.ok) {
       if (response.status === 401 && path !== '/api/login') showLogin('Your session has expired. Sign in to continue.');
+      if (response.status === 403 && data?.detail?.code === 'credentials_change_required' && state.session && state.session === requestSession) {
+        showSetup({...state.session, must_change_credentials: true}, data.detail.message);
+      }
       const error = new Error(errorText(data, `Request failed (${response.status}).`));
       error.status = response.status;
       throw error;
@@ -143,30 +152,72 @@
     node.disabled = true;
     node.replaceChildren(spinner(), document.createTextNode(text));
   }
-  function showLogin(message = '') {
-    state.session = null;
+  const setupRequired = () => state.session?.must_change_credentials === true;
+  function resetSetupForm() {
+    $('#setup-form').reset();
+    for (const input of $('#setup-form').querySelectorAll('input')) input.setCustomValidity('');
+    inlineError($('#setup-error'), '');
+  }
+  function closeWorkspace() {
     state.routeEpoch++;
     hideCredentials();
     state.wizard = null;
+    state.settings = null;
+    state.inventory = null;
+    state.deployments = [];
+    state.detail = null;
+    state.detailId = null;
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
-    $('#boot').hidden = true;
+    page.replaceChildren();
+    clearTimeout(state.toastTimer);
+    $('#toast').hidden = true;
     $('#app').hidden = true;
+  }
+  function showLogin(message = '', options = {}) {
+    state.session = null;
+    closeWorkspace();
+    resetSetupForm();
+    $('#boot').hidden = true;
+    $('#setup-screen').hidden = true;
     $('#login-screen').hidden = false;
+    $('.skip-link').href = '#login-username';
+    if (options.username !== undefined) $('#login-username').value = options.username;
     $('#login-password').value = '';
     inlineError($('#login-error'), message);
+    inlineError($('#login-success'), options.success || '');
+  }
+  function showSetup(session = state.session, message = '') {
+    if (!session) return;
+    const entering = $('#setup-screen').hidden;
+    state.session = session;
+    closeWorkspace();
+    $('#boot').hidden = true;
+    $('#login-screen').hidden = true;
+    $('#login-password').value = '';
+    $('#setup-screen').hidden = false;
+    $('.skip-link').href = '#setup-title';
+    if (entering) {
+      resetSetupForm();
+      $('#setup-username').focus();
+    }
+    if (message) inlineError($('#setup-error'), message);
   }
   async function showApp(session) {
+    if (session.must_change_credentials) { showSetup(session); return; }
     state.session = session;
     $('#boot').hidden = true;
     $('#login-screen').hidden = true;
+    $('#setup-screen').hidden = true;
+    resetSetupForm();
     $('#app').hidden = false;
+    $('.skip-link').href = '#main-content';
     $('#account-name').textContent = session.username || 'Administrator';
     $('#account-avatar').textContent = (session.username || 'A').slice(0, 1);
     await route();
   }
   async function logout() {
     try { await api('/api/logout', {method: 'POST'}); showLogin(); }
-    catch (error) { globalError(error.message); }
+    catch (error) { if (setupRequired()) inlineError($('#setup-error'), error.message); else globalError(error.message); }
   }
   function markNav(name) {
     for (const link of document.querySelectorAll('[data-nav]')) {
@@ -178,6 +229,7 @@
   function goDetail(id) { location.hash = `deployment/${encodeURIComponent(id)}`; }
   async function route() {
     if (!state.session) return;
+    if (setupRequired()) { showSetup(); return; }
     const epoch = ++state.routeEpoch;
     globalError('');
     hideCredentials();
@@ -407,6 +459,7 @@
     return el('div', {class: 'secret-field'}, el('label', {for: id}, label), el('div', {class: 'secret-input-row'}, input, copy));
   }
   async function refreshDetail(manual = false) {
+    if (!state.session || setupRequired()) return;
     const id = state.detailId; const epoch = state.routeEpoch;
     if (!id) return;
     try {
@@ -443,6 +496,7 @@
   $('#confirm-dialog').addEventListener('cancel', event => { if ($('#confirm-dialog').dataset.busy) event.preventDefault(); });
 
   async function openWizard() {
+    if (!state.session || setupRequired()) return;
     if (!state.settings?.configured) { location.hash = 'settings'; notify('Save your ESXi connection to begin a deployment.'); return; }
     hideCredentials();
     const dialog = $('#wizard-dialog');
@@ -631,7 +685,7 @@
     finally { if (state.wizard === wizard) { wizard.busy = false; renderWizard(); $('#wizard-content')?.scrollTo({top: 0}); } }
   }
   async function poll() {
-    if (!state.session || document.hidden || state.pollBusy) return;
+    if (!state.session || setupRequired() || document.hidden || state.pollBusy) return;
     state.pollBusy = true;
     const epoch = state.routeEpoch;
     try {
@@ -652,7 +706,7 @@
   $('#login-form').addEventListener('submit', async event => {
     event.preventDefault();
     const submit = $('#login-submit');
-    inlineError($('#login-error'), ''); setBusy(submit, 'Signing in…');
+    inlineError($('#login-error'), ''); inlineError($('#login-success'), ''); setBusy(submit, 'Signing in…');
     try {
       const session = await api('/api/login', {method: 'POST', body: {username: $('#login-username').value.trim(), password: $('#login-password').value}});
       $('#login-password').value = '';
@@ -660,6 +714,58 @@
     } catch (error) { inlineError($('#login-error'), error.message); }
     finally { submit.disabled = false; submit.replaceChildren('Sign in ', icon('arrow')); }
   });
+  for (const input of $('#setup-form').querySelectorAll('input')) input.addEventListener('input', () => {
+    input.setCustomValidity('');
+    $('#setup-confirm').setCustomValidity('');
+  });
+  $('#setup-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!setupRequired() || state.setupBusy) return;
+    const usernameInput = $('#setup-username');
+    const passwordInput = $('#setup-password');
+    const confirmInput = $('#setup-confirm');
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+    const passwordConfirm = confirmInput.value;
+    for (const input of [usernameInput, passwordInput, confirmInput]) input.setCustomValidity('');
+    let invalidInput;
+    let message;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,99}$/.test(username) || username.toLowerCase() === 'admin') {
+      invalidInput = usernameInput;
+      message = 'Choose a username other than admin: 3–100 letters, numbers, dots, underscores or hyphens, starting with a letter or number.';
+    } else if ([...password].length < 12 || [...password].length > 1024 || !password.trim()) {
+      invalidInput = passwordInput;
+      message = 'Choose a password of 12–1,024 characters that is not only spaces.';
+    } else if (password !== passwordConfirm) {
+      invalidInput = confirmInput;
+      message = 'The new passwords do not match.';
+    }
+    if (invalidInput) {
+      invalidInput.setCustomValidity(message);
+      inlineError($('#setup-error'), message);
+      invalidInput.reportValidity();
+      invalidInput.focus();
+      return;
+    }
+    inlineError($('#setup-error'), '');
+    const submit = $('#setup-submit');
+    state.setupBusy = true;
+    $('#setup-logout').disabled = true;
+    setBusy(submit, 'Saving your login…');
+    try {
+      await api('/api/account/setup', {method: 'POST', body: {username, password, password_confirm: passwordConfirm}});
+      showLogin('', {username, success: 'Administrator login updated. Sign in with your new credentials.'});
+      $('#login-password').focus();
+    } catch (error) {
+      if (setupRequired()) inlineError($('#setup-error'), error.message);
+    } finally {
+      state.setupBusy = false;
+      $('#setup-logout').disabled = false;
+      submit.disabled = false;
+      submit.replaceChildren('Save administrator login ', icon('arrow'));
+    }
+  });
+  $('#setup-logout').addEventListener('click', logout);
   $('#logout').addEventListener('click', logout);
   const mobileLogout = el('button', {type: 'button', class: 'icon-button mobile-logout', 'aria-label': 'Sign out', onClick: logout}, icon('logout'));
   $('.topbar').append(mobileLogout);

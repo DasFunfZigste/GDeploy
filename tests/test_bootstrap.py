@@ -35,6 +35,7 @@ def test_fresh_start_generates_private_credentials_without_logging_secrets(boots
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
         config = Config.from_env()
     password = password_from_file(bootstrap_data)
+    assert password == "admin"
     assert verify_password(password, config.admin_password_hash)
     assert config.admin_username == "admin"
     assert config.cookie_secure is True
@@ -47,13 +48,13 @@ def test_fresh_start_generates_private_credentials_without_logging_secrets(boots
         "admin_password_hash": config.admin_password_hash,
         "admin_username": "admin",
     }
-    assert password not in json.dumps(state)
+    assert "password" not in state
     for name in (bootstrap.STATE_NAME, bootstrap.CREDENTIALS_NAME, bootstrap.LOCK_NAME):
         status = (bootstrap_data / name).stat()
         assert stat.S_IMODE(status.st_mode) == 0o600
         assert status.st_uid == os.geteuid()
     assert str(bootstrap_data / bootstrap.CREDENTIALS_NAME) in caplog.text
-    for secret in (password, config.secret_key, config.admin_password_hash):
+    for secret in (config.secret_key, config.admin_password_hash):
         assert secret not in caplog.text
     assert not (bootstrap_data / "gdeploy.sqlite3").exists()
 
@@ -64,7 +65,8 @@ def test_generated_credentials_allow_first_api_login(bootstrap_data, monkeypatch
         assert client.get("/api/health").status_code == 200
         response = client.post("/api/login", json={"username": "admin", "password": password_from_file(bootstrap_data)})
         assert response.status_code == 200
-        assert client.get("/api/deployments").status_code == 200
+        assert response.json()["must_change_credentials"] is True
+        assert client.get("/api/deployments").status_code == 403
         assert "Secure" not in response.headers["set-cookie"]
 
 
@@ -184,6 +186,56 @@ def test_matching_explicit_credentials_reuse_saved_custom_username(bootstrap_dat
     monkeypatch.setenv("GDEPLOY_SECRET_KEY", original.secret_key)
     monkeypatch.setenv("GDEPLOY_ADMIN_PASSWORD_HASH", original.admin_password_hash)
     assert Config.from_env() == original
+
+
+def test_existing_random_bootstrap_credentials_survive_upgrade(bootstrap_data):
+    bootstrap_data.mkdir()
+    original_hash = hash_password("previous-random-administrator-password")
+    original_key = Fernet.generate_key().decode()
+    original = {
+        "schema_version": 1,
+        "secret_key": original_key,
+        "admin_password_hash": original_hash,
+        "admin_username": "admin",
+    }
+    path = bootstrap_data / bootstrap.STATE_NAME
+    path.write_text(json.dumps(original))
+    path.chmod(0o600)
+    before = path.read_bytes()
+    config = Config.from_env()
+    assert config.secret_key == original_key
+    assert config.admin_password_hash == original_hash
+    assert verify_password("previous-random-administrator-password", config.admin_password_hash)
+    assert not verify_password("admin", config.admin_password_hash)
+    assert path.read_bytes() == before
+    assert not (bootstrap_data / bootstrap.CREDENTIALS_NAME).exists()
+
+
+def test_new_default_accounts_still_have_independent_encryption_keys(bootstrap_data, monkeypatch):
+    first = Config.from_env()
+    monkeypatch.setenv("GDEPLOY_DATA_DIR", str(bootstrap_data.with_name("another-installation")))
+    second = Config.from_env()
+    assert first.secret_key != second.secret_key
+    assert verify_password("admin", first.admin_password_hash)
+    assert verify_password("admin", second.admin_password_hash)
+
+
+def test_account_setup_preserves_bootstrap_files_and_encryption_key(bootstrap_data):
+    initial_config = Config.from_env()
+    names = (bootstrap.STATE_NAME, bootstrap.CREDENTIALS_NAME)
+    original_files = {name: (bootstrap_data / name).read_bytes() for name in names}
+    db = Database(initial_config.data_dir, initial_config.secret_key)
+    db.ensure_administrator(initial_config.admin_username, initial_config.admin_password_hash)
+    token, _ = db.new_session("admin", 1)
+    replacement_hash = hash_password("replacement-private-password")
+    assert db.complete_initial_setup(token, "operator", replacement_hash)
+
+    assert {name: (bootstrap_data / name).read_bytes() for name in names} == original_files
+    restarted_config = Config.from_env()
+    assert restarted_config == initial_config
+    restarted_db = Database(restarted_config.data_dir, restarted_config.secret_key)
+    account = restarted_db.ensure_administrator(restarted_config.admin_username, restarted_config.admin_password_hash)
+    assert account == {"username": "operator", "password_hash": replacement_hash, "must_change_credentials": False}
 
 
 @pytest.mark.parametrize("mutation", ["invalid_json", "invalid_key", "invalid_hash", "missing_field", "schema", "duplicate"])

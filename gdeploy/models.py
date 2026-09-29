@@ -17,6 +17,23 @@ class Login(StrictModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
 
 
+class AccountSetup(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    username: str = Field(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    password: str = Field(min_length=12, max_length=1024)
+    password_confirm: str = Field(min_length=12, max_length=1024)
+
+    @model_validator(mode="after")
+    def validate_new_credentials(self):
+        if self.username.casefold() == "admin":
+            raise ValueError("Choose a new administrator username other than admin.")
+        if not self.password.strip():
+            raise ValueError("Choose a password containing more than whitespace.")
+        if self.password != self.password_confirm:
+            raise ValueError("The password confirmation does not match.")
+        return self
+
+
 class ConnectionSettings(StrictModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
     host: str = Field(min_length=1, max_length=253)

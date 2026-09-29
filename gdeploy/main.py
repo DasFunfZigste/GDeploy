@@ -13,9 +13,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .config import Config, verify_password
+from .config import Config, hash_password, verify_password
 from .db import Database
-from .models import ConnectionSettings, DeploymentSpec, Login, RedeployRequest
+from .models import AccountSetup, ConnectionSettings, DeploymentSpec, Login, RedeployRequest
 from .service import DeploymentError, DeploymentService
 
 STATIC = Path(__file__).parent / "static"
@@ -27,6 +27,9 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     async def lifespan(app):
         app.state.config = config or Config.from_env()
         app.state.db = Database(app.state.config.data_dir, app.state.config.secret_key)
+        app.state.db.ensure_administrator(
+            app.state.config.admin_username, app.state.config.admin_password_hash
+        )
         app.state.service = service_factory(app.state.db, app.state.config)
         app.state.login_lock = threading.Lock()
         if start_worker:
@@ -39,15 +42,31 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         title="GDeploy", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
 
+    def session_details(request: Request, allow_pending: bool = False):
+        # Read the session and current account together with respect to login/setup.
+        # A restricted session must never inherit access while another request finishes setup.
+        with request.app.state.login_lock:
+            db = request.app.state.db
+            current = db.session(request.cookies.get(COOKIE))
+            administrator = db.administrator()
+            if not current or current["username"] != administrator["username"]:
+                raise HTTPException(401, "Sign in to continue.")
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                token = request.headers.get("X-CSRF-Token", "")
+                if not hmac.compare_digest(token.encode(), current["csrf"].encode()):
+                    raise HTTPException(403, "Session verification failed. Refresh and try again.")
+            if administrator["must_change_credentials"] and not allow_pending:
+                raise HTTPException(403, detail={
+                    "code": "credentials_change_required",
+                    "message": "Choose new administrator credentials before continuing.",
+                })
+            return current
+
     def authenticated(request: Request):
-        session = request.app.state.db.session(request.cookies.get(COOKIE))
-        if not session:
-            raise HTTPException(401, "Sign in to continue.")
-        if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            token = request.headers.get("X-CSRF-Token", "")
-            if not hmac.compare_digest(token.encode(), session["csrf"].encode()):
-                raise HTTPException(403, "Session verification failed. Refresh and try again.")
-        return session
+        return session_details(request)
+
+    def signed_in(request: Request):
+        return session_details(request, allow_pending=True)
 
     @app.middleware("http")
     async def security_headers(request, call_next):
@@ -91,11 +110,18 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.get("/api/session")
     def session(request: Request):
-        current = request.app.state.db.session(request.cookies.get(COOKIE))
-        return {
-            "authenticated": bool(current),
-            **({"username": current["username"], "csrf_token": current["csrf"]} if current else {}),
-        }
+        with request.app.state.login_lock:
+            db = request.app.state.db
+            current = db.session(request.cookies.get(COOKIE))
+            administrator = db.administrator()
+            if not current or current["username"] != administrator["username"]:
+                return {"authenticated": False}
+            return {
+                "authenticated": True,
+                "username": current["username"],
+                "csrf_token": current["csrf"],
+                "must_change_credentials": administrator["must_change_credentials"],
+            }
 
     @app.post("/api/login")
     def login(payload: Login, request: Request, response: Response):
@@ -108,13 +134,14 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         with request.app.state.login_lock:
             if not db.login_allowed(ip):
                 raise HTTPException(429, "Too many failed sign-in attempts. Try again in 15 minutes.")
-            valid_password = verify_password(payload.password, cfg.admin_password_hash)
-            if not hmac.compare_digest(payload.username.encode(), cfg.admin_username.encode()) or not valid_password:
+            administrator = db.administrator()
+            valid_password = verify_password(payload.password, administrator["password_hash"])
+            if not hmac.compare_digest(payload.username.encode(), administrator["username"].encode()) or not valid_password:
                 db.failed_login(ip)
                 raise HTTPException(401, "Incorrect username or password.")
             if request.cookies.get(COOKIE):
                 db.delete_session(request.cookies[COOKIE])
-            token, csrf = db.new_session(cfg.admin_username, cfg.session_hours)
+            token, csrf = db.new_session(administrator["username"], cfg.session_hours)
             db.audit("Administrator signed in")
         response.set_cookie(
             COOKIE,
@@ -125,10 +152,26 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             samesite="strict",
             path="/",
         )
-        return {"authenticated": True, "username": cfg.admin_username, "csrf_token": csrf}
+        return {
+            "authenticated": True, "username": administrator["username"], "csrf_token": csrf,
+            "must_change_credentials": administrator["must_change_credentials"],
+        }
+
+    @app.post("/api/account/setup")
+    def complete_setup(payload: AccountSetup, request: Request, response: Response, current=Depends(signed_in)):
+        with request.app.state.login_lock:
+            completed = request.app.state.db.complete_initial_setup(
+                request.cookies.get(COOKIE), payload.username, hash_password(payload.password)
+            )
+            if not completed:
+                raise HTTPException(409, "Initial account setup is already complete or your session expired. Sign in again.")
+        response.delete_cookie(
+            COOKIE, path="/", secure=request.app.state.config.cookie_secure, httponly=True, samesite="strict"
+        )
+        return {"ok": True}
 
     @app.post("/api/logout")
-    def logout(request: Request, response: Response, current=Depends(authenticated)):
+    def logout(request: Request, response: Response, current=Depends(signed_in)):
         request.app.state.db.delete_session(request.cookies[COOKIE])
         response.delete_cookie(
             COOKIE, path="/", secure=request.app.state.config.cookie_secure, httponly=True, samesite="strict"

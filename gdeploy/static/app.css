@@ -303,6 +303,75 @@ code,.mono {
   line-height:1.6;
   margin:22px 0 0
 }
+.first-login-hint {
+  margin:22px 0 0;
+  padding:13px 15px;
+  color:var(--muted);
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:8px;
+  font-size:11px;
+  line-height:1.7
+}
+.first-login-hint strong {
+  color:var(--text)
+}
+.first-login-hint code {
+  color:var(--accent)
+}
+.setup-screen {
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:42px 20px;
+  background:radial-gradient(ellipse at 50% 10%,#23443955,transparent 65%),var(--bg)
+}
+.setup-card {
+  width:100%;
+  max-width:520px;
+  padding:34px;
+  border:1px solid var(--border-light);
+  border-radius:16px;
+  background:var(--panel);
+  box-shadow:0 18px 60px #0003
+}
+.setup-card>.brand {
+  margin-bottom:35px
+}
+.setup-form h1 {
+  margin:13px 0;
+  font-size:29px
+}
+.setup-form>.muted {
+  font-size:13px;
+  line-height:1.7;
+  margin-bottom:25px
+}
+.setup-form .field {
+  margin-bottom:20px
+}
+.setup-note {
+  margin:15px 0 8px;
+  color:var(--muted);
+  font-size:11px;
+  text-align:center
+}
+@media(max-width:430px) {
+  .setup-screen {
+    align-items:flex-start;
+    padding:18px 12px
+  }
+  .setup-card {
+    padding:25px 20px
+  }
+  .setup-card>.brand {
+    margin-bottom:28px
+  }
+  .setup-form h1 {
+    font-size:25px
+  }
+}
 .app-shell {
   display:flex;
   min-height:100vh
