@@ -4,6 +4,10 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+### Fixed
+
+- Query draft releases directly through GraphQL to avoid GitHub release-list replication delays immediately after creation. API errors and incomplete responses continue to stop publication safely.
+
 ## [0.1.1] - 2026-09-29
 
 ### Added
