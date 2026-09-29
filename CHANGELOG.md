@@ -4,6 +4,22 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-29
+
+### Added
+
+- First complete packaged release of GDeploy, including the application introduced in 0.1.0, the versioned Docker image, downloadable image archive and Ubuntu installation walkthrough.
+
+### Fixed
+
+- Detect draft releases using GitHub's authenticated release listing. GitHub's release-by-tag lookup can report a draft as missing, which stopped the initial 0.1.0 publication after its image and archive tests passed.
+- Preserve published-version protection and handle paginated release history when preparing future iterations.
+
+### Compatibility and validation
+
+- Same application configuration and database format as 0.1.0; preserve the existing encryption key and data volume if upgrading from source.
+- Docker host platform: `linux/amd64`. Live ESXi deployment still requires the lab acceptance checks described in the installation guide.
+
 ## [0.1.0] - 2026-09-29
 
 ### Added

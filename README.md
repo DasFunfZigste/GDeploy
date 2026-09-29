@@ -23,7 +23,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.1.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.1.1` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 

@@ -1,6 +1,6 @@
 # Install GDeploy from a release
 
-This guide installs **GDeploy 0.1.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. The prebuilt image is `ghcr.io/dasfunfzigste/gdeploy:0.1.0`; you do not need to clone the source, build the image, or install Python on the host. GDeploy provisions **Ubuntu Server 24.04 LTS amd64** guests on standalone **ESXi 8.0 Update 3**.
+This guide installs **GDeploy 0.1.1** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. The prebuilt image is `ghcr.io/dasfunfzigste/gdeploy:0.1.1`; you do not need to clone the source, build the image, or install Python on the host. GDeploy provisions **Ubuntu Server 24.04 LTS amd64** guests on standalone **ESXi 8.0 Update 3**.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -76,7 +76,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.1.0
+GDEPLOY_VERSION=0.1.1
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -102,17 +102,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.1.0
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.1.1
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.1.0`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.1.1`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.1.0
+GDEPLOY_VERSION=0.1.1
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -161,7 +161,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.1.1 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -228,7 +228,7 @@ Use public certificates in this trust bundle; it does not require CA private key
 
 If a deployment fails, inspect its errors and the ESXi task/console state. **Delete & redeploy** requires the deployment name as confirmation and permanently deletes the VMs and disks owned by that deployment before trying again. It creates fresh credentials. Application data on those disks is also deleted.
 
-This is an initial lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.1.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is an initial lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.1.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
@@ -250,7 +250,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.0
+  ghcr.io/dasfunfzigste/gdeploy:0.1.1
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -267,7 +267,7 @@ To refresh `docker.env` from an existing `.env` without regenerating credentials
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.1.1 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 
