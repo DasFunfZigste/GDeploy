@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import re
 import ssl
 import time
@@ -22,6 +23,8 @@ from urllib.parse import quote, urlsplit
 import requests
 from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim, vmodl
+
+from .tls import CertificateError, PinnedCertificateAdapter, certificate_context
 
 
 class VMwareError(RuntimeError):
@@ -39,6 +42,8 @@ def _guarded(action: str) -> Callable:
         def wrapped(self: "ESXiClient", *args: Any, **kwargs: Any) -> Any:
             try:
                 self._require_worker()
+                if self._tls_context is not None:
+                    self._tls_context.ensure_valid()
                 return method(self, *args, **kwargs)
             except VMwareError:
                 raise
@@ -106,7 +111,9 @@ class ESXiClient:
     POLL_INTERVAL = 1.0
     UPLOAD_TIMEOUT = (15, 120)
 
-    def __init__(self, host: str, username: str, password: str, verify_tls: bool = True):
+    def __init__(
+        self, host: str, username: str, password: str, verify_tls: bool = True, *, trusted_certificate: str | None = None
+    ):
         self.host, self.port, self._origin = self._parse_host(host)
         if not isinstance(username, str) or not username.strip() or not isinstance(password, str) or not password:
             raise VMwareError("An ESXi username and password are required.")
@@ -114,7 +121,9 @@ class ESXiClient:
             raise VMwareError("TLS verification must be true or false.")
         self.username = username
         self._password = password
-        self.verify_tls = verify_tls
+        self.verify_tls = True if trusted_certificate is not None else verify_tls
+        self._trusted_certificate = trusted_certificate
+        self._tls_context = None
         self._si: Any = None
         self._content: Any = None
         self._host: Any = None
@@ -173,8 +182,11 @@ class ESXiClient:
         raise VMwareError("Blocking ESXi operations must run in a worker thread.")
 
     def _safe_error(self, exc: BaseException) -> str:
-        if isinstance(exc, (requests.exceptions.SSLError, ssl.SSLError)):
-            return "TLS certificate verification or negotiation failed. Install the ESXi CA certificate or review the TLS setting."
+        if isinstance(exc, (requests.exceptions.SSLError, ssl.SSLError, CertificateError)):
+            return (
+                "TLS certificate verification or negotiation failed. Inspect and trust the current ESXi certificate "
+                "or install its CA certificate. Renew expired certificates before connecting."
+            )
         if isinstance(exc, vim.fault.InvalidLogin):
             return "ESXi rejected the configured credentials."
         if isinstance(exc, (requests.exceptions.Timeout, TimeoutError)):
@@ -211,7 +223,11 @@ class ESXiClient:
     def connect(self) -> "ESXiClient":
         if self._si is not None:
             return self
-        context = ssl.create_default_context() if self.verify_tls else ssl._create_unverified_context()
+        if self._trusted_certificate is not None:
+            self._tls_context = certificate_context(self._trusted_certificate, hostname=self.host, port=self.port)
+            context = self._tls_context
+        else:
+            context = ssl.create_default_context() if self.verify_tls else ssl._create_unverified_context()
         try:
             self._si = SmartConnect(
                 host=self.host,
@@ -237,6 +253,12 @@ class ESXiClient:
                 raise VMwareError("The ESXi host is in maintenance mode.")
             self._http = requests.Session()
             self._http.trust_env = False
+            if self._tls_context is not None:
+                adapter = PinnedCertificateAdapter(self._tls_context)
+                # Mount both schemes so accidental HTTP or redirected endpoints
+                # fail before a session cookie can leave this trusted endpoint.
+                self._http.mount("https://", adapter)
+                self._http.mount("http://", adapter)
             return self
         except Exception:
             self.disconnect()
@@ -349,13 +371,18 @@ class ESXiClient:
         }
         self._make_directory(datastore, str(PurePosixPath(remote_path).parent))
         assert self._http is not None
+        verify = self.verify_tls
+        if verify and self._trusted_certificate is None:
+            # Keep environment proxies disabled while honoring the explicitly
+            # configured CA bundle; pinned uploads must retain verify=True.
+            verify = os.environ.get("REQUESTS_CA_BUNDLE") or True
         with local_path.open("rb") as source:
             response = self._http.put(
                 f"{self._origin}/folder/{quote(remote_path, safe='/')}",
                 params={"dcPath": self._dc.name, "dsName": datastore},
                 data=source,
                 headers=headers,
-                verify=self.verify_tls,
+                verify=verify,
                 timeout=self.UPLOAD_TIMEOUT,
                 allow_redirects=False,
             )

@@ -313,39 +313,189 @@
   }
   function renderSettings() {
     const settings = state.settings || {};
-    const host = el('input', {id: 'esxi-host', name: 'host', required: true, value: settings.host || '', placeholder: 'esxi.example.com', autocomplete: 'off', spellcheck: 'false'});
+    const viewEpoch = state.routeEpoch;
+    const hostKey = value => String(value || '').trim().toLowerCase();
+    const host = el('input', {id: 'esxi-host', name: 'host', required: true, maxlength: 253, value: settings.host || '', placeholder: 'esxi.example.com', autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'esxi-host-help'});
     const username = el('input', {id: 'esxi-username', name: 'username', required: true, value: settings.username || '', placeholder: 'Your ESXi service account', autocomplete: 'off', spellcheck: 'false'});
     const password = el('input', {id: 'esxi-password', name: 'password', type: 'password', required: !settings.configured, placeholder: settings.configured ? 'Leave blank to keep the saved password' : 'ESXi account password', autocomplete: 'new-password'});
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
     const resultBox = el('div', {hidden: true});
+    const certificateError = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+    const certificateStatus = el('p', {class: 'certificate-status-text', role: 'status', 'aria-live': 'polite'});
+    const certificateDetails = el('div', {id: 'esxi-certificate-details'});
+    let certificate = settings.certificate_trust || null;
+    let certificateHost = hostKey(host.value);
+    let certificateSource = 'saved';
+    let certificateRequest = 0;
+    let certificateBusy = '';
+    let connectionBusy = '';
+    let fingerprintConfirmed = false;
+    let trustButton = null;
+    let removeButton = null;
+    let comparison = null;
+    const currentView = () => form.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const currentCertificate = () => certificate && certificateHost === hostKey(host.value);
+    const certificateUsable = () => {
+      if (!currentCertificate() || certificate.can_trust !== true || !certificate.fingerprint_sha256) return false;
+      const beginning = Date.parse(certificate.valid_from), ending = Date.parse(certificate.valid_until);
+      return (!Number.isFinite(beginning) || beginning <= Date.now()) && (!Number.isFinite(ending) || ending > Date.now());
+    };
+    const certificateDate = value => {
+      const parsed = new Date(value);
+      return value && !Number.isNaN(parsed.getTime()) ? new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}).format(parsed) : 'Not available';
+    };
+    function syncControls() {
+      const busy = Boolean(connectionBusy || certificateBusy);
+      const identityChanged = hostKey(host.value) !== hostKey(settings.host) || username.value.trim() !== (settings.username || '');
+      const lockInputs = Boolean(connectionBusy || ['trust', 'remove'].includes(certificateBusy));
+      host.disabled = lockInputs; username.disabled = lockInputs; password.disabled = lockInputs;
+      password.required = !settings.configured || identityChanged;
+      save.disabled = busy;
+      test.disabled = busy || !settings.configured || identityChanged || Boolean(password.value);
+      retrieve.disabled = busy || !host.value.trim();
+      if (trustButton) trustButton.disabled = busy || !fingerprintConfirmed || !certificateUsable();
+      if (removeButton) removeButton.disabled = busy;
+      if (comparison) comparison.disabled = busy || !certificateUsable();
+      certificatePanel.setAttribute('aria-busy', certificateBusy ? 'true' : 'false');
+    }
+    function renderCertificate() {
+      trustButton = null; removeButton = null; comparison = null;
+      if (!currentCertificate()) {
+        certificateDetails.replaceChildren(el('p', {class: 'certificate-empty'}, 'Retrieve the certificate using only the host address. No ESXi username or password is sent.'));
+        return;
+      }
+      const cert = certificate;
+      const trusted = cert.trusted === true;
+      const changed = Boolean(cert.trusted_fingerprint_sha256 && cert.trusted_fingerprint_sha256 !== cert.fingerprint_sha256);
+      const detail = (label, value, full = false) => el('div', {class: full ? 'certificate-detail-wide' : ''}, el('dt', {}, label), el('dd', {}, value));
+      const names = values => Array.isArray(values) && values.length ? values.join(', ') : 'None listed';
+      const metadata = el('dl', {class: 'certificate-metadata'},
+        detail('SHA-256 fingerprint', el('code', {class: 'certificate-fingerprint', tabindex: '0', 'aria-label': 'Certificate SHA-256 fingerprint'}, cert.fingerprint_sha256 || 'Not available'), true),
+        detail('Subject', cert.subject || 'Not available', true), detail('Issuer', cert.issuer || 'Not available', true),
+        detail('Valid from', certificateDate(cert.valid_from)), detail('Valid until', certificateDate(cert.valid_until)),
+        detail('DNS names', names(cert.dns_names)), detail('IP addresses', names(cert.ip_addresses)));
+      if (trusted && cert.trusted_at) metadata.append(detail('Trust saved', certificateDate(cert.trusted_at), true));
+      const content = [el('div', {class: 'certificate-summary'}, el('span', {class: trusted ? 'status status-completed' : 'status'}, trusted ? 'Certificate trusted' : 'Trust not saved'), el('span', {class: 'certificate-endpoint'}, cert.endpoint || cert.host || host.value.trim())), metadata];
+      if (certificateSource === 'saved') content.push(el('p', {class: 'certificate-help'}, 'Showing the saved certificate. Retrieve it again to compare it with the certificate currently presented by this host.'));
+      if (changed) content.push(el('div', {class: 'alert alert-warning'}, el('strong', {}, 'This host is presenting a different certificate. '), 'Compare the new fingerprint with ESXi before replacing the saved trust.', el('div', {class: 'certificate-previous'}, 'Previously trusted SHA-256 fingerprint', el('code', {class: 'certificate-fingerprint'}, cert.trusted_fingerprint_sha256))));
+      if (!certificateUsable()) content.push(el('div', {class: 'alert alert-warning'}, cert.validation_error || 'This certificate is expired, not yet valid, or cannot be trusted. Correct the certificate on ESXi, then retrieve it again.'));
+      if (!trusted && certificateUsable()) {
+        comparison = el('input', {type: 'checkbox', id: 'certificate-fingerprint-confirmed', checked: fingerprintConfirmed, onChange: event => { fingerprintConfirmed = event.target.checked; syncControls(); }});
+        content.push(el('label', {class: 'certificate-comparison', for: 'certificate-fingerprint-confirmed'}, comparison, el('span', {}, 'I compared this SHA-256 fingerprint with the certificate shown by ESXi or another trusted source.')));
+        trustButton = button('Trust certificate', 'button-primary', async () => {
+          if (!currentView() || certificateBusy || connectionBusy || !fingerprintConfirmed || !certificateUsable() || certificate !== cert) return;
+          const requestedHost = host.value.trim(), request = ++certificateRequest;
+          certificateBusy = 'trust'; fingerprintConfirmed = false;
+          inlineError(certificateError, ''); certificateStatus.textContent = 'Checking the presented certificate and saving trust…';
+          setBusy(trustButton, 'Saving trust…'); syncControls();
+          try {
+            const result = await api('/api/settings/certificate/trust', {method: 'POST', body: {host: requestedHost, fingerprint_sha256: cert.fingerprint_sha256}});
+            if (!currentView() || request !== certificateRequest || hostKey(requestedHost) !== hostKey(host.value)) return;
+            certificate = result; certificateHost = hostKey(requestedHost); certificateSource = 'retrieved';
+            if (state.settings && hostKey(state.settings.host) === certificateHost) state.settings.certificate_trust = result;
+            state.inventory = null;
+            certificateStatus.textContent = 'Certificate trusted for this host. Save the connection details, then test the saved connection. No restart is needed.';
+          } catch (error) {
+            if (!currentView() || request !== certificateRequest) return;
+            certificate = null;
+            inlineError(certificateError, error.message);
+            certificateStatus.textContent = 'Trust was not saved. Retrieve the certificate again before reviewing its fingerprint.';
+          } finally {
+            if (currentView() && request === certificateRequest) { certificateBusy = ''; renderCertificate(); syncControls(); }
+          }
+        }, 'shield');
+      }
+      if (trusted || cert.trusted_fingerprint_sha256) {
+        removeButton = button('Remove trust', 'button-ghost', async () => {
+          if (!currentView() || certificateBusy || connectionBusy || certificate !== cert || !currentCertificate()) return;
+          const requestedHost = host.value.trim(), request = ++certificateRequest;
+          certificateBusy = 'remove'; fingerprintConfirmed = false;
+          inlineError(certificateError, ''); certificateStatus.textContent = 'Removing saved trust for this host…';
+          setBusy(removeButton, 'Removing trust…'); syncControls();
+          try {
+            await api('/api/settings/certificate', {method: 'DELETE', body: {host: requestedHost}});
+            if (!currentView() || request !== certificateRequest || hostKey(requestedHost) !== hostKey(host.value)) return;
+            certificate = null;
+            if (state.settings && hostKey(state.settings.host) === hostKey(requestedHost)) state.settings.certificate_trust = null;
+            state.inventory = null;
+            certificateStatus.textContent = 'Saved trust removed. Standard certificate authority verification remains enabled. Retrieve the certificate to review trust again.';
+          } catch (error) {
+            if (currentView() && request === certificateRequest) { inlineError(certificateError, error.message); certificateStatus.textContent = 'Saved trust could not be removed.'; }
+          } finally {
+            if (currentView() && request === certificateRequest) { certificateBusy = ''; renderCertificate(); syncControls(); }
+          }
+        });
+      }
+      if (trustButton || removeButton) content.push(el('div', {class: 'certificate-actions'}, trustButton, removeButton));
+      certificateDetails.replaceChildren(...content);
+    }
+    const retrieve = button('Retrieve certificate', 'button-small', async () => {
+      if (!currentView() || connectionBusy || certificateBusy || !host.reportValidity()) return;
+      const requestedHost = host.value.trim(), request = ++certificateRequest;
+      certificateBusy = 'inspect'; fingerprintConfirmed = false;
+      inlineError(certificateError, ''); resultBox.hidden = true;
+      certificateStatus.textContent = `Retrieving the certificate from ${requestedHost}…`;
+      setBusy(retrieve, 'Retrieving…'); syncControls();
+      try {
+        const result = await api('/api/settings/certificate/inspect', {method: 'POST', body: {host: requestedHost}});
+        if (!currentView() || request !== certificateRequest || hostKey(requestedHost) !== hostKey(host.value)) return;
+        certificate = result; certificateHost = hostKey(requestedHost); certificateSource = 'retrieved';
+        certificateStatus.textContent = result.trusted ? 'The presented certificate matches the saved trust for this host.' : 'Certificate retrieved. Compare its fingerprint with a trusted source before accepting it.';
+      } catch (error) {
+        if (currentView() && request === certificateRequest) { certificate = null; inlineError(certificateError, error.message); certificateStatus.textContent = 'The certificate could not be retrieved. Check the host address and HTTPS access on port 443.'; }
+      } finally {
+        if (currentView() && request === certificateRequest) {
+          certificateBusy = ''; retrieve.replaceChildren(icon('refresh'), 'Retrieve certificate'); renderCertificate(); syncControls();
+        }
+      }
+    }, 'refresh');
+    const certificatePanel = el('section', {class: 'certificate-panel', 'aria-labelledby': 'certificate-title', 'aria-busy': 'false'},
+      el('div', {class: 'certificate-heading'}, el('div', {}, el('h3', {id: 'certificate-title'}, icon('shield'), 'ESXi certificate'), el('p', {}, 'Review the host’s identity before trusting its connection.')), retrieve),
+      certificateError, certificateStatus, certificateDetails,
+      el('p', {class: 'certificate-help certificate-explanation'}, 'Trust is limited to this host and its exact certificate fingerprint. It supports self-signed certificates and IP/name mismatches. A changed certificate must be reviewed again; no container restart is needed.'));
     const save = button('Save connection', 'button-primary', null, 'check'); save.type = 'submit';
     const test = button('Test saved connection', '', async () => {
-      inlineError(errorBox, ''); resultBox.hidden = true; setBusy(test, 'Connecting…');
+      if (!currentView() || test.disabled) return;
+      inlineError(errorBox, ''); resultBox.hidden = true; connectionBusy = 'test'; setBusy(test, 'Connecting…'); syncControls();
       try {
-        const inventory = await api('/api/inventory'); state.inventory = inventory;
+        const inventory = await api('/api/inventory');
+        if (!currentView()) return;
+        state.inventory = inventory;
         resultBox.className = 'alert alert-success';
         resultBox.replaceChildren(el('strong', {}, `Connected to ${inventory.host?.name || settings.host}`), el('div', {class: 'inventory-summary'}, el('span', {}, `${inventory.host?.cpu_threads || 0} CPU threads`), el('span', {}, `${inventory.host?.memory_gb || 0} GB memory`), el('span', {}, `${inventory.datastores?.length || 0} datastores`), el('span', {}, `${inventory.networks?.length || 0} networks`)));
         resultBox.hidden = false;
-      } catch (error) { inlineError(errorBox, error.message); }
-      finally { test.disabled = !state.settings?.configured; test.replaceChildren(icon('refresh'), 'Test saved connection'); }
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally { if (currentView()) { connectionBusy = ''; test.replaceChildren(icon('refresh'), 'Test saved connection'); syncControls(); } }
     }, 'refresh');
-    test.disabled = !settings.configured;
     const form = el('form', {class: 'surface', onSubmit: async event => {
       event.preventDefault();
-      if (!form.reportValidity()) return;
-      inlineError(errorBox, ''); resultBox.hidden = true; setBusy(save, 'Saving…'); test.disabled = true;
+      if (!currentView() || connectionBusy || certificateBusy || !form.reportValidity()) return;
+      const payload = {host: host.value.trim(), username: username.value.trim(), password: password.value, verify_tls: true};
+      inlineError(errorBox, ''); resultBox.hidden = true; connectionBusy = 'save'; setBusy(save, 'Saving…'); syncControls();
       try {
-        await api('/api/settings', {method: 'PUT', body: {host: host.value.trim(), username: username.value.trim(), password: password.value, verify_tls: true}});
+        await api('/api/settings', {method: 'PUT', body: payload});
+        if (!currentView()) return;
         password.value = '';
-        state.settings = await api('/api/settings'); state.inventory = null;
-        if (state.route === 'settings') renderSettings();
+        const updated = await api('/api/settings');
+        if (!currentView()) return;
+        state.settings = updated; state.inventory = null;
+        renderSettings();
         notify('ESXi connection saved. Test the connection to check access.');
-      } catch (error) { inlineError(errorBox, error.message); }
-      finally { save.disabled = false; save.replaceChildren(icon('check'), 'Save connection'); test.disabled = !state.settings?.configured; }
-    }}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {}, 'Host credentials'), el('p', {}, 'GDeploy uses this account to provision and manage its VMs.')), settings.configured ? el('span', {class: 'status status-completed'}, 'Configured') : el('span', {class: 'status'}, 'Not configured')), el('div', {class: 'form-body'}, errorBox, resultBox, field('ESXi host', host, 'Use a hostname or IP address for your standalone ESXi host.'), field('Username', username, 'Use an account with the required VM, network, and datastore permissions.'), field('Password', password, settings.configured ? 'Changing the host or username requires entering its password again.' : 'Your saved password is never returned by the settings API.'), el('div', {class: 'secure-note'}, icon('shield'), el('div', {}, el('strong', {}, 'Certificate verification enabled'), 'The ESXi certificate must be trusted by GDeploy. Configure your certificate authority on the server if needed.'))), el('div', {class: 'form-footer'}, test, save));
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally { if (currentView()) { connectionBusy = ''; save.replaceChildren(icon('check'), 'Save connection'); syncControls(); } }
+    }}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {}, 'Host connection'), el('p', {}, 'Review the certificate, then save the account used to manage your VMs.')), settings.configured ? el('span', {class: 'status status-completed'}, 'Configured') : el('span', {class: 'status'}, 'Not configured')), el('div', {class: 'form-body'}, errorBox, resultBox, field('ESXi host', host, el('span', {id: 'esxi-host-help'}, 'Use a hostname or IP address, without a URL or port. ESXi HTTPS uses port 443.')), certificatePanel, field('Username', username, 'Use an account with the required VM, network, and datastore permissions.'), field('Password', password, settings.configured ? 'Changing the host or username requires entering its password again.' : 'Your saved password is never returned by the settings API.'), el('div', {class: 'secure-note'}, icon('shield'), el('div', {}, el('strong', {}, 'Certificate verification stays enabled'), 'Use the trusted certificate above or the certificate authorities configured on the GDeploy server.'))), el('div', {class: 'form-footer'}, test, save));
+    host.addEventListener('input', () => {
+      certificateRequest++; certificateBusy = ''; certificate = null; fingerprintConfirmed = false;
+      retrieve.replaceChildren(icon('refresh'), 'Retrieve certificate');
+      inlineError(certificateError, ''); inlineError(errorBox, ''); resultBox.hidden = true;
+      certificateStatus.textContent = host.value.trim() ? 'Host changed. Retrieve its certificate to review the current identity and saved trust.' : '';
+      renderCertificate(); syncControls();
+    });
+    for (const input of [username, password]) input.addEventListener('input', () => { resultBox.hidden = true; syncControls(); });
     const item = (ready, title, description, symbol) => el('div', {class: `setup-item ${ready ? 'ready' : ''}`}, icon(ready ? 'checkCircle' : symbol), el('div', {}, el('strong', {}, title), el('p', {}, description)));
     const readiness = el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Deployment prerequisites')), el('div', {class: 'setup-list'}, item(settings.configured, 'ESXi host', settings.configured ? 'Connection details saved. Use the connection test to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(settings.iso_configured, 'Ubuntu 24.04 installation media', settings.iso_configured ? 'Installation media configured. Preflight checks the file before deployment.' : 'Configure a local Ubuntu 24.04 live-server ISO on the GDeploy server.', 'disc'), item(settings.splunk_configured, 'Splunk installation package', settings.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Optional: configure a Splunk Enterprise Linux x86_64 .tgz package on the server.', 'layers')));
     page.replaceChildren(heading('ESXi connection', 'Connect your infrastructure and prepare for deployment.'), el('div', {class: 'settings-grid'}, form, el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Installation media and package paths are configured on the GDeploy server. Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.'))));
+    renderCertificate(); syncControls();
   }
   function field(label, input, hint) { return el('label', {class: 'field'}, el('span', {}, label), input, hint ? el('small', {}, hint) : null); }
   function renderDetail(data) {

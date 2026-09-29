@@ -1,6 +1,6 @@
 # Install GDeploy
 
-This guide installs **GDeploy 0.1.5** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.1.5` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions **Ubuntu Server 24.04 LTS amd64** guests on standalone **ESXi 8.0 Update 3**.
+This guide installs **GDeploy 0.2.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.2.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions **Ubuntu Server 24.04 LTS amd64** guests on standalone **ESXi 8.0 Update 3**.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -154,7 +154,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.1.5
+GDEPLOY_VERSION=0.2.0
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -180,17 +180,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.1.5
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.2.0
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.1.5`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.2.0`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.1.5
+GDEPLOY_VERSION=0.2.0
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -243,7 +243,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.5 \
+  ghcr.io/dasfunfzigste/gdeploy:0.2.0 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -285,30 +285,52 @@ LAN access works with the default binding. For HTTPS access, put the app behind 
 
 ## 6. Connect to ESXi and deploy your first VMs
 
-1. After completing the required first-sign-in account setup, open **ESXi connection** and enter the standalone ESXi 8.0 Update 3 hostname, username and password. Use the connection check to load inventory.
-2. Select **New deployment** and choose Ubuntu, Splunk, Elasticsearch and/or Kibana. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk runs independently.
-3. Enter each VM's name, CPU, RAM, disk size, datastore, port group and DHCP/static network settings.
-4. Run preflight, address any reported issues, and start deployment.
-5. Open the deployment to follow its stages and errors. When ready, use its application links and **Reveal credentials** panel for the VM passwords and application sign-in details.
+### Trust the certificate and connect
+
+After completing first-sign-in account setup:
+
+1. Open **ESXi connection** and enter the standalone ESXi 8.0 Update 3 hostname or IP address.
+2. Retrieve its certificate. The screen shows the **subject, issuer, SHA-256 fingerprint, validity dates and DNS/IP names** (subject alternative names).
+3. Compare the SHA-256 fingerprint with the certificate shown through a trusted ESXi management session or another independently trusted source. Retrieving a certificate alone does not establish the host's identity. Select **Trust certificate** once you have verified it.
+4. Enter and save the ESXi username/password, then test the connection to load inventory.
+
+The approval applies to the exact entered host/IP on HTTPS **443** and is saved in GDeploy's database. It remains available after restarting or replacing the container with the same data volume. This workflow needs **no CA file, `.env` edit or container restart**. If your ESXi certificate already validates with the system or configured private CA, you can save and test the connection without adding a certificate approval.
+
+Each new ESXi API or datastore-upload connection verifies the approved certificate exactly and checks its validity dates. Explicit approval supports a hostname or IP that is absent from the certificate's DNS/IP names. An expired, not-yet-valid, changed or renewed certificate blocks the connection; retrieve and review a replacement, then trust it before retrying. Approval for one address does not automatically cover another alias of the same server.
+
+You can remove the saved trust from **ESXi connection** to restore normal system/private CA verification. Trust changes apply to subsequent connections, including connections for existing deployments to that saved endpoint; an already-open connection may finish using the certificate it authenticated earlier.
+
+The settings API requires `verify_tls=true`. Connections also verify TLS when older saved settings or deployment snapshots contain `verify_tls=false`. If an earlier setup relied on disabling verification, approve its certificate here or configure a trusted CA before connecting. This does not rewrite stored passwords or settings.
+
+### Deploy your VMs
+
+1. Select **New deployment** and choose Ubuntu, Splunk, Elasticsearch and/or Kibana. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk runs independently.
+2. Enter each VM's name, CPU, RAM, disk size, datastore, port group and DHCP/static network settings.
+3. Run preflight, address any reported issues, and start deployment.
+4. Open the deployment to follow its stages and errors. When ready, use its application links and **Reveal credentials** panel for the VM passwords and application sign-in details.
 
 The OS username is **`gdeploy`** with a different generated password per VM. The web-app administrator password, guest OS passwords and application passwords are separate. The deployment's Credentials panel is the ongoing place to find guest and application details.
 
 The Docker host needs access to ESXi HTTPS **443** and guest SSH **22**. The guests need working DNS and outbound access to Ubuntu mirrors and the official Elastic package repository. Kibana needs access to Elasticsearch HTTPS **9200**; your browser needs access to Kibana **5601** or Splunk Web **8000**. GDeploy does not configure your firewall or switches. Prefer static IPs or DHCP reservations for application VMs because Kibana's configuration and Elasticsearch's certificate use Elasticsearch's assigned address.
 
-The ESXi account and license must permit vSphere API provisioning, datastore uploads and creation/deletion of the deployment's resources. Inventory access alone does not prove write permissions. Use the hostname on the ESXi certificate; certificate verification is enabled.
+The ESXi account and license must permit vSphere API provisioning, datastore uploads and creation/deletion of the deployment's resources. Inventory access alone does not prove write permissions. Certificate verification uses your approved certificate for that exact endpoint, or normal CA and hostname verification when no certificate is approved.
 
-For an ESXi certificate signed by a private CA, place a PEM trust bundle containing the normal public roots plus your trusted ESXi CA at `media/esxi-ca-bundle.pem`, with read access for UID 10001. Add these values to `.env` for Compose, or `docker.env` for plain Docker, then recreate the container:
+### Optional: configure a private CA manually
+
+To use CA verification instead of approving an individual certificate in the app, place a PEM trust bundle containing the normal public roots plus your trusted ESXi CA at `media/esxi-ca-bundle.pem`, with read access for UID 10001. Add these values to `.env` for Compose, or `docker.env` for plain Docker, then recreate the container:
 
 ```dotenv
 SSL_CERT_FILE=/media/esxi-ca-bundle.pem
 REQUESTS_CA_BUNDLE=/media/esxi-ca-bundle.pem
 ```
 
-Use public certificates in this trust bundle; it does not require CA private keys. A self-signed certificate must be explicitly trusted and still match the ESXi hostname.
+Use public certificates in this trust bundle; it does not require CA private keys. With this CA-based method, the ESXi hostname must match the certificate. Remove any saved certificate approval for that endpoint if you want these CA rules to determine trust.
+
+For datastore uploads using CA verification, `REQUESTS_CA_BUNDLE` is honored explicitly. Proxy environment settings remain disabled; a configured CA bundle does not enable an HTTP/HTTPS proxy.
 
 If a deployment fails, inspect its errors and the ESXi task/console state. **Delete & redeploy** requires the deployment name as confirmation and permanently deletes the VMs and disks owned by that deployment before trying again. It creates fresh credentials. Application data on those disks is also deleted.
 
-This is an initial lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.1.5/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is an initial lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.2.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
@@ -334,7 +356,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.5
+  ghcr.io/dasfunfzigste/gdeploy:0.2.0
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -352,7 +374,7 @@ For a manually configured installation, refresh `docker.env` from its existing c
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.5 \
+  ghcr.io/dasfunfzigste/gdeploy:0.2.0 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 
@@ -382,8 +404,10 @@ Common startup issues:
 | Container exits or remains unhealthy | Read `docker compose logs`; verify Compose is at least 2.24 and any explicit credential settings are complete. Preserve the volume and restore original missing/damaged keys from backup. |
 | `admin`/`admin` no longer signs in | After account setup, use the username and password you chose. Existing older installations retain their original credentials rather than adopting the new default. |
 | Media preflight fails | Check the exact filenames, recorded checksums and UID 10001's read access. |
-| ESXi connection fails | Check the hostname, port 443, certificate trust, credentials and API license/permissions. |
+| ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
+
+Version **0.2.0** adds an ESXi certificate-trust table without changing existing credentials or encryption keys. Back up the complete data volume to preserve approved certificates. If rolling back below **0.2.0**, older versions ignore these approvals and use their previous TLS settings, including any saved `verify_tls=false`. Review those settings and ensure certificate verification is enabled and trusts the intended host before using the older version. The approvals do not become CA certificates in older releases.
 
 Version **0.1.3** adds a persistent administrator account record to the existing database. On the first upgraded start, the record is initialized once from the existing credentials; later starts keep the database account. Existing random/custom credentials are preserved, and completed account setup is not overwritten by bootstrap or environment values.
 

@@ -11,6 +11,7 @@ import time
 import uuid
 from functools import lru_cache
 
+from .certificate_trust import certificate_endpoint
 from .guest import GuestConnectionError, GuestSession, build_seed_iso, generate_ssh_key
 from .vmware import ESXiClient
 
@@ -82,7 +83,15 @@ class DeploymentService:
     def client(self, settings):
         if not settings:
             raise DeploymentError("Configure the ESXi connection in Settings first.")
-        return self.client_factory(**settings)
+        options = dict(settings)
+        # Trust must use either the approved endpoint certificate or the CA
+        # store, including older deployment snapshots that disabled validation.
+        options["verify_tls"] = True
+        _, _, endpoint = certificate_endpoint(options["host"])
+        trusted = self.db.esxi_certificate(endpoint)
+        if trusted:
+            options["trusted_certificate"] = trusted["pem"]
+        return self.client_factory(**options)
 
     def inventory(self):
         settings = self.db.settings()

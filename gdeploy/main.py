@@ -13,9 +13,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .certificate_trust import CertificateTrust, CertificateTrustError
 from .config import Config, hash_password, verify_password
 from .db import Database
-from .models import AccountSetup, ConnectionSettings, DeploymentSpec, Login, RedeployRequest
+from .models import (
+    AccountSetup,
+    CertificateApproval,
+    CertificateHost,
+    ConnectionSettings,
+    DeploymentSpec,
+    Login,
+    RedeployRequest,
+)
 from .service import DeploymentError, DeploymentService
 
 STATIC = Path(__file__).parent / "static"
@@ -31,6 +40,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             app.state.config.admin_username, app.state.config.admin_password_hash
         )
         app.state.service = service_factory(app.state.db, app.state.config)
+        app.state.certificates = CertificateTrust(app.state.db)
         app.state.login_lock = threading.Lock()
         if start_worker:
             app.state.service.start()
@@ -100,6 +110,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.exception_handler(DeploymentError)
     async def deployment_error(request, exc):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(CertificateTrustError)
+    async def certificate_error(request, exc):
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
     @app.get("/api/health")
     def health(request: Request):
@@ -185,8 +199,9 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         return {
             "host": saved.get("host", ""),
             "username": saved.get("username", ""),
-            "verify_tls": saved.get("verify_tls", True),
+            "verify_tls": True,
             "configured": bool(saved),
+            "certificate_trust": request.app.state.certificates.saved(saved["host"]) if saved else None,
             "iso_configured": os.access(cfg.ubuntu_iso, os.R_OK)
             and cfg.ubuntu_iso.is_file()
             and bool(cfg.ubuntu_sha256),
@@ -210,6 +225,19 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.get("/api/inventory")
     def inventory(request: Request, current=Depends(authenticated)):
         return request.app.state.service.inventory()
+
+    @app.post("/api/settings/certificate/inspect")
+    def inspect_certificate(payload: CertificateHost, request: Request, current=Depends(authenticated)):
+        return request.app.state.certificates.inspect(payload.host)
+
+    @app.post("/api/settings/certificate/trust")
+    def trust_certificate(payload: CertificateApproval, request: Request, current=Depends(authenticated)):
+        return request.app.state.certificates.trust(payload.host, payload.fingerprint_sha256)
+
+    @app.delete("/api/settings/certificate")
+    def remove_certificate(payload: CertificateHost, request: Request, current=Depends(authenticated)):
+        request.app.state.certificates.remove(payload.host)
+        return {"ok": True}
 
     @app.get("/api/deployments")
     def deployments(request: Request, current=Depends(authenticated)):

@@ -4,6 +4,26 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
+### Added
+
+- Retrieve and review the ESXi host certificate from **ESXi connection**, including subject, issuer, SHA-256 fingerprint, validity dates and DNS/IP names, then explicitly trust it for that exact host endpoint.
+- Store approved certificates in the app database and use them for both ESXi API connections and datastore uploads. No CA file, environment edit or container restart is required. The optional manual private-CA setup remains available.
+- Enforce the exact approved certificate and valid dates. Changed or renewed certificates require review and approval again. Removing an approval restores normal system/private CA verification.
+
+### Fixed
+
+- Honor `REQUESTS_CA_BUNDLE` for datastore uploads that use normal CA verification, while continuing to ignore proxy environment settings.
+
+### Installation and compatibility
+
+- Compare the displayed fingerprint against an independently trusted ESXi source before the first approval; fetching a certificate alone does not establish host identity. Endpoint-specific approval also supports host/IP names absent from the certificate's subject alternative names.
+- The new trust table is additive. Existing administrator credentials, encryption keys and deployment data are preserved; include the full data volume in backups to retain approvals.
+- The settings API now requires `verify_tls=true`, and new connections always verify TLS, including those using older saved settings or deployment snapshots with `verify_tls=false`. Approve the host certificate or configure a trusted CA for those installations; stored passwords and settings are not rewritten.
+- Existing deployment snapshots retain their host credentials and use the current certificate approval for that endpoint on new connections. An already-open connection may finish with its previously authenticated certificate.
+- Versions before **0.2.0** ignore saved certificate approvals and use their previous TLS settings, including any saved `verify_tls=false`. Review those settings and ensure certificate verification is enabled and trusts the intended host before rolling back.
+
 ## [0.1.5] - 2026-09-29
 
 ### Changed

@@ -34,26 +34,36 @@ class AccountSetup(StrictModel):
         return self
 
 
-class ConnectionSettings(StrictModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+class CertificateHost(StrictModel):
     host: str = Field(min_length=1, max_length=253)
-    username: str = Field(min_length=1, max_length=100)
-    password: str = Field(default="", max_length=1024)
-    verify_tls: bool = True
-
-    @field_validator("host", "username")
-    @classmethod
-    def trim_connection_fields(cls, value):
-        return value.strip()
 
     @model_validator(mode="after")
     def validate_host(self):
         try:
             ipaddress.ip_address(self.host)
         except ValueError:
-            if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", self.host):
+            if not all(
+                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", part)
+                for part in self.host.rstrip(".").split(".")
+            ):
                 raise ValueError("ESXi host must be a hostname or IP address, without a URL, port or path.")
         return self
+
+
+class CertificateApproval(CertificateHost):
+    fingerprint_sha256: str = Field(pattern=r"^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$")
+
+
+class ConnectionSettings(CertificateHost):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(default="", max_length=1024)
+    verify_tls: Literal[True] = True
+
+    @field_validator("host", "username")
+    @classmethod
+    def trim_connection_fields(cls, value):
+        return value.strip()
 
 
 class VMSpec(StrictModel):

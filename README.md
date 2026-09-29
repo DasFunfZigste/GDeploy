@@ -45,6 +45,7 @@ Keep your existing `.env` and data volume. A fresh installation starts with `adm
 - A guided form for applications, VM names, vCPUs, RAM, disks, datastore, port group, DHCP or static IPv4.
 - Optional plain Ubuntu VM alongside the application roles.
 - Media checksum, inventory, name, capacity and network-input checks before provisioning.
+- Retrieve, inspect and explicitly trust an ESXi certificate from the connection screen, with no container restart.
 - Unattended Ubuntu installation using a remastered, bootable ISO and NoCloud autoinstall configuration.
 - Unique generated guest/application credentials, encrypted storage and an explicit **Credentials** view in every deployment.
 - Stage progress, persisted events and deployment history. Interrupted work is identified on restart.
@@ -59,7 +60,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.1.5` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.2.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -69,7 +70,7 @@ See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/REL
 2. Place your vendor-verified **Ubuntu Server 24.04 amd64 live-server ISO** at `media/ubuntu.iso`. For Splunk, also place your licensed **Splunk Enterprise Linux x86_64 .tgz** at `media/splunk.tgz`. Verify downloads against the publishers' checksums before proceeding. GDeploy does not download Splunk or supply a license. On Linux, the container's UID 10001 must be able to read this bind mount: use directory mode 0755 and installer-file mode 0644, or equivalent ACLs. Keep secrets out of this public-media directory.
 3. Run `sha256sum media/ubuntu.iso` (and `sha256sum media/splunk.tgz` if used). Create or edit the optional `.env` and set `GDEPLOY_UBUNTU_SHA256` and, if used, `GDEPLOY_SPLUNK_SHA256` to those verified values. Keep one value per setting and preserve any existing contents. For an automatic installation, leave `GDEPLOY_SECRET_KEY` and `GDEPLOY_ADMIN_PASSWORD_HASH` absent or empty; the app reuses its saved encryption key and account in the data volume. Do not generate a replacement key.
 4. Apply the media settings with `docker compose up --build -d --wait --force-recreate`.
-5. Open **ESXi connection**, save your ESXi hostname, username and password, and use the connection check to load inventory.
+5. Open **ESXi connection** and enter your ESXi hostname or IP. If its certificate is not already trusted, retrieve it, compare its SHA-256 fingerprint against a trusted ESXi source, and select **Trust certificate**. Then save your ESXi username/password and test the connection to load inventory.
 6. Select **New deployment**, choose application roles, and configure each separate VM. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
 
 If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
@@ -80,14 +81,20 @@ The default Compose binding is `0.0.0.0:8000`. You can optionally restrict the b
 
 - Use a standalone ESXi 8.0 U3 endpoint. vCenter, distributed switches and clusters are outside this release.
 - The ESXi account needs permission to read inventory, create/configure/power/delete VMs, allocate datastore space and manage the deployment's ISO files. ESXi licensing must permit provisioning through the vSphere API. Inventory checks prove authentication and read access; actual deployment operations validate write privileges and license capabilities.
-- The app connects to ESXi over HTTPS **443** for both API operations and datastore uploads. TLS verification is enabled by default. Connect using the hostname on the certificate.
+- The app connects to ESXi over HTTPS **443** for both API operations and datastore uploads. It verifies the certificate using the exact certificate you approved for that endpoint, or normal system/private CA trust when no certificate is approved.
 - The app must reach guests on SSH **22**. Guests need DNS and HTTPS/HTTP access to Ubuntu mirrors and the official Elastic package repository; installation cannot complete on an isolated network without corresponding mirror support.
 - Kibana must reach Elasticsearch on HTTPS **9200**. Your browser needs access to Kibana **5601** and Splunk Web **8000**. Splunk's local verification uses its management API on **8089**. GDeploy does not configure your network firewall or switch.
 - Use static addresses or DHCP reservations for application VMs. Elasticsearch's certificate and Kibana's configuration use the assigned Elasticsearch IP; a later DHCP address change requires reconfiguration.
 - Static networking takes an IPv4 CIDR address, gateway and DNS servers. Preflight checks syntax and in-app reservations; it cannot guarantee an address is unused elsewhere on your LAN.
 - ESXi and guest time should be synchronized for TLS.
 
-For an ESXi certificate signed by a private CA, make a PEM bundle containing the normal public roots plus that CA and mount it read-only (for example under `/media/esxi-ca-bundle.pem`). Set both `SSL_CERT_FILE=/media/esxi-ca-bundle.pem` and `REQUESTS_CA_BUNDLE=/media/esxi-ca-bundle.pem` in `.env`, then recreate the container. This allows the Python SOAP client and HTTPS uploader to validate the same certificate chain. Do not commit private keys.
+### Trust an ESXi certificate in the app
+
+On **ESXi connection**, retrieve the certificate for the entered host. Review its subject, issuer, validity dates, DNS/IP names and **SHA-256 fingerprint**. Compare that fingerprint with the certificate shown through a trusted ESXi management session before selecting **Trust certificate**; retrieving a certificate alone does not establish the host's identity. Save the connection credentials and test the connection.
+
+The approval is stored in the app database for that exact host/IP and survives restarts. API connections and datastore uploads require the approved certificate and valid dates. A changed or renewed certificate must be retrieved, reviewed and trusted again. Explicit approval also supports an ESXi IP address that is absent from the certificate's DNS/IP names. Removing trust in the same screen restores normal system/private CA verification. No CA file, environment edit or restart is needed for this workflow.
+
+As an optional alternative for a private CA, make a PEM bundle containing the normal public roots plus that CA and mount it read-only (for example under `/media/esxi-ca-bundle.pem`). Set both `SSL_CERT_FILE=/media/esxi-ca-bundle.pem` and `REQUESTS_CA_BUNDLE=/media/esxi-ca-bundle.pem` in `.env`, then recreate the container. This allows the Python SOAP client and HTTPS uploader to validate the same certificate chain and hostname. Do not commit private keys.
 
 ## Credentials and application behavior
 
@@ -111,7 +118,7 @@ A timed-out ESXi operation can still be running on the host. Inspect its tasks b
 
 ## Persistence and operation
 
-The Compose data volume mounted at `/data` contains the SQLite administrator account and history, encrypted secrets and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. Installation media is removed from the datastore after the OS is ready. Source files in `media/` are never modified. Deployment history is retained after cleanup.
+The Compose data volume mounted at `/data` contains the SQLite administrator account, approved ESXi certificates and history, encrypted secrets and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. Installation media is removed from the datastore after the OS is ready. Source files in `media/` are never modified. Deployment history is retained after cleanup.
 
 Run **one app container with one worker** against a data volume. Jobs are serialized; this release does not support multiple replicas. The container runs without root privileges or Linux capabilities, with a read-only root filesystem. Stop the app before taking a consistent backup of its complete data volume, including automatic bootstrap files, and any existing `.env`/`docker.env`. Store your chosen web-app credentials in your password manager; the private bootstrap credentials file is not a substitute for a backup. Do not use `docker compose down -v` unless you intend to erase the app's database and credentials.
 

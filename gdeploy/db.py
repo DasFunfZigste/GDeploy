@@ -28,6 +28,7 @@ class Database:
             conn.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS esxi_certificates (endpoint TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS deployments (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
                     stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -79,6 +80,28 @@ class Database:
         with self.connect() as c:
             c.execute("INSERT OR REPLACE INTO settings VALUES(1,?)", (self.seal(value),))
         self.audit("ESXi connection settings updated")
+
+    def esxi_certificate(self, endpoint):
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM esxi_certificates WHERE endpoint=?", (endpoint,)).fetchone()
+        return self.unseal(row[0]) if row else None
+
+    def trust_esxi_certificate(self, endpoint, pem, fingerprint):
+        value = {"pem": pem, "trusted_at": now()}
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO esxi_certificates VALUES(?,?)", (endpoint, self.seal(value))
+            )
+            connection.execute(
+                "INSERT INTO audit VALUES(?,?)",
+                (now(), f"ESXi certificate trusted for {endpoint}; SHA-256 {fingerprint}"),
+            )
+        return value
+
+    def remove_esxi_certificate(self, endpoint):
+        with self.connect() as connection:
+            connection.execute("DELETE FROM esxi_certificates WHERE endpoint=?", (endpoint,))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), f"ESXi certificate trust removed for {endpoint}"))
 
     def audit(self, action):
         with self.connect() as c:
