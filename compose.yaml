@@ -1,0 +1,23 @@
+services:
+  gdeploy:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - gdeploy-data:/data
+      - ./media:/media:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  gdeploy-data:

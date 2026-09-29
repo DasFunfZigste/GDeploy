@@ -1,0 +1,33 @@
+name: Test and container smoke check
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.lock && pip install -e '.[test]'
+      - run: pytest -q
+      - run: ruff check .
+      - run: docker build -t gdeploy:test .
+      - name: Check non-root container startup
+        run: |
+          python scripts/configure.py
+          docker compose config --quiet
+          docker compose up --build -d
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/api/health; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:8000/api/health
+          docker compose exec -T gdeploy id -u | awk '$0 != "10001" {exit 1}'
+      - name: Container diagnostics
+        if: failure()
+        run: docker compose logs || true

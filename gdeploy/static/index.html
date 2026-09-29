@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#101718">
+  <title>GDeploy — VM provisioning</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%234ad9b8'/%3E%3Cpath d='M28 14H17l-6 6 6 6h11v-8h-8v4h4' fill='none' stroke='%23101718' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div id="boot" class="boot"><div class="brand-mark" aria-hidden="true">G</div><p>Opening your workspace<span class="loading-dots">…</span></p></div>
+  <section id="login-screen" class="login-screen" hidden aria-label="Sign in">
+    <div class="login-story">
+      <a class="brand" href="/" aria-label="GDeploy home"><span class="brand-mark" aria-hidden="true">G</span><span>GDeploy<span class="brand-dot">.</span></span></a>
+      <div class="login-story-body">
+        <span class="eyebrow"><span class="status-dot"></span> ESXi PROVISIONING, SIMPLIFIED</span>
+        <h1>From bare metal<br>to ready to work.</h1>
+        <p>Create your virtual machines, install Ubuntu, and connect your software in one deliberate workflow.</p>
+        <div class="pipeline-art" aria-hidden="true"><div><span>01</span><i class="art-server"></i><strong>Provision</strong></div><b>→</b><div><span>02</span><i class="art-terminal">&gt;_</i><strong>Install</strong></div><b>→</b><div><span>03</span><i class="art-check">✓</i><strong>Ready</strong></div></div>
+        <div class="login-capabilities"><span>Ubuntu 24.04 LTS</span><span>Elastic Stack</span><span>Splunk</span></div>
+      </div>
+      <p class="login-footnote">Your infrastructure. Your deployment workspace.</p>
+    </div>
+    <div class="login-form-side">
+      <form id="login-form" class="login-form">
+        <span class="eyebrow">WELCOME TO GDEPLOY</span>
+        <h2>Sign in to your workspace</h2>
+        <p class="muted">Use the administrator account configured for this instance.</p>
+        <div id="login-error" class="alert alert-error" role="alert" hidden></div>
+        <label class="field"><span>Username</span><input id="login-username" name="username" autocomplete="username" required autofocus placeholder="Your administrator username"></label>
+        <label class="field"><span>Password</span><input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></label>
+        <button id="login-submit" type="submit" class="button button-primary button-full">Sign in <span aria-hidden="true">→</span></button>
+        <p class="login-help">Account access is managed by your GDeploy administrator.</p>
+      </form>
+    </div>
+  </section>
+  <div id="app" class="app-shell" hidden>
+    <aside class="sidebar" aria-label="Main navigation">
+      <a class="brand" href="#deployments"><span class="brand-mark" aria-hidden="true">G</span><span>GDeploy<span class="brand-dot">.</span></span></a>
+      <span class="nav-label">WORKSPACE</span>
+      <nav>
+        <a class="nav-link" data-nav="deployments" href="#deployments"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Deployments</a>
+        <a class="nav-link" data-nav="settings" href="#settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M15 7h3M15 17h3" stroke-linecap="round"/></svg>ESXi connection</a>
+      </nav>
+      <div class="sidebar-bottom"><div class="platform-note"><span class="status-dot"></span><span>Ubuntu 24.04 LTS<small>Dedicated VMs for each role</small></span></div><div class="account"><span class="avatar" id="account-avatar">A</span><span id="account-name">Administrator</span><button id="logout" class="icon-button" aria-label="Sign out" title="Sign out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4M14 8l4 4-4 4M8 12h10"/></svg></button></div></div>
+    </aside>
+    <div class="workspace"><header class="topbar"><div><span class="workspace-label">Infrastructure</span><span class="breadcrumb-separator">/</span><span id="breadcrumb">Deployments</span></div><span class="instance-badge"><span class="status-dot"></span>Self-hosted workspace</span></header><main id="main-content" tabindex="-1"><div id="global-alert" class="alert" role="alert" hidden></div><div id="page"></div></main><footer class="workspace-footer"><span>GDeploy</span><span>Provision with purpose.</span></footer></div>
+  </div>
+  <dialog id="wizard-dialog" class="wizard-dialog" aria-labelledby="wizard-title"></dialog>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

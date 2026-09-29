@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import ipaddress
+import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class Login(StrictModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=1024)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+
+class ConnectionSettings(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    host: str = Field(min_length=1, max_length=253)
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(default="", max_length=1024)
+    verify_tls: bool = True
+
+    @field_validator("host", "username")
+    @classmethod
+    def trim_connection_fields(cls, value):
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_host(self):
+        try:
+            ipaddress.ip_address(self.host)
+        except ValueError:
+            if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", self.host):
+                raise ValueError("ESXi host must be a hostname or IP address, without a URL, port or path.")
+        return self
+
+
+class VMSpec(StrictModel):
+    role: Literal["ubuntu", "splunk", "elasticsearch", "kibana"]
+    name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$")
+    cpu: int = Field(ge=1, le=128, strict=True)
+    ram_gb: int = Field(ge=2, le=2048, strict=True)
+    disk_gb: int = Field(ge=25, le=65536, strict=True)
+    datastore: str = Field(min_length=1, max_length=128)
+    network: str = Field(min_length=1, max_length=128)
+    ip_mode: Literal["dhcp", "static"] = "dhcp"
+    address: str | None = None
+    gateway: str | None = None
+    dns: list[str] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_network(self):
+        minimum = {"ubuntu": 2, "splunk": 4, "elasticsearch": 8, "kibana": 4}[self.role]
+        if self.ram_gb < minimum:
+            raise ValueError(f"{self.role} requires at least {minimum} GiB RAM for this deployment profile.")
+        if self.ip_mode == "static":
+            if not self.address or "/" not in self.address or not self.gateway or not self.dns:
+                raise ValueError("Static networking requires IPv4 address/prefix, gateway and DNS servers.")
+            interface = ipaddress.IPv4Interface(self.address)
+            gateway = ipaddress.IPv4Address(self.gateway)
+            if (
+                interface.ip.is_loopback
+                or interface.ip.is_multicast
+                or interface.ip.is_unspecified
+                or interface.ip.is_link_local
+            ):
+                raise ValueError("Choose a unicast, reachable IPv4 address.")
+            if interface.network.prefixlen > 30 or interface.ip in (
+                interface.network.network_address,
+                interface.network.broadcast_address,
+            ):
+                raise ValueError("Choose a usable host address in a /1 through /30 subnet.")
+            if (
+                interface.network.prefixlen < 1
+                or gateway not in interface.network
+                or gateway in (interface.ip, interface.network.network_address, interface.network.broadcast_address)
+            ):
+                raise ValueError("Gateway must be another usable address in the VM subnet.")
+            self.address = str(interface)
+            self.gateway = str(gateway)
+            self.dns = [str(ipaddress.IPv4Address(server)) for server in self.dns]
+            if any(ipaddress.IPv4Address(s).is_unspecified or ipaddress.IPv4Address(s).is_multicast for s in self.dns):
+                raise ValueError("DNS servers must be unicast IPv4 addresses.")
+        else:
+            self.address, self.gateway, self.dns = None, None, []
+        return self
+
+
+class DeploymentSpec(StrictModel):
+    name: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
+    vms: list[VMSpec] = Field(min_length=1, max_length=4)
+    splunk_license_accepted: bool = False
+
+    @model_validator(mode="after")
+    def validate_topology(self):
+        roles = [vm.role for vm in self.vms]
+        if len(set(roles)) != len(roles):
+            raise ValueError("Choose one VM per application role.")
+        if len({vm.name for vm in self.vms}) != len(self.vms):
+            raise ValueError("Each VM needs a unique name.")
+        addresses = [str(ipaddress.IPv4Interface(vm.address).ip) for vm in self.vms if vm.address]
+        if len(set(addresses)) != len(addresses):
+            raise ValueError("Static IP addresses must be unique within a deployment.")
+        if "kibana" in roles and "elasticsearch" not in roles:
+            raise ValueError("Kibana requires a separate Elasticsearch VM in this deployment.")
+        if "splunk" in roles and not self.splunk_license_accepted:
+            raise ValueError("Confirm acceptance of the Splunk software license before deployment.")
+        return self
+
+
+class RedeployRequest(StrictModel):
+    confirm_name: str
