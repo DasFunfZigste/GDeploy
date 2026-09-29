@@ -14,6 +14,31 @@ import urllib.request
 from pathlib import Path
 
 
+HOST_ROUTE_PROBE = """
+import json
+import sys
+import urllib.request
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+checks = (
+    ('/api/health', ('application/json',), 'health'),
+    ('/', ('text/html',), 'id="login-screen"'),
+    ('/static/app.js', ('text/javascript', 'application/javascript'), 'must_change_credentials'),
+    ('/static/app.css', ('text/css',), ':root'),
+)
+for path, expected_types, marker in checks:
+    with opener.open(sys.argv[1] + path, timeout=10) as response:
+        assert response.status == 200, 'Published host route returned an unexpected status'
+        assert response.headers.get_content_type() in expected_types, 'Published host route returned the wrong content type'
+        body = response.read(1024 * 1024).decode('utf-8')
+    if marker == 'health':
+        assert json.loads(body) == {'status': 'ok'}, 'Published host route is not healthy'
+    else:
+        assert marker in body, 'Published host route did not serve the expected GDeploy UI asset'
+print('Health, login page, JavaScript and CSS are reachable through the published host interface.')
+"""
+
+
 def run(*args, env=None, capture=False, cwd=None):
     return subprocess.run(args, check=True, env=env, capture_output=capture, text=capture, cwd=cwd)
 
@@ -69,7 +94,8 @@ def verify_login_and_storage(url, credentials, write=False):
         result = request(
             "/api/account/setup",
             {"username": new_username, "password": new_password, "password_confirm": new_password},
-            "POST", session["csrf_token"],
+            "POST",
+            session["csrf_token"],
         )
         assert result == {"ok": True}
         assert request("/api/session") == {"authenticated": False}
@@ -186,11 +212,15 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
         directory = Path(folder)
         unique = directory.name
         volume = unique + "-data"
-        port = "8000" if source_compose else "18081"
+        probe_name = unique + "-host-probe"
+        port = "18082" if blank_env else "18081"
+        bind_ip = "0.0.0.0" if blank_env else "127.0.0.1"
         url = f"http://127.0.0.1:{port}"
         # Isolate this first-installation check from the caller's own settings.
         env = {key: value for key, value in os.environ.items() if not key.startswith("GDEPLOY_")}
         env.update(GDEPLOY_IMAGE=image, GDEPLOY_DATA_VOLUME=volume, GDEPLOY_PORT=port)
+        if blank_env:
+            env["GDEPLOY_BIND_IP"] = bind_ip
         (directory / "media").mkdir(mode=0o755)
         if blank_env:
             (directory / ".env").write_bytes((root / ".env.example").read_bytes())
@@ -232,10 +262,47 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
             if any(value in logs for value in secrets):
                 raise AssertionError("Container logs exposed a generated credential; output suppressed.")
 
+        def verify_published_binding():
+            container = command("ps", "--quiet", "gdeploy", capture=True).stdout.strip()
+            assert container and len(container.splitlines()) == 1, "Expected one application container"
+            result = run("docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container, capture=True)
+            bindings = json.loads(result.stdout).get("8000/tcp")
+            assert bindings == [{"HostIp": bind_ip, "HostPort": port}], "Unexpected published host address or port"
+
+        def verify_host_route():
+            # Use Docker's default bridge and its host gateway, rather than the
+            # application's Compose network, to exercise the published host port.
+            run(
+                "docker",
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                "--name",
+                probe_name,
+                "--network",
+                "bridge",
+                "--add-host",
+                "host.docker.internal:host-gateway",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges:true",
+                image,
+                "python",
+                "-c",
+                HOST_ROUTE_PROBE,
+                f"http://host.docker.internal:{port}",
+            )
+
         try:
             command("config", "--quiet")
             command("up", "--detach", "--no-build", "--pull", "never")
             wait_healthy(url)
+            verify_published_binding()
+            if blank_env:
+                verify_host_route()
             credentials = read_file("/data/bootstrap-credentials.txt")
             bootstrap = read_file("/data/bootstrap.json")
             saved = json.loads(bootstrap)
@@ -244,7 +311,11 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
             assert (username, password) == ("admin", "admin")
             verify_private_files()
             chosen_credentials = verify_login_and_storage(url, credentials, write=True)
-            private_values = (credential_values(chosen_credentials)[1], saved["secret_key"], saved["admin_password_hash"])
+            private_values = (
+                credential_values(chosen_credentials)[1],
+                saved["secret_key"],
+                saved["admin_password_hash"],
+            )
             assert all(private_values)
             verify_logs(private_values)
 
@@ -253,6 +324,7 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
             command("down")
             command("up", "--detach", "--no-build", "--pull", "never")
             wait_healthy(url)
+            verify_published_binding()
             assert read_file("/data/bootstrap.json") == bootstrap
             assert read_file("/data/bootstrap-credentials.txt") == credentials
             verify_private_files()
@@ -260,7 +332,9 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
             verify_logs(private_values)
             mode = "blank .env.example" if blank_env else "no .env"
             layout = "source Compose" if source_compose else "release Compose"
-            print(f"First-start, required setup, login, permissions and recreation passed ({layout}, {mode}).")
+            print(
+                f"First-start, required setup, login, permissions and recreation passed ({layout}, {mode}, {bind_ip}:{port})."
+            )
         except BaseException:
             # A failed first-start log check must not print the leaked secrets
             # into CI. Container state is useful and contains no credentials.
@@ -268,6 +342,7 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
             raise
         finally:
             # The unique project/volume names belong only to this smoke case.
+            subprocess.run(["docker", "rm", "--force", probe_name], capture_output=True, check=False)
             subprocess.run([*compose, "down", "--volumes"], env=env, cwd=directory, capture_output=True, check=False)
 
 

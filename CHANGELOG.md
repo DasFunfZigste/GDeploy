@@ -4,6 +4,18 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-29
+
+### Fixed
+
+- Source Compose now supports `GDEPLOY_BIND_IP` and `GDEPLOY_PORT`, matching the release bundle. The default remains `127.0.0.1:8000`; set the server's LAN IPv4 address to enable access from another computer.
+- Added LAN access instructions, direct Docker port-publishing examples, and troubleshooting for a loopback binding that remains unreachable despite a UFW allow rule.
+
+### Installation and compatibility
+
+- Edit the existing `.env` without overwriting keys or other settings, then apply the binding with `docker compose up -d --force-recreate --wait`. Changing the port mapping does not require rebuilding the image.
+- This is a compatible configuration change. Administrator credentials, encryption keys, application data and the database format remain unchanged. Existing installations retain their current binding unless explicitly reconfigured.
+
 ## [0.1.3] - 2026-09-29
 
 ### Added
