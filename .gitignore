@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 bootstrap-credentials.txt
+docker.env
 media/*
 !media/.gitkeep
 data/

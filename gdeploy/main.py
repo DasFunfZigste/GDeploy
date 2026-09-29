@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .config import Config, verify_password
 from .db import Database
 from .models import ConnectionSettings, DeploymentSpec, Login, RedeployRequest
@@ -34,7 +35,9 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         if start_worker:
             app.state.service.stop()
 
-    app = FastAPI(title="GDeploy", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(
+        title="GDeploy", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
+    )
 
     def authenticated(request: Request):
         session = request.app.state.db.session(request.cookies.get(COOKIE))

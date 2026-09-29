@@ -1,0 +1,100 @@
+name: Publish versioned release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gdeploy-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      IMAGE_REPOSITORY: ghcr.io/dasfunfzigste/gdeploy
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Validate version and publication state
+        run: |
+          set -euo pipefail
+          version=$(python scripts/build_release.py --tag "$RELEASE_TAG" --validate-only)
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_IMAGE=$IMAGE_REPOSITORY:$version" >> "$GITHUB_ENV"
+          python scripts/release_status.py
+      - name: Test application and release tools
+        run: |
+          pip install -r requirements.lock
+          pip install -e '.[test]'
+          pytest -q
+          ruff check .
+      - name: Build the versioned image
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg VERSION="$RELEASE_VERSION" --build-arg REVISION="$GITHUB_SHA" \
+            --tag "$RELEASE_IMAGE" .
+          python scripts/smoke_image.py "$RELEASE_IMAGE"
+      - name: Publish image and verify registry pull
+        run: |
+          set -euo pipefail
+          python scripts/release_status.py
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$RELEASE_IMAGE"
+          image_ref=$(docker image inspect "$RELEASE_IMAGE" --format '{{index .RepoDigests 0}}')
+          case "$image_ref" in "$IMAGE_REPOSITORY"@sha256:*) ;; *) exit 1 ;; esac
+          digest=${image_ref#*@}
+          echo "IMAGE_DIGEST=$digest" >> "$GITHUB_ENV"
+          docker image rm "$RELEASE_IMAGE"
+          docker pull "$image_ref"
+          docker tag "$image_ref" "$RELEASE_IMAGE"
+          python scripts/smoke_image.py "$image_ref"
+      - name: Package and check release assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          image_archive="dist/gdeploy-$RELEASE_VERSION-linux-amd64.image.tar.gz"
+          docker save "$RELEASE_IMAGE" | gzip -n > "$image_archive"
+          docker image rm "$RELEASE_IMAGE"
+          docker load --input "$image_archive"
+          python scripts/smoke_image.py "$RELEASE_IMAGE"
+          python scripts/build_release.py --tag "$RELEASE_TAG" --image-digest "$IMAGE_DIGEST" --commit "$GITHUB_SHA" --output dist
+          (cd dist && sha256sum --check SHA256SUMS)
+      - name: Create draft, upload assets, then publish
+        run: |
+          set -euo pipefail
+          release_state=$(python scripts/release_status.py)
+          if [ "$release_state" = draft ]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "GDeploy $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "GDeploy $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md
+          fi
+          test "$(python scripts/release_status.py)" = draft
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "dist/gdeploy-$RELEASE_VERSION-deploy.tar.gz" \
+            "dist/gdeploy-$RELEASE_VERSION-linux-amd64.image.tar.gz" \
+            dist/SHA256SUMS dist/INSTALL.md dist/CHANGELOG.md dist/release.json
+          test "$(python scripts/release_status.py)" = draft
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+      - name: Report release
+        run: |
+          echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: $RELEASE_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo "Digest: $IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"

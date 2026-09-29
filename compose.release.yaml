@@ -1,0 +1,27 @@
+name: gdeploy
+
+services:
+  gdeploy:
+    image: ${GDEPLOY_IMAGE:-ghcr.io/dasfunfzigste/gdeploy:0.1.0}
+    platform: linux/amd64
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    ports:
+      - "${GDEPLOY_BIND_IP:-127.0.0.1}:${GDEPLOY_PORT:-8000}:8000"
+    volumes:
+      - gdeploy-data:/data
+      - ./media:/media:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  gdeploy-data:
+    name: ${GDEPLOY_DATA_VOLUME:-gdeploy-data}

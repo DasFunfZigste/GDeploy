@@ -19,7 +19,15 @@ Saved deployment profiles are outside this initial scope.
 
 ![GDeploy deployment dashboard](docs/overview.png)
 
-## Start with Docker
+## Install a published release
+
+Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
+
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.1.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+
+See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
+
+## Build from source with Docker
 
 1. Install Docker Engine with the Compose plugin on a machine that can reach both ESXi and the guest network. Allow several GiB of free local space for a temporary copy of the Ubuntu ISO.
 2. Place your vendor-verified **Ubuntu Server 24.04 amd64 live-server ISO** at `media/ubuntu.iso`. For Splunk, also place your licensed **Splunk Enterprise Linux x86_64 .tgz** at `media/splunk.tgz`. Verify downloads against the publishers' checksums before proceeding. GDeploy does not download Splunk or supply a license. On Linux, the container's UID 10001 must be able to read this bind mount: use directory mode 0755 and installer-file mode 0644, or equivalent ACLs. Keep secrets out of this public-media directory.
@@ -29,7 +37,7 @@ Saved deployment profiles are outside this initial scope.
    python3 scripts/configure.py
    ```
 
-   This creates an encryption key, a hashed administrator password and checksums for the media already present. The generated web-app password is clearly labeled in **`bootstrap-credentials.txt`** (owner access only). `.env`, credentials, installation media and database files are ignored by Git. Store the password in your password manager, then remove the bootstrap file.
+   This creates an encryption key, a hashed administrator password and checksums for the media already present. The generated web-app password is clearly labeled in **`bootstrap-credentials.txt`** (owner access only). `.env`, `docker.env`, credentials, installation media and database files are ignored by Git. Store the password in your password manager, then remove the bootstrap file. Use `.env` with Compose; `docker.env` contains equivalent unquoted values for Docker CLI `--env-file`.
 
    If Python is unavailable locally, run the same script with Docker:
 
@@ -43,7 +51,7 @@ Saved deployment profiles are outside this initial scope.
    docker compose up --build -d
    ```
 
-5. Open **http://localhost:8000**, sign in, then open **Settings** and save your ESXi hostname, username and password. Use the connection check to load inventory.
+5. Open **http://localhost:8000**, sign in, then open **ESXi connection** and save your ESXi hostname, username and password. Use the connection check to load inventory.
 6. Select **New deployment**, choose application roles, and configure each separate VM. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
 
 The default Compose binding is loopback-only. For access from another machine, use an HTTPS reverse proxy, forward the original `Host` and `X-Forwarded-Proto`, and set `GDEPLOY_COOKIE_SECURE=true`. Set Uvicorn's `FORWARDED_ALLOW_IPS` environment variable to the actual proxy address or trusted proxy network as seen by the container, so the app recognizes the browser's HTTPS origin. Keep the app port private to that proxy; do not trust forwarded headers from arbitrary clients. The cookie setting must match how the browser accesses the application.

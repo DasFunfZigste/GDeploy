@@ -1,6 +1,7 @@
 .git
 .env*
 bootstrap-credentials.txt
+docker.env
 media
 data
 .venv
@@ -9,5 +10,6 @@ __pycache__
 .ruff_cache
 tests
 docs
-scripts
 *.egg-info
+dist
+build
