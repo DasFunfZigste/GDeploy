@@ -2,7 +2,7 @@ name: gdeploy
 
 services:
   gdeploy:
-    image: ${GDEPLOY_IMAGE:-ghcr.io/dasfunfzigste/gdeploy:0.1.4}
+    image: ${GDEPLOY_IMAGE:-ghcr.io/dasfunfzigste/gdeploy:0.1.5}
     platform: linux/amd64
     restart: unless-stopped
     init: true
@@ -12,7 +12,7 @@ services:
     environment:
       GDEPLOY_COOKIE_SECURE: ${GDEPLOY_COOKIE_SECURE:-false}
     ports:
-      - "${GDEPLOY_BIND_IP:-127.0.0.1}:${GDEPLOY_PORT:-8000}:8000"
+      - "${GDEPLOY_BIND_IP:-0.0.0.0}:${GDEPLOY_PORT:-8000}:8000"
     volumes:
       - gdeploy-data:/data
       - ./media:/media:ro

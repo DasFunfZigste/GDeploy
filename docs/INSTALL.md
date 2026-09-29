@@ -1,6 +1,6 @@
 # Install GDeploy
 
-This guide installs **GDeploy 0.1.4** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.1.4` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions **Ubuntu Server 24.04 LTS amd64** guests on standalone **ESXi 8.0 Update 3**.
+This guide installs **GDeploy 0.1.5** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.1.5` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions **Ubuntu Server 24.04 LTS amd64** guests on standalone **ESXi 8.0 Update 3**.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -16,40 +16,33 @@ docker compose up --build -d --wait
 
 Use your existing GitHub access for the private repository. This source build needs no GHCR login, host Python installation or initial `.env` file. On a fresh data volume, GDeploy creates the initial `admin`/`admin` account and a unique random encryption key automatically. The clone follows the default branch; use the prebuilt walkthrough for the specific release shown on this page.
 
-Open [http://localhost:8000](http://localhost:8000) and sign in with **username `admin` and password `admin`** on a fresh installation. Complete the required account setup described below. For a remote server, run this on your own computer and leave it open:
+Open **`http://SERVER_LAN_IP:8000`** from another computer, replacing `SERVER_LAN_IP` with the Docker host's actual LAN address. On the Docker host itself, use [http://localhost:8000](http://localhost:8000). Fresh installations publish port 8000 on every host IPv4 interface (`0.0.0.0`), so LAN access needs no `.env` changes.
 
-```sh
-ssh -N -L 8000:127.0.0.1:8000 YOUR_UBUNTU_USER@YOUR_SERVER_ADDRESS
-```
-
-Then browse to `http://localhost:8000` on your computer. If Docker is not installed yet, complete section 1 and return here.
+Sign in with **username `admin` and password `admin`** on a fresh installation, then complete the required account setup described below. If Docker is not installed yet, complete section 1 and return here. An SSH tunnel remains optional; section 5 shows how to use one.
 
 The UI can start before installation media is ready. Before deploying VMs, place your vendor-verified Ubuntu ISO at `media/ubuntu.iso` in the clone, and optional licensed Splunk package at `media/splunk.tgz`. Section 3 explains the downloads and permissions. Calculate `sha256sum media/ubuntu.iso` (and the Splunk file if used), then create or edit the optional `.env` with `GDEPLOY_UBUNTU_SHA256` and `GDEPLOY_SPLUNK_SHA256` set to the verified values. Preserve existing settings and use one value per key. Automatic installations leave `GDEPLOY_SECRET_KEY` and `GDEPLOY_ADMIN_PASSWORD_HASH` absent or empty, so the saved encryption key and database account remain in use. Apply the media settings with `docker compose up --build -d --wait --force-recreate`.
 
-## Open GDeploy from another LAN computer
+## Optional: restrict the bind address or change the port
 
-By default, both source and release Compose publish the web app only on **`127.0.0.1:8000`**. A UFW allow rule does not change that Docker binding. To access the UI directly over your LAN, first update an existing source checkout with `git pull --ff-only`; the source Compose file now supports the same settings as the release bundle.
+Both source and release Compose default to **`0.0.0.0:8000`**, publishing the app on all host IPv4 interfaces. Existing explicit `GDEPLOY_BIND_IP` values in `.env` are still respected; an older `127.0.0.1` setting continues to allow only local connections.
 
-Edit the existing `.env` in your setup directory, or create it if it is absent. **Do not overwrite existing contents or encryption keys.** Keep one value per setting and replace the example address with the Ubuntu server's actual LAN IPv4 address:
+To restrict access, edit the existing `.env` in your setup directory, or create it if it is absent. **Preserve existing contents and encryption keys**, and keep one value per setting. For example, restrict access to the Docker host or an SSH tunnel with:
 
 ```dotenv
-GDEPLOY_BIND_IP=192.168.1.50
+GDEPLOY_BIND_IP=127.0.0.1
 GDEPLOY_PORT=8000
-GDEPLOY_COOKIE_SECURE=false
 ```
 
-Recreate the container to apply the changed port mapping; no image rebuild is needed:
+You can instead set `GDEPLOY_BIND_IP` to a specific LAN IPv4 address, or `0.0.0.0` to use the default on all interfaces. `GDEPLOY_PORT` changes the host port. Recreate the container to apply changed mappings; no image rebuild is needed:
 
 ```sh
 docker compose up -d --force-recreate --wait
 docker compose port gdeploy 8000
 ```
 
-The second command should show your selected LAN address and port. From another computer, open **`http://SERVER_LAN_IP:8000`**, replacing `SERVER_LAN_IP` with that address. If you choose another `GDEPLOY_PORT`, use it in the URL. For the host-side health checks later in this guide, also replace `127.0.0.1:8000` with your selected address and port.
+Use the selected address and port in the browser URL. If binding to one LAN address, also use that address in the host-side health checks later in this guide. Docker-published ports can bypass UFW rules; a firewall allow rule does not override an explicit loopback-only Docker binding.
 
-Use `GDEPLOY_BIND_IP=0.0.0.0` only when you want Docker to publish on **all host IPv4 interfaces**. A specific LAN address is preferable when the host also has other or public interfaces. Docker-published ports can bypass UFW rules; a UFW allow or deny rule alone does not determine the container's reachability.
-
-For direct HTTP, keep `GDEPLOY_COOKIE_SECURE=false`. For an HTTPS reverse proxy, use `true` and the proxy settings in section 5. The default remains loopback-only until you choose another bind address.
+For direct HTTP, keep `GDEPLOY_COOKIE_SECURE=false`. For an HTTPS reverse proxy, use `true` and the proxy settings in section 5.
 
 ## Complete the first sign-in
 
@@ -161,7 +154,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.1.4
+GDEPLOY_VERSION=0.1.5
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -187,17 +180,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.1.4
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.1.5
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.1.4`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.1.5`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.1.4
+GDEPLOY_VERSION=0.1.5
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -250,7 +243,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.4 \
+  ghcr.io/dasfunfzigste/gdeploy:0.1.5 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -274,19 +267,21 @@ docker compose logs --tail=100 gdeploy
 curl --fail http://127.0.0.1:8000/api/health
 ```
 
-Wait for the container to become **healthy**. The app restarts automatically when Docker starts. It listens on the server's **127.0.0.1:8000** by default.
+Wait for the container to become **healthy**. The app restarts automatically when Docker starts. Docker publishes it on **`0.0.0.0:8000`** by default, making it available through the server's LAN IPv4 address.
 
 On a fresh installation, sign in with **username `admin` and password `admin`**, then complete the required account setup near the top of this guide. Existing installations use their current credentials. Automatic installations save their encryption key and initial administrator password hash in **`/data/bootstrap.json`** with owner-only permissions. The chosen account is stored separately in the database; back up the complete data volume, including both. Losing the original encryption key prevents decryption of saved ESXi and VM credentials.
 
-If your browser is on the same machine, open [http://localhost:8000](http://localhost:8000). For a remote Ubuntu server, open a terminal on **your own computer** and keep this SSH tunnel running:
+From another computer, open **`http://SERVER_LAN_IP:8000`** using the Ubuntu server's actual LAN address. On the Docker host, open [http://localhost:8000](http://localhost:8000).
+
+An **optional SSH tunnel** is useful if you have restricted the bind address to `127.0.0.1`. Open a terminal on your own computer and keep this running:
 
 ```sh
 ssh -N -L 8000:127.0.0.1:8000 YOUR_UBUNTU_USER@YOUR_SERVER_ADDRESS
 ```
 
-Then open [http://localhost:8000](http://localhost:8000) on your computer and sign in as described above. If port 8000 is already in use locally, use `-L 8001:127.0.0.1:8000` and browse to `http://localhost:8001` instead.
+When using the tunnel, open [http://localhost:8000](http://localhost:8000) on your computer and sign in as described above. If port 8000 is already in use locally, use `-L 8001:127.0.0.1:8000` and browse to `http://localhost:8001` instead.
 
-For direct LAN access, use the bind-address instructions near the top of this guide. For HTTPS access, put the app behind a reverse proxy and keep its port private to the proxy. Set `GDEPLOY_COOKIE_SECURE=true` and `FORWARDED_ALLOW_IPS` to the proxy address/network as seen by the container, and forward the original `Host` and `X-Forwarded-Proto` headers. Recreate the container after environment changes. Docker-published ports can bypass UFW rules, so do not assume UFW alone protects a port published on every interface.
+LAN access works with the default binding. For HTTPS access, put the app behind a reverse proxy and keep its port private to the proxy. Set `GDEPLOY_COOKIE_SECURE=true` and `FORWARDED_ALLOW_IPS` to the proxy address/network as seen by the container, and forward the original `Host` and `X-Forwarded-Proto` headers. Recreate the container after environment changes. Docker-published ports can bypass UFW rules, so do not assume UFW alone protects a port published on every interface.
 
 ## 6. Connect to ESXi and deploy your first VMs
 
@@ -313,13 +308,13 @@ Use public certificates in this trust bundle; it does not require CA private key
 
 If a deployment fails, inspect its errors and the ESXi task/console state. **Delete & redeploy** requires the deployment name as confirmation and permanently deletes the VMs and disks owned by that deployment before trying again. It creates fresh credentials. Application data on those disks is also deleted.
 
-This is an initial lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.1.4/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is an initial lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.1.5/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
-After sections 2–4, use this **instead of** `docker compose up`. Do not start two GDeploy containers against the same data volume. The command below uses the **optional manual setup** and its `docker.env` from section 4. For automatic setup on a fresh volume, replace the `--env-file docker.env` line with **`--env GDEPLOY_COOKIE_SECURE=false`** for this loopback HTTP setup; add a media-only environment file later if needed. Plain Docker defaults to secure cookies, so this explicit setting is required for HTTP sign-in. For an HTTPS reverse proxy, use `GDEPLOY_COOKIE_SECURE=true` and the proxy settings in section 5 instead. Preserve the original environment credentials when reusing a manually configured volume.
+After sections 2–4, use this **instead of** `docker compose up`. Do not start two GDeploy containers against the same data volume. The command below uses the **optional manual setup** and its `docker.env` from section 4. For automatic setup on a fresh volume, replace the `--env-file docker.env` line with **`--env GDEPLOY_COOKIE_SECURE=false`** for this direct HTTP setup; add a media-only environment file later if needed. Plain Docker defaults to secure cookies, so this explicit setting is required for HTTP sign-in. For an HTTPS reverse proxy, use `GDEPLOY_COOKIE_SECURE=true` and the proxy settings in section 5 instead. Preserve the original environment credentials when reusing a manually configured volume.
 
-For direct LAN access with plain Docker, replace `--publish 127.0.0.1:8000:8000` below with **`--publish HOST_LAN_IP:8000:8000`**, substituting the server's LAN IPv4 address. Keep `GDEPLOY_COOKIE_SECURE=false` for direct HTTP and use the same LAN address in the health-check URL. The Compose `GDEPLOY_BIND_IP` setting does not change a plain `docker run` port mapping.
+The plain Docker example publishes **`0.0.0.0:8000`** for LAN access by default. To restrict it, replace that address in `--publish` with a specific host LAN IPv4 address or `127.0.0.1`. When binding to one LAN address, use that address in the health-check URL too. The Compose `GDEPLOY_BIND_IP` setting does not change a plain `docker run` port mapping.
 
 Run from `~/gdeploy`:
 
@@ -331,7 +326,7 @@ docker run -d --name gdeploy \
   --restart unless-stopped \
   --init \
   --env-file docker.env \
-  --publish 127.0.0.1:8000:8000 \
+  --publish 0.0.0.0:8000:8000 \
   --mount source=gdeploy-data,target=/data \
   --mount "type=bind,source=$PWD/media,target=/media,readonly" \
   --read-only \
@@ -339,7 +334,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.4
+  ghcr.io/dasfunfzigste/gdeploy:0.1.5
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -357,11 +352,11 @@ For a manually configured installation, refresh `docker.env` from its existing c
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.1.4 \
+  ghcr.io/dasfunfzigste/gdeploy:0.1.5 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 
-The export command expects the manual administrator credential pair in `.env`. For an automatic installation, use an optional `docker.env` containing only your media hashes and other settings as plain `KEY=value` lines; keep the administrator key/hash absent so the saved bootstrap encryption key and database account remain in use. Include `GDEPLOY_COOKIE_SECURE=false` for loopback HTTP, or `true` behind HTTPS, and keep any command-line cookie setting consistent with it.
+The export command expects the manual administrator credential pair in `.env`. For an automatic installation, use an optional `docker.env` containing only your media hashes and other settings as plain `KEY=value` lines; keep the administrator key/hash absent so the saved bootstrap encryption key and database account remain in use. Include `GDEPLOY_COOKIE_SECURE=false` for direct HTTP, or `true` behind HTTPS, and keep any command-line cookie setting consistent with it.
 
 ## 8. Check, stop, upgrade and recover
 
@@ -388,7 +383,7 @@ Common startup issues:
 | `admin`/`admin` no longer signs in | After account setup, use the username and password you chose. Existing older installations retain their original credentials rather than adopting the new default. |
 | Media preflight fails | Check the exact filenames, recorded checksums and UID 10001's read access. |
 | ESXi connection fails | Check the hostname, port 443, certificate trust, credentials and API license/permissions. |
-| Remote browser cannot connect, even with UFW allowing 8000 | Check `docker compose port gdeploy 8000`. A `127.0.0.1` binding accepts only local connections; configure the LAN address and recreate the container, or use the SSH tunnel. Docker-published ports and UFW rules are separate. |
+| Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
 
 Version **0.1.3** adds a persistent administrator account record to the existing database. On the first upgraded start, the record is initialized once from the existing credentials; later starts keep the database account. Existing random/custom credentials are preserved, and completed account setup is not overwritten by bootstrap or environment values.
 

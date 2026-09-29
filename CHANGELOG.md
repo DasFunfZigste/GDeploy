@@ -4,6 +4,18 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-29
+
+### Changed
+
+- Source and release Compose now default to `0.0.0.0:8000`, publishing the web app on all host IPv4 interfaces. Fresh installations can be opened at `http://SERVER_LAN_IP:8000` without adding bind settings to `.env`.
+- Updated the installation walkthrough and plain Docker example to use LAN access by default. A specific LAN address, `127.0.0.1`, or an SSH tunnel remains optional.
+
+### Installation and compatibility
+
+- Existing explicit `GDEPLOY_BIND_IP` and `GDEPLOY_PORT` values in `.env` are still respected. Installations without a bind override adopt the new all-interface default when the updated Compose configuration is applied.
+- Apply binding changes with `docker compose up -d --force-recreate --wait`; no image rebuild is required for the mapping change. Preserve existing `.env` contents, administrator credentials, encryption keys and the data volume. The database format is unchanged.
+
 ## [0.1.4] - 2026-09-29
 
 ### Fixed

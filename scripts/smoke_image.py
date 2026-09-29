@@ -55,6 +55,14 @@ def wait_healthy(url):
     raise RuntimeError("Container did not become healthy within 60 seconds")
 
 
+def assert_published_binding(container, bind_ip, port):
+    container = container.strip()
+    assert container and len(container.splitlines()) == 1, "Expected one application container"
+    result = run("docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container, capture=True)
+    bindings = json.loads(result.stdout).get("8000/tcp")
+    assert bindings == [{"HostIp": bind_ip, "HostPort": port}], "Unexpected published host address or port"
+
+
 def credential_values(credentials):
     fields = dict(line.split(": ", 1) for line in credentials.splitlines() if ": " in line)
     return fields["Username"], fields["Password"]
@@ -130,7 +138,13 @@ def smoke_configured(image):
         volume = unique + "-data"
         port = "18080"
         url = f"http://127.0.0.1:{port}"
-        env = dict(os.environ, GDEPLOY_IMAGE=image, GDEPLOY_DATA_VOLUME=volume, GDEPLOY_PORT=port)
+        env = dict(
+            os.environ,
+            GDEPLOY_IMAGE=image,
+            GDEPLOY_DATA_VOLUME=volume,
+            GDEPLOY_PORT=port,
+            GDEPLOY_BIND_IP="127.0.0.1",
+        )
         compose = [
             "docker",
             "compose",
@@ -163,6 +177,8 @@ def smoke_configured(image):
             run(*compose, "config", "--quiet", env=env)
             run(*compose, "up", "--detach", "--pull", "never", env=env)
             wait_healthy(url)
+            container = run(*compose, "ps", "--quiet", "gdeploy", env=env, capture=True).stdout
+            assert_published_binding(container, "127.0.0.1", port)
             uid = run(*compose, "exec", "-T", "gdeploy", "id", "-u", env=env, capture=True).stdout.strip()
             assert uid == "10001"
             credentials = verify_login_and_storage(url, credentials, write=True)
@@ -192,8 +208,11 @@ def smoke_configured(image):
                 image,
             )
             wait_healthy(url)
+            assert_published_binding(unique, "127.0.0.1", port)
             verify_login_and_storage(url, credentials)
-            print("Image bootstrap, required account setup, Compose, login, persistence and docker run checks passed.")
+            print(
+                "Image bootstrap, required setup, explicit loopback binding, login, persistence and docker run checks passed."
+            )
         except BaseException:
             subprocess.run([*compose, "logs", "--tail", "60"], env=env, check=False)
             subprocess.run(["docker", "logs", "--tail", "60", unique], check=False)
@@ -214,13 +233,13 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
         volume = unique + "-data"
         probe_name = unique + "-host-probe"
         port = "18082" if blank_env else "18081"
-        bind_ip = "0.0.0.0" if blank_env else "127.0.0.1"
+        bind_ip = "0.0.0.0"
         url = f"http://127.0.0.1:{port}"
         # Isolate this first-installation check from the caller's own settings.
         env = {key: value for key, value in os.environ.items() if not key.startswith("GDEPLOY_")}
         env.update(GDEPLOY_IMAGE=image, GDEPLOY_DATA_VOLUME=volume, GDEPLOY_PORT=port)
-        if blank_env:
-            env["GDEPLOY_BIND_IP"] = bind_ip
+        # Leave GDEPLOY_BIND_IP unset: both a fresh checkout and the shipped
+        # example must expose the published port using their own defaults.
         (directory / "media").mkdir(mode=0o755)
         if blank_env:
             (directory / ".env").write_bytes((root / ".env.example").read_bytes())
@@ -264,10 +283,7 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
 
         def verify_published_binding():
             container = command("ps", "--quiet", "gdeploy", capture=True).stdout.strip()
-            assert container and len(container.splitlines()) == 1, "Expected one application container"
-            result = run("docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container, capture=True)
-            bindings = json.loads(result.stdout).get("8000/tcp")
-            assert bindings == [{"HostIp": bind_ip, "HostPort": port}], "Unexpected published host address or port"
+            assert_published_binding(container, bind_ip, port)
 
         def verify_host_route():
             # Use Docker's default bridge and its host gateway, rather than the
@@ -301,8 +317,7 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
             command("up", "--detach", "--no-build", "--pull", "never")
             wait_healthy(url)
             verify_published_binding()
-            if blank_env:
-                verify_host_route()
+            verify_host_route()
             credentials = read_file("/data/bootstrap-credentials.txt")
             bootstrap = read_file("/data/bootstrap.json")
             saved = json.loads(bootstrap)
