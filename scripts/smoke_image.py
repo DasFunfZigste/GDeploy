@@ -20,22 +20,29 @@ import json
 import sys
 import urllib.request
 
+from gdeploy import __version__
+
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 checks = (
     ('/api/health', ('application/json',), 'health'),
     ('/', ('text/html',), 'id="login-screen"'),
-    ('/static/app.js', ('text/javascript', 'application/javascript'), 'must_change_credentials'),
-    ('/static/app.css', ('text/css',), ':root'),
+    (f'/static/app.js?v={__version__}', ('text/javascript', 'application/javascript'), 'must_change_credentials'),
+    (f'/static/app.css?v={__version__}', ('text/css',), ':root'),
 )
 for path, expected_types, marker in checks:
     with opener.open(sys.argv[1] + path, timeout=10) as response:
         assert response.status == 200, 'Published host route returned an unexpected status'
         assert response.headers.get_content_type() in expected_types, 'Published host route returned the wrong content type'
+        if marker != 'health':
+            assert response.headers['Cache-Control'] == 'no-cache', 'Browser assets must revalidate after updates'
         body = response.read(1024 * 1024).decode('utf-8')
     if marker == 'health':
         assert json.loads(body) == {'status': 'ok'}, 'Published host route is not healthy'
     else:
         assert marker in body, 'Published host route did not serve the expected GDeploy UI asset'
+        if path == '/':
+            assert f'/static/app.js?v={__version__}' in body and f'/static/app.css?v={__version__}' in body
+            assert f'GDeploy v{__version__}' in body and '__GDEPLOY_VERSION__' not in body
 print('Health, login page, JavaScript and CSS are reachable through the published host interface.')
 """
 

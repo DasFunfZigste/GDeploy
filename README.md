@@ -16,7 +16,7 @@ docker compose up --build -d --wait
 
 The private repository requires your existing GitHub access. Building from source does not require a GHCR login. Open **`http://SERVER_LAN_IP:8000`** from another computer, or **http://localhost:8000** on the Docker host, and sign in with **username `admin` and password `admin`** on a fresh installation. The first sign-in requires a new username and password before you can use the app. After saving them, sign in again with your new credentials. The default settings enable LAN access immediately; replace `SERVER_LAN_IP` with the Docker host's actual address.
 
-On a fresh data volume, GDeploy creates the initial `admin`/`admin` account and a unique random encryption key automatically. Choose a username of 3–100 letters, digits, periods, underscores or hyphens, starting with a letter or digit; it cannot be `admin` in any capitalization. Choose a password of 12–1024 characters and enter it again to confirm. Completing setup signs out all sessions, and `admin`/`admin` no longer works. Open **Setup** to configure your ESXi connection and choose an OS ISO before deploying. No initial `.env` file or separate configuration command is required.
+On a fresh data volume, GDeploy creates the initial `admin`/`admin` account and a unique random encryption key automatically. Choose a username of 3–100 letters, digits, periods, underscores or hyphens, starting with a letter or digit; it cannot be `admin` in any capitalization. Choose a password of 12–1024 characters and enter it again to confirm. Completing setup signs out all sessions, and `admin`/`admin` no longer works. Open **Setup**, use the **ESXi connection** tab to configure your host, then select the **OS installation media** tab to choose an OS ISO. No initial `.env` file or separate configuration command is required.
 
 ### Default network access and optional restrictions
 
@@ -43,7 +43,7 @@ Keep your existing `.env` and data volume. A fresh installation starts with `adm
 ## Included
 
 - A guided form for applications, VM names, vCPUs, RAM, disks, datastore, port group, DHCP or static IPv4.
-- A **Setup** section for ESXi connection and OS installation media, with browser ISO upload or selection from the server's media directory.
+- A **Setup** section with **ESXi connection** and **OS installation media** tabs, including browser ISO upload or selection from the server's media directory.
 - An optional **OS only** VM alongside the application roles.
 - Media checksum, inventory, name, capacity and network-input checks before provisioning.
 - Retrieve, inspect and explicitly trust an ESXi certificate from Setup, with no container restart.
@@ -61,15 +61,15 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.3.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.3.1` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
 ## Prepare installation media and deploy
 
 1. Use a Docker host that can reach both ESXi and the guest network. Allow space for the OS ISO and several GiB more for temporary installation media.
-2. Open **Setup → ESXi connection** and enter your ESXi hostname or IP. If its certificate is not already trusted, retrieve it, compare its SHA-256 fingerprint against a trusted ESXi source, and select **Trust certificate**. Then save your ESXi username/password and test the connection to load inventory.
-3. In **Setup → OS installation media**, upload the supported live-server ISO from your computer, or select a `.iso` file you placed in the server's `media/` directory. Enter its publisher's verified **SHA-256 checksum**, then validate and save the selection. Uploads are stored in `/data/media` in the persistent data volume; server files use the read-only `/media` mount. No environment edit or container restart is needed. Hashing a large ISO can take a few minutes.
+2. Open **Setup**, select the **ESXi connection** tab, and enter your ESXi hostname or IP. If its certificate is not already trusted, retrieve it, compare its SHA-256 fingerprint against a trusted ESXi source, and select **Trust certificate**. Then save your ESXi username/password and test the connection to load inventory.
+3. Select the **OS installation media** tab at the top of Setup. Upload the supported live-server ISO from your computer, or select a `.iso` file you placed in the server's `media/` directory. Enter its publisher's verified **SHA-256 checksum**, then validate and save the selection. Uploads are stored in `/data/media` in the persistent data volume; server files use the read-only `/media` mount. No environment edit or container restart is needed. Hashing a large ISO can take a few minutes.
 4. For Splunk, place your licensed **Splunk Enterprise Linux x86_64 .tgz** at `media/splunk.tgz`, verify its publisher checksum, and set `GDEPLOY_SPLUNK_SHA256` in the optional `.env` to that value. Preserve existing settings and apply this environment change with `docker compose up -d --force-recreate --wait`. GDeploy does not download Splunk or supply a license. Server-mounted media must be readable by container UID 10001: use directory mode 0755 and file mode 0644, or equivalent ACLs. Keep secrets out of `media/`.
 5. Select **New deployment**, choose application roles, and configure each separate VM. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
 
@@ -82,7 +82,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded media and history.
+Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded media and history. Refresh the browser and check **v0.3.1** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
 
 If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
 

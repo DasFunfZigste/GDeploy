@@ -7,8 +7,8 @@
   <meta name="theme-color" content="#101718">
   <title>GDeploy — VM provisioning</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%234ad9b8'/%3E%3Cpath d='M28 14H17l-6 6 6 6h11v-8h-8v4h4' fill='none' stroke='%23101718' stroke-width='3'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=__GDEPLOY_VERSION__">
+  <script src="/static/app.js?v=__GDEPLOY_VERSION__" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
@@ -23,7 +23,7 @@
         <div class="pipeline-art" aria-hidden="true"><div><span>01</span><i class="art-server"></i><strong>Provision</strong></div><b>→</b><div><span>02</span><i class="art-terminal">&gt;_</i><strong>Install</strong></div><b>→</b><div><span>03</span><i class="art-check">✓</i><strong>Ready</strong></div></div>
         <div class="login-capabilities"><span>OS installation</span><span>Elastic Stack</span><span>Splunk</span></div>
       </div>
-      <p class="login-footnote">Your infrastructure. Your deployment workspace.</p>
+      <p class="login-footnote">GDeploy v__GDEPLOY_VERSION__ · Your deployment workspace.</p>
     </div>
     <div class="login-form-side">
       <form id="login-form" class="login-form">
@@ -67,7 +67,7 @@
       </nav>
       <div class="sidebar-bottom"><div class="platform-note"><span class="status-dot"></span><span>OS &amp; software<small>Dedicated VMs for each role</small></span></div><div class="account"><span class="avatar" id="account-avatar">A</span><span id="account-name">Administrator</span><button id="logout" class="icon-button" aria-label="Sign out" title="Sign out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4M14 8l4 4-4 4M8 12h10"/></svg></button></div></div>
     </aside>
-    <div class="workspace"><header class="topbar"><div><span class="workspace-label">Infrastructure</span><span class="breadcrumb-separator">/</span><span id="breadcrumb">Deployments</span></div><span class="instance-badge"><span class="status-dot"></span>Self-hosted workspace</span></header><main id="main-content" tabindex="-1"><div id="global-alert" class="alert" role="alert" hidden></div><div id="page"></div></main><footer class="workspace-footer"><span>GDeploy</span><span>Provision with purpose.</span></footer></div>
+    <div class="workspace"><header class="topbar"><div><span class="workspace-label">Infrastructure</span><span class="breadcrumb-separator">/</span><span id="breadcrumb">Deployments</span></div><span class="instance-badge"><span class="status-dot"></span>Self-hosted workspace</span></header><main id="main-content" tabindex="-1"><div id="global-alert" class="alert" role="alert" hidden></div><div id="page"></div></main><footer class="workspace-footer"><span id="app-version">GDeploy v__GDEPLOY_VERSION__</span><span>Provision with purpose.</span></footer></div>
   </div>
   <dialog id="wizard-dialog" class="wizard-dialog" aria-labelledby="wizard-title"></dialog>
   <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title"></dialog>

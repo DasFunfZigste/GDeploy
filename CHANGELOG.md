@@ -4,6 +4,19 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-30
+
+### Fixed
+
+- Give **Setup** separate, visible **ESXi connection** and **OS installation media** tabs so the ISO picker and upload form are easy to find. When the host is configured but no ISO is ready, Setup initially opens the media tab. The media tab also has a direct `#settings/media` link.
+- Version static asset URLs and require browser revalidation of the application page and assets so a refreshed page loads the installed release's interface after an upgrade.
+- Display the running release number in the app footer to make update verification straightforward.
+
+### Installation and compatibility
+
+- Update a source installation with `git pull --ff-only` and `docker compose up -d --build --wait`, then refresh the browser and check the displayed version. Open **Setup**, then **OS installation media** to select or upload an ISO.
+- Preserve the existing `.env`, data volume and `media/` directory. This patch retains administrator credentials, ESXi certificate approvals, media selections, uploaded files and deployment history; it does not change installer support or the database format.
+
 ## [0.3.0] - 2026-09-30
 
 ### Added

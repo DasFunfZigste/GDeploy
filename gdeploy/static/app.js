@@ -8,7 +8,7 @@
     route: 'deployments', detailId: null, routeEpoch: 0, pollBusy: false,
     search: '', filter: 'all', wizard: null, secrets: null, secretTimer: null,
     secretDeadline: 0, secretRequest: 0, toastTimer: null,
-    setupBusy: false, mediaUpload: null,
+    setupBusy: false, mediaUpload: null, setupTab: null,
   };
   const roles = {
     ubuntu: {name: 'OS only', short: 'OS only', description: 'Install the operating system without additional software.', cpu: 2, ram: 4, disk: 40, icon: 'terminal'},
@@ -164,6 +164,7 @@
     hideCredentials();
     state.wizard = null;
     state.settings = null;
+    state.setupTab = null;
     state.inventory = null;
     state.deployments = [];
     state.detail = null;
@@ -239,7 +240,8 @@
     state.detailId = null;
     page.replaceChildren(loading('Loading your workspace…'));
     const hash = location.hash.slice(1);
-    if (hash === 'settings' || hash === 'setup') {
+    const setupRoute = /^(?:settings|setup)(?:\/(connection|media))?$/.exec(hash);
+    if (setupRoute) {
       state.route = 'settings';
       markNav('settings');
       $('#breadcrumb').textContent = 'Setup';
@@ -247,6 +249,7 @@
         const settings = await api('/api/settings');
         if (epoch !== state.routeEpoch) return;
         state.settings = settings;
+        state.setupTab = setupRoute[1] || (settings.configured && !settings.iso_configured ? 'media' : 'connection');
         renderSettings();
       } catch (error) { if (epoch === state.routeEpoch) renderLoadError(error, route); }
     } else if (hash.startsWith('deployment/')) {
@@ -292,7 +295,7 @@
     const filter = el('select', {class: 'filter-select', 'aria-label': 'Filter by deployment status', onChange: event => { state.filter = event.target.value; renderDeploymentRows(); }}, el('option', {value: 'all'}, 'All statuses'), el('option', {value: 'active'}, 'In progress'), el('option', {value: 'completed'}, 'Completed'), el('option', {value: 'attention'}, 'Needs attention'), el('option', {value: 'reverted'}, 'Reverted'));
     filter.value = state.filter;
     const history = el('section', {class: 'surface', 'aria-labelledby': 'history-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'history-title'}, 'Deployment history', el('span', {class: 'count-badge'}, rows.length)), el('p', {}, 'Every deployment, from first boot to ready.')), rows.length ? el('div', {class: 'surface-header-actions'}, search, filter) : null), el('div', {id: 'deployment-rows'}));
-    const setupBanner = !state.settings?.configured || !state.settings?.iso_configured ? el('div', {class: 'connection-banner'}, icon('server'), el('div', {}, el('strong', {}, 'Finish your GDeploy setup'), el('p', {}, 'Connect an ESXi host and select an OS ISO before creating a deployment.')), el('a', {href: '#settings', class: 'button button-small'}, 'Open Setup', icon('arrow'))) : null;
+    const setupBanner = !state.settings?.configured || !state.settings?.iso_configured ? el('div', {class: 'connection-banner'}, icon('server'), el('div', {}, el('strong', {}, 'Finish your GDeploy setup'), el('p', {}, 'Connect an ESXi host and select an OS ISO before creating a deployment.')), el('a', {href: state.settings?.configured ? '#settings/media' : '#settings/connection', class: 'button button-small'}, 'Open Setup', icon('arrow'))) : null;
     page.replaceChildren(...[heading('Deployments', 'Build your environment. We’ll take care of the setup.', button('New deployment', 'button-primary', openWizard, 'plus')), metrics, setupBanner, history].filter(Boolean));
     renderDeploymentRows();
   }
@@ -639,15 +642,53 @@
     for (const input of [username, password]) input.addEventListener('input', () => { resultBox.hidden = true; syncControls(); });
     const item = (ready, title, description, symbol) => el('div', {class: `setup-item ${ready ? 'ready' : ''}`}, icon(ready ? 'checkCircle' : symbol), el('div', {}, el('strong', {}, title), el('p', {}, description)));
     const readiness = el('section', {class: 'surface', 'aria-label': 'Setup checklist'});
-    const steps = el('div', {class: 'setup-steps', 'aria-label': 'Setup sections'});
+    const steps = el('div', {class: 'setup-steps', role: 'tablist', 'aria-label': 'Setup sections'});
+    const tabs = {};
+    const panels = {};
+    function selectSetupTab(key, {focus = false, updateHash = true} = {}) {
+      state.setupTab = key;
+      for (const [name, tab] of Object.entries(tabs)) {
+        const selected = name === key;
+        tab.button.classList.toggle('active', selected);
+        tab.button.setAttribute('aria-selected', String(selected));
+        tab.button.tabIndex = selected ? 0 : -1;
+        panels[name].hidden = !selected;
+      }
+      if (updateHash) history.replaceState(history.state, '', `#settings/${key}`);
+      if (focus) tabs[key].button.focus();
+    }
+    function createSetupTab(key, number, title) {
+      const marker = el('span', {class: 'setup-step-number', 'aria-hidden': 'true'}, number);
+      const description = el('small');
+      const tab = el('button', {type: 'button', class: 'setup-step', id: `setup-tab-${key}`, role: 'tab', 'aria-controls': `setup-panel-${key}`, 'aria-selected': 'false', tabindex: '-1', onClick: () => selectSetupTab(key), onKeydown: event => {
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const names = ['connection', 'media'];
+        const next = event.key === 'Home' ? names[0] : event.key === 'End' ? names[1] : names[(names.indexOf(key) + 1) % names.length];
+        selectSetupTab(next, {focus: true});
+      }}, marker, el('span', {}, el('strong', {}, title), description));
+      tabs[key] = {button: tab, marker, description, number};
+      steps.append(tab);
+    }
+    createSetupTab('connection', '1', 'ESXi connection');
+    createSetupTab('media', '2', 'OS installation media');
     function renderReadiness() {
       const saved = state.settings || settings;
-      const step = (number, title, description, ready, target) => el('button', {type: 'button', class: `setup-step ${ready ? 'ready' : ''}`, onClick: () => { const section = document.getElementById(target); section?.scrollIntoView({block: 'start'}); section?.querySelector('input,select')?.focus({preventScroll: true}); }}, el('span', {class: 'setup-step-number'}, ready ? icon('check') : number), el('span', {}, el('strong', {}, title), el('small', {}, description)), icon('arrow'));
-      steps.replaceChildren(step('1', 'ESXi connection', saved.configured ? state.inventory ? 'Connected to your host' : 'Connection saved · test access' : 'Connect your virtualization host', saved.configured, 'esxi-connection-panel'), step('2', 'OS installation media', saved.iso_configured ? 'OS ISO selected · ready for preflight' : 'Select or upload an OS ISO', saved.iso_configured, 'os-media-panel'));
-      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Select or upload installation media in the section below.', 'disc'), item(saved.splunk_configured, 'Splunk package · optional', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Only needed for Splunk: configure its Linux x86_64 .tgz package and checksum on the server.', 'layers')));
+      const updateTab = (key, ready, description) => {
+        const tab = tabs[key];
+        tab.button.classList.toggle('ready', Boolean(ready));
+        tab.marker.replaceChildren(ready ? icon('check') : tab.number);
+        tab.description.textContent = description;
+      };
+      updateTab('connection', saved.configured, saved.configured ? state.inventory ? 'Connected to your host' : 'Connection saved · test access' : 'Connect your virtualization host');
+      updateTab('media', saved.iso_configured, saved.iso_configured ? 'OS ISO selected · ready for preflight' : 'Select or upload an OS ISO');
+      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(saved.splunk_configured, 'Splunk package · optional', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Only needed for Splunk: configure its Linux x86_64 .tgz package and checksum on the server.', 'layers')));
     }
     mediaControls = createMediaPanel(catalog => { if (state.settings) state.settings.iso_configured = catalog.ready; renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
-    page.replaceChildren(heading('Setup', 'Prepare GDeploy for its first deployment. You can update these settings anytime.'), steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, form, mediaControls.panel), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.'))));
+    panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form);
+    panels.media = el('div', {id: 'setup-panel-media', role: 'tabpanel', 'aria-labelledby': 'setup-tab-media', tabindex: '0'}, mediaControls.panel);
+    page.replaceChildren(heading('Setup', 'Choose a section below to connect your ESXi host or select an OS ISO.'), steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, panels.connection, panels.media), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.'))));
+    selectSetupTab(state.setupTab || (settings.configured && !settings.iso_configured ? 'media' : 'connection'), {updateHash: false});
     renderReadiness(); renderCertificate(); syncControls(); mediaControls.load();
   }
   function field(label, input, hint) { return el('label', {class: 'field'}, el('span', {}, label), input, hint ? el('small', {}, hint) : null); }
@@ -800,7 +841,7 @@
 
   async function openWizard() {
     if (!state.session || setupRequired()) return;
-    if (!state.settings?.configured || !state.settings?.iso_configured) { location.hash = 'settings'; notify('Complete Setup with an ESXi connection and an OS ISO to begin a deployment.'); return; }
+    if (!state.settings?.configured || !state.settings?.iso_configured) { location.hash = state.settings?.configured ? 'settings/media' : 'settings/connection'; notify('Complete Setup with an ESXi connection and an OS ISO to begin a deployment.'); return; }
     hideCredentials();
     const dialog = $('#wizard-dialog');
     state.wizard = {step: 0, name: '', selected: new Set(['elasticsearch', 'kibana']), vms: {}, activeRole: 'elasticsearch', accepted: false, preflight: null, busy: true, error: ''};
@@ -815,7 +856,7 @@
     } catch (error) {
       if (state.wizard !== wizard) return;
       wizard.busy = false;
-      dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), el('div', {class: 'wizard-content'}, el('h3', {}, 'Couldn’t load your ESXi inventory'), el('p', {class: 'muted'}, 'Check the saved connection and your host’s certificate, permissions, and availability.'), el('div', {class: 'alert alert-error', role: 'alert'}, error.message), button('Open Setup', 'button-primary', () => { closeWizard(); location.hash = 'settings'; }, 'server'))));
+      dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), el('div', {class: 'wizard-content'}, el('h3', {}, 'Couldn’t load your ESXi inventory'), el('p', {class: 'muted'}, 'Check the saved connection and your host’s certificate, permissions, and availability.'), el('div', {class: 'alert alert-error', role: 'alert'}, error.message), button('Open Setup', 'button-primary', () => { closeWizard(); location.hash = 'settings/connection'; }, 'server'))));
     }
   }
   function closeWizard() {

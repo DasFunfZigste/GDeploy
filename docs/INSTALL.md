@@ -1,6 +1,6 @@
 # Install GDeploy
 
-This guide installs **GDeploy 0.3.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.3.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
+This guide installs **GDeploy 0.3.1** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.3.1` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -20,7 +20,7 @@ Open **`http://SERVER_LAN_IP:8000`** from another computer, replacing `SERVER_LA
 
 Sign in with **username `admin` and password `admin`** on a fresh installation, then complete the required account setup described below. If Docker is not installed yet, complete section 1 and return here. An SSH tunnel remains optional; section 5 shows how to use one.
 
-The UI can start before installation media is ready. Open **Setup** to configure **ESXi connection** and **OS installation media**. Upload an ISO from your computer or select a `.iso` file in the server's `media/` directory, enter its publisher's verified SHA-256 checksum, and save it. The OS ISO workflow needs no `.env` edit or container restart. Sections 3 and 6 explain media preparation and Setup. Splunk still uses a separate licensed package at `media/splunk.tgz` and its `GDEPLOY_SPLUNK_SHA256` environment setting.
+The UI can start before installation media is ready. Open **Setup**, configure your host in the **ESXi connection** tab, then select the **OS installation media** tab. Upload an ISO from your computer or select a `.iso` file in the server's `media/` directory, enter its publisher's verified SHA-256 checksum, and save it. The OS ISO workflow needs no `.env` edit or container restart. Sections 3 and 6 explain media preparation and Setup. Splunk still uses a separate licensed package at `media/splunk.tgz` and its `GDEPLOY_SPLUNK_SHA256` environment setting.
 
 To update and rebuild for testing later, run these commands in the same clone:
 
@@ -29,7 +29,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO, uploads and deployment history. Before upgrading with live deployments, complete the backup steps in section 8.
+Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO, uploads and deployment history. Refresh the browser and check **v0.3.1** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
 
 ## Optional: restrict the bind address or change the port
 
@@ -163,7 +163,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.3.0
+GDEPLOY_VERSION=0.3.1
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -189,17 +189,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.3.0
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.3.1
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.3.0`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.3.1`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.3.0
+GDEPLOY_VERSION=0.3.1
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -256,7 +256,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.3.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.3.1 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -302,7 +302,7 @@ LAN access works with the default binding. For HTTPS access, put the app behind 
 
 After completing first-sign-in account setup:
 
-1. Open **Setup → ESXi connection** and enter the standalone ESXi 8.0 Update 3 hostname or IP address.
+1. Open **Setup**, select the **ESXi connection** tab, and enter the standalone ESXi 8.0 Update 3 hostname or IP address.
 2. Retrieve its certificate. The screen shows the **subject, issuer, SHA-256 fingerprint, validity dates and DNS/IP names** (subject alternative names).
 3. Compare the SHA-256 fingerprint with the certificate shown through a trusted ESXi management session or another independently trusted source. Retrieving a certificate alone does not establish the host's identity. Select **Trust certificate** once you have verified it.
 4. Enter and save the ESXi username/password, then test the connection to load inventory.
@@ -317,7 +317,7 @@ The settings API requires `verify_tls=true`. Connections also verify TLS when ol
 
 ### Select OS installation media
 
-In **Setup → OS installation media**:
+Open **Setup** in the main navigation, then select the **OS installation media** tab at the top. If an ESXi host is configured and no ISO is ready, Setup opens this tab automatically. You can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`, replacing the server address and port as needed.
 
 1. Select a `.iso` file already available in the server's `/media` directory or a previous upload, or choose **Upload an ISO** and select a file on your computer. The server directory corresponds to `media/` beside the Compose file. Browser uploads support files up to **16 GiB**.
 2. Enter the **SHA-256 checksum from the publisher's verified checksum list**. Computing a hash from an unverified download alone does not establish its source.
@@ -365,7 +365,7 @@ For datastore uploads using CA verification, `REQUESTS_CA_BUNDLE` is honored exp
 
 If a deployment fails, inspect its errors and the ESXi task/console state. **Delete & redeploy** requires the deployment name as confirmation and permanently deletes the VMs and disks owned by that deployment before trying again. It creates fresh credentials. Application data on those disks is also deleted.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.3.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.3.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
@@ -391,7 +391,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.3.0
+  ghcr.io/dasfunfzigste/gdeploy:0.3.1
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -409,7 +409,7 @@ For a manually configured installation, refresh `docker.env` from its existing c
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.3.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.3.1 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 
@@ -438,10 +438,13 @@ Common startup issues:
 | Docker reports permission denied | Reconnect after adding your user to the Docker group, or consistently use `sudo docker`. |
 | Container exits or remains unhealthy | Read `docker compose logs`; verify Compose is at least 2.24 and any explicit credential settings are complete. Preserve the volume and restore original missing/damaged keys from backup. |
 | `admin`/`admin` no longer signs in | After account setup, use the username and password you chose. Existing older installations retain their original credentials rather than adopting the new default. |
+| Cannot find the OS ISO picker | Open Setup, then the OS installation media tab, or use `/#settings/media`. If the tab is absent, rebuild/restart the app from the updated source and refresh the browser. Check the app footer shows v0.3.1 or later. |
 | Media verification or preflight fails | Check the selected ISO in Setup, its publisher checksum, available disk space and UID 10001's read access to server files. Keep media used by queued/running jobs present and unchanged. |
 | ISO upload is rejected or interrupted | Browser uploads are limited to 16 GiB. Check the data volume's free space and, if using a reverse proxy, its request-size and upload-timeout settings. The prior media selection remains saved. |
 | ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in Setup → ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
+
+Version **0.3.1** adds explicit Setup tabs, versioned browser assets and a visible release number. After updating the container, refresh the page and check the footer version. The database format and saved configuration are unchanged from 0.3.0.
 
 Version **0.3.0** adds saved OS ISO selection and persistent browser uploads. Existing environment media settings remain a fallback until a selection is saved in Setup. The new `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256` names take precedence over their legacy `GDEPLOY_UBUNTU_*` equivalents when both are supplied. Include uploaded ISOs in the complete data-volume backup and preserve server-mounted `media/` files. Versions before **0.3.0** ignore Setup's media selection and the new environment names; supply the older version's verified media path/checksum settings before a rollback. Finish or resolve active jobs before changing versions.
 

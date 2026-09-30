@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -95,6 +95,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
             response.headers["Pragma"] = "no-cache"
+        elif request.url.path == "/" or request.url.path.startswith("/static/"):
+            # Revalidate on reload, including conditional asset responses. The
+            # release query in index.html also bypasses previously cached URLs.
+            response.headers["Cache-Control"] = "no-cache"
         if getattr(request.app.state, "config", None) and request.app.state.config.cookie_secure:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
@@ -295,7 +299,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.get("/")
     def index():
-        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+        html = (STATIC / "index.html").read_text(encoding="utf-8")
+        return HTMLResponse(html.replace("__GDEPLOY_VERSION__", __version__))
 
     return app
 
