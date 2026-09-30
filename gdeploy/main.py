@@ -7,13 +7,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .certificate_trust import CertificateTrust, CertificateTrustError
+from .certificate_trust import CertificateTrust, CertificateTrustError, certificate_endpoint
 from .config import Config, hash_password, verify_password
 from .db import Database
 from .media import MediaError, MediaManager
@@ -23,11 +23,13 @@ from .models import (
     CertificateHost,
     ConnectionSettings,
     DeploymentSpec,
+    ESXiMediaSelection,
     Login,
     MediaSelection,
     RedeployRequest,
 )
 from .service import DeploymentError, DeploymentService
+from .vmware import VMwareError
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "gdeploy_session"
@@ -243,6 +245,40 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.post("/api/settings/media/upload")
     async def upload_media(request: Request, filename: str, sha256: str, current=Depends(authenticated)):
         return await request.app.state.media.upload(request, filename, sha256)
+
+    @app.get("/api/settings/media/esxi")
+    def browse_esxi_media(
+        request: Request, datastore: str | None = Query(default=None, max_length=128),
+        folder: str = Query(default="", max_length=2048), current=Depends(authenticated),
+    ):
+        saved = request.app.state.db.settings()
+        if not saved:
+            raise MediaError("Save the ESXi connection in Setup before browsing its installation media.")
+        try:
+            with request.app.state.service.client(saved) as esxi:
+                datastores = esxi.inventory()["datastores"]
+                chosen = datastore if datastore is not None else next((item["name"] for item in datastores), "")
+                if not chosen:
+                    return {"host": saved["host"], "datastores": datastores, "datastore": "", "folder": "",
+                            "parent": None, "folders": [], "files": []}
+                return {**esxi.browse_iso_media(chosen, folder), "host": saved["host"], "datastores": datastores}
+        except VMwareError as exc:
+            raise MediaError(str(exc)) from None
+
+    @app.post("/api/settings/media/esxi")
+    def import_esxi_media(payload: ESXiMediaSelection, request: Request, current=Depends(authenticated)):
+        saved = request.app.state.db.settings()
+        if not saved:
+            raise MediaError("Save the ESXi connection in Setup before selecting its installation media.")
+        if certificate_endpoint(saved["host"])[2] != certificate_endpoint(payload.host)[2]:
+            raise MediaError("The saved ESXi host changed. Browse its datastores again before selecting an ISO.", 409)
+        try:
+            with request.app.state.service.client(saved) as esxi:
+                return request.app.state.media.import_esxi(
+                    esxi, saved["host"], payload.datastore, payload.path, payload.sha256
+                )
+        except VMwareError as exc:
+            raise MediaError(str(exc)) from None
 
     @app.get("/api/inventory")
     def inventory(request: Request, current=Depends(authenticated)):

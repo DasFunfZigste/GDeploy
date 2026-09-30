@@ -71,6 +71,13 @@ class MediaSelection(StrictModel):
     sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
 
 
+class ESXiMediaSelection(CertificateHost):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    datastore: str = Field(min_length=1, max_length=128)
+    path: str = Field(min_length=1, max_length=2048)
+    sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
+
+
 class VMSpec(StrictModel):
     role: Literal["ubuntu", "splunk", "elasticsearch", "kibana"]
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$")

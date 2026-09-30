@@ -44,6 +44,7 @@
     refresh: [['path', {d: 'M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 13 2l1 4M4 12l1 4a8 8 0 0 0 13 2'}]],
     info: [['circle', {cx: 12, cy: 12, r: 9}], ['path', {d: 'M12 11v6M12 7h.01'}]],
     disc: [['circle', {cx: 12, cy: 12, r: 9}], ['circle', {cx: 12, cy: 12, r: 3}]],
+    folder: [['path', {d: 'M3 7V5a1 1 0 0 1 1-1h5l3 3h8a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z'}]],
     logout: [['path', {d: 'M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4M14 8l4 4-4 4M8 12h10'}]],
   };
 
@@ -356,7 +357,12 @@
   function createMediaPanel(onChange, onBusy) {
     const viewEpoch = state.routeEpoch;
     let catalog = null, mode = 'server', busy = '', externalBusy = false;
+    let esxiListing = null, browseBusy = false, browseRequest = 0;
+    let browseTarget = {datastore: '', folder: ''};
     const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const normalizedHost = value => String(value || '').trim().toLowerCase();
+    const sourceLabel = item => ({server: 'GDeploy server', upload: 'Uploaded', esxi: 'ESXi copy'})[item.source] || 'GDeploy server';
+    const originLabel = origin => origin ? `${origin.host} · [${origin.datastore}] ${origin.path}` : '';
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
     const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
     const selectedSummary = el('div', {class: 'media-selected-summary'});
@@ -365,39 +371,120 @@
     const fileInput = el('input', {id: 'os-media-file', name: 'iso_file', type: 'file', accept: '.iso', 'aria-describedby': 'os-media-file-help'});
     const fileHelp = el('small', {id: 'os-media-file-help'}, 'Upload an .iso file from your computer.');
     const checksum = el('input', {id: 'os-media-sha256', name: 'sha256', type: 'text', required: true, minlength: 64, maxlength: 64, pattern: '[a-fA-F0-9]{64}', placeholder: 'Paste the publisher’s 64-character SHA-256 checksum', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', class: 'mono', 'aria-describedby': 'os-media-sha256-help'});
-    const sourceInput = value => el('input', {type: 'radio', name: 'media-source', value, checked: mode === value, onChange: () => { mode = value; checksum.value = value === 'server' ? currentItem()?.sha256 || '' : ''; inlineError(errorBox, ''); successBox.hidden = true; syncControls(); }});
-    const serverRadio = sourceInput('server'), uploadRadio = sourceInput('upload');
-    const serverFields = el('div', {class: 'media-source-fields'}, field('OS ISO on the server', serverSelect), el('p', {class: 'media-help', id: 'os-media-server-help'}, 'Select a mounted ISO or a previous upload. To add server files, place them in the media folder beside compose.yaml, then refresh this list.'));
+    const sourceInput = value => el('input', {type: 'radio', name: 'media-source', value, checked: mode === value, onChange: () => {
+      mode = value; browseRequest++; browseBusy = false;
+      browseRefresh.replaceChildren(icon('refresh'), 'Refresh folder');
+      checksum.value = value === 'server' ? currentItem()?.sha256 || '' : '';
+      inlineError(errorBox, ''); successBox.hidden = true; syncControls();
+      if (value === 'esxi') browseESXi(browseTarget.datastore, browseTarget.folder);
+    }});
+    const serverRadio = sourceInput('server'), uploadRadio = sourceInput('upload'), esxiRadio = sourceInput('esxi');
+    const serverOrigin = el('p', {class: 'media-origin', hidden: true});
+    const serverFields = el('div', {class: 'media-source-fields'}, field('OS ISO on the GDeploy server', serverSelect), serverOrigin, el('p', {class: 'media-help', id: 'os-media-server-help'}, 'Select a mounted ISO, a previous upload, or a saved ESXi copy. To add server files, place them in the media folder beside compose.yaml, then refresh this list.'));
     const uploadFields = el('div', {class: 'media-source-fields', hidden: true}, field('OS ISO file', fileInput), fileHelp);
+    const datastoreSelect = el('select', {id: 'os-media-esxi-datastore', name: 'esxi_datastore', required: true}, el('option', {value: ''}, 'Choose a datastore'));
+    const esxiFileSelect = el('select', {id: 'os-media-esxi-file', name: 'esxi_iso', required: true, 'aria-describedby': 'os-media-esxi-location'}, el('option', {value: ''}, 'Choose an ISO from this folder'));
+    const folderPath = el('code', {id: 'os-media-esxi-folder'}, 'Datastore root');
+    const folderList = el('div', {class: 'media-folders', 'aria-label': 'Datastore folders', role: 'group'});
+    const browseStatus = el('p', {class: 'media-help', role: 'status', 'aria-live': 'polite'});
+    const browseError = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+    const esxiLocation = el('p', {class: 'media-origin', id: 'os-media-esxi-location', hidden: true});
+    const browseRefresh = button('Refresh folder', 'button-small', () => browseESXi(browseTarget.datastore, browseTarget.folder), 'refresh');
+    browseRefresh.id = 'os-media-esxi-refresh';
+    const up = button('Up one folder', 'button-ghost button-small', () => { const parent = parentFolder(); if (parent !== null) browseESXi(browseTarget.datastore, parent); }, 'back');
+    up.id = 'os-media-esxi-up';
+    const connectionPrompt = el('div', {class: 'alert alert-info'}, 'Save your ESXi connection before browsing its datastores. ', el('a', {href: '#settings/connection', class: 'media-connection-link'}, 'Open ESXi connection'));
+    const esxiBrowser = el('div', {}, field('ESXi datastore', datastoreSelect),
+      el('div', {class: 'media-browser-toolbar'}, el('div', {class: 'media-folder-location'}, el('span', {}, 'Current folder'), folderPath), el('div', {class: 'media-browser-actions'}, up, browseRefresh)),
+      browseError, browseStatus, folderList, field('OS ISO in this folder', esxiFileSelect), esxiLocation);
+    const esxiFields = el('div', {class: 'media-source-fields', id: 'os-media-esxi', hidden: true}, connectionPrompt, esxiBrowser,
+      el('p', {class: 'media-help'}, 'GDeploy copies the selected ISO from ESXi and checks it before use. The original stays unchanged. Allow enough free space on the GDeploy server for the ISO copy and installation media.'));
     const progress = el('progress', {max: 100, value: 0, 'aria-label': 'OS ISO upload progress'});
     const progressText = el('span', {role: 'status', 'aria-live': 'polite'});
     const cancel = button('Cancel upload', 'button-ghost button-small', () => state.mediaUpload?.abort());
     const progressBox = el('div', {class: 'media-progress', hidden: true}, progress, el('div', {}, progressText, cancel));
     const currentItem = () => catalog?.items?.find(item => item.id === serverSelect.value);
+    const currentEsxiFile = () => esxiListing?.files.find(file => file.path === esxiFileSelect.value);
+    const currentEsxiHost = () => esxiListing && state.settings?.configured && normalizedHost(esxiListing.host) === normalizedHost(state.settings.host);
+    function parentFolder() {
+      if (esxiListing && esxiListing.datastore === browseTarget.datastore && esxiListing.folder === browseTarget.folder) return esxiListing.parent;
+      if (!browseTarget.folder) return null;
+      const separator = browseTarget.folder.lastIndexOf('/');
+      return separator < 0 ? '' : browseTarget.folder.slice(0, separator);
+    }
     function syncControls() {
       const locked = Boolean(busy || externalBusy || !catalog);
-      serverRadio.checked = mode === 'server'; uploadRadio.checked = mode === 'upload';
-      serverRadio.disabled = locked; uploadRadio.disabled = locked;
-      serverFields.hidden = mode !== 'server'; uploadFields.hidden = mode !== 'upload';
+      for (const radio of [serverRadio, uploadRadio, esxiRadio]) { radio.checked = mode === radio.value; radio.disabled = locked; }
+      serverFields.hidden = mode !== 'server'; uploadFields.hidden = mode !== 'upload'; esxiFields.hidden = mode !== 'esxi';
       serverSelect.disabled = locked || mode !== 'server';
       fileInput.disabled = locked || mode !== 'upload'; fileInput.required = mode === 'upload';
-      checksum.disabled = locked;
+      const browsingDisabled = locked || mode !== 'esxi' || !state.settings?.configured || browseBusy;
+      connectionPrompt.hidden = Boolean(state.settings?.configured); esxiBrowser.hidden = !state.settings?.configured;
+      datastoreSelect.disabled = browsingDisabled || datastoreSelect.options.length <= 1;
+      esxiFileSelect.disabled = browsingDisabled || !currentEsxiHost();
+      browseRefresh.disabled = browsingDisabled;
+      up.disabled = browsingDisabled || parentFolder() === null;
+      for (const folder of folderList.querySelectorAll('button')) folder.disabled = browsingDisabled;
+      checksum.disabled = locked || (mode === 'esxi' && (!state.settings?.configured || browseBusy));
       refresh.disabled = Boolean(busy || externalBusy);
-      submit.disabled = locked || (mode === 'server' && !serverSelect.value) || (mode === 'upload' && !fileInput.files.length);
-      if (!busy) submit.replaceChildren(icon(mode === 'upload' ? 'disc' : 'check'), mode === 'upload' ? 'Upload & use ISO' : 'Use selected ISO');
+      refresh.hidden = mode === 'esxi';
+      submit.disabled = locked || (mode === 'server' && !serverSelect.value) || (mode === 'upload' && !fileInput.files.length) || (mode === 'esxi' && (browseBusy || !currentEsxiHost() || !currentEsxiFile()));
+      if (!busy) submit.replaceChildren(icon(mode === 'server' ? 'check' : 'disc'), mode === 'upload' ? 'Upload & use ISO' : mode === 'esxi' ? 'Copy & use ISO' : 'Use selected ISO');
+      const serverItem = currentItem();
+      serverOrigin.hidden = !serverItem?.origin;
+      serverOrigin.textContent = serverItem?.origin ? `ESXi copy from ${originLabel(serverItem.origin)}` : '';
+      esxiLocation.hidden = !currentEsxiFile();
+      esxiLocation.textContent = currentEsxiFile() ? `${esxiListing.host} · [${esxiListing.datastore}] ${esxiFileSelect.value}` : '';
+      esxiBrowser.setAttribute('aria-busy', browseBusy ? 'true' : 'false');
       panel.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+    async function browseESXi(datastore = '', folder = '') {
+      if (!currentView() || mode !== 'esxi' || busy || externalBusy) return;
+      const request = ++browseRequest, requestedHost = normalizedHost(state.settings?.host);
+      if (!state.settings?.configured) { esxiListing = null; browseBusy = false; syncControls(); return; }
+      const previousListing = esxiListing, previousFile = esxiFileSelect.value, previousChecksum = checksum.value;
+      browseTarget = {datastore, folder};
+      folderPath.textContent = folder || 'Datastore root';
+      browseBusy = true; successBox.hidden = true; inlineError(browseError, '');
+      browseStatus.textContent = `Loading folders and ISO files from ${state.settings.host}…`;
+      setBusy(browseRefresh, 'Loading…'); syncControls();
+      const currentRequest = () => currentView() && mode === 'esxi' && request === browseRequest && requestedHost === normalizedHost(state.settings?.host);
+      try {
+        const query = new URLSearchParams({folder});
+        if (datastore) query.set('datastore', datastore);
+        const listing = await api(`/api/settings/media/esxi?${query}`);
+        if (!currentRequest()) return;
+        if (normalizedHost(listing.host) !== requestedHost) throw new Error('The saved ESXi host changed. Reload Setup before choosing an ISO.');
+        esxiListing = listing; browseTarget = {datastore: listing.datastore, folder: listing.folder};
+        datastoreSelect.replaceChildren(el('option', {value: ''}, 'Choose a datastore'), ...listing.datastores.map(store => el('option', {value: store.name}, `${store.name} · ${Math.floor(Number(store.free_gb) || 0)} GB free`)));
+        datastoreSelect.value = listing.datastore;
+        folderPath.textContent = listing.folder || 'Datastore root';
+        folderList.replaceChildren(...listing.folders.map(folderItem => el('button', {type: 'button', class: 'media-folder', 'aria-label': `Open folder ${folderItem.name}`, onClick: () => browseESXi(listing.datastore, folderItem.path)}, icon('folder'), el('span', {}, folderItem.name), icon('arrow'))));
+        esxiFileSelect.replaceChildren(el('option', {value: ''}, listing.files.length ? 'Choose an OS ISO' : 'No ISO files in this folder'), ...listing.files.map(file => el('option', {value: file.path}, `${file.name} · ${formatBytes(file.size_bytes)}`)));
+        const keepSelection = previousListing?.host === listing.host && previousListing?.datastore === listing.datastore && previousListing?.folder === listing.folder && listing.files.some(file => file.path === previousFile);
+        esxiFileSelect.value = keepSelection ? previousFile : '';
+        checksum.value = keepSelection ? previousChecksum : '';
+        browseStatus.textContent = listing.folders.length || listing.files.length ? `${listing.folders.length} ${listing.folders.length === 1 ? 'folder' : 'folders'} · ${listing.files.length} ${listing.files.length === 1 ? 'ISO file' : 'ISO files'}` : 'This folder contains no subfolders or ISO files.';
+      } catch (error) {
+        if (!currentRequest()) return;
+        esxiListing = null; esxiFileSelect.replaceChildren(el('option', {value: ''}, 'Refresh the folder list to choose an ISO')); folderList.replaceChildren();
+        checksum.value = ''; inlineError(browseError, error.message); browseStatus.textContent = 'Check the ESXi connection, datastore permissions, and folder, then refresh.';
+      } finally {
+        if (currentRequest()) { browseBusy = false; browseRefresh.replaceChildren(icon('refresh'), 'Refresh folder'); syncControls(); }
+      }
     }
     function renderCatalog(next) {
       catalog = next;
       const previousId = serverSelect.value;
-      serverSelect.replaceChildren(el('option', {value: ''}, next.items.length ? 'Choose an OS ISO' : 'No ISOs found on this server'), ...next.items.map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${item.source === 'upload' ? 'Uploaded' : 'Server'}`)));
+      serverSelect.replaceChildren(el('option', {value: ''}, next.items.length ? 'Choose an OS ISO' : 'No ISOs found on this server'), ...next.items.map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${sourceLabel(item)}`)));
       serverSelect.value = next.selected?.id || (next.items.some(item => item.id === previousId) ? previousId : '');
       if (mode === 'server') checksum.value = currentItem()?.sha256 || '';
       fileHelp.textContent = `Upload an .iso file up to ${formatBytes(next.max_upload_bytes)}. Uploads are kept with GDeploy’s persistent data.`;
       badge.className = next.ready ? 'status status-completed' : 'status';
       badge.textContent = next.ready ? 'Ready for preflight' : 'Not configured';
       if (next.selected) {
-        selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('disc'), el('div', {}, el('span', {class: 'eyebrow'}, 'SAVED OS ISO'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${next.selected.source === 'upload' ? 'Uploaded to GDeploy' : 'Server media'}`))), el('details', {class: 'media-integrity'}, el('summary', {}, 'Saved SHA-256 checksum'), el('code', {class: 'certificate-fingerprint'}, next.selected.sha256)));
+        selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('disc'), el('div', {}, el('span', {class: 'eyebrow'}, 'SAVED OS ISO'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${sourceLabel(next.selected)}`))), el('details', {class: 'media-integrity'}, el('summary', {}, 'Saved SHA-256 checksum'), el('code', {class: 'certificate-fingerprint'}, next.selected.sha256)));
+        if (next.selected.origin) selectedSummary.append(el('p', {class: 'media-origin'}, el('strong', {}, 'Copied from ESXi'), el('span', {}, originLabel(next.selected.origin))));
         if (!next.ready) selectedSummary.append(el('p', {class: 'media-help'}, 'The saved media is unavailable or needs attention. Choose a valid ISO below before deploying.'));
       } else selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('disc'), el('div', {}, el('strong', {}, 'Choose your installation media'), el('p', {}, 'This OS ISO will be used for new deployments.'))));
       onChange(next);
@@ -422,33 +509,39 @@
       if (mode === 'upload' && (!file || !file.name.toLowerCase().endsWith('.iso') || !file.size || file.size > catalog.max_upload_bytes)) {
         inlineError(errorBox, `Choose a nonempty .iso file no larger than ${formatBytes(catalog.max_upload_bytes)}.`); return;
       }
-      const uploading = mode === 'upload';
-      busy = uploading ? 'upload' : 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true;
-      progressBox.hidden = !uploading;
+      const uploading = mode === 'upload', importing = mode === 'esxi';
+      if (importing && (browseBusy || !currentEsxiHost() || !currentEsxiFile())) { inlineError(errorBox, 'Refresh the ESXi folder list and choose an ISO before copying it.'); return; }
+      const esxiSource = importing ? {host: esxiListing.host, datastore: esxiListing.datastore, path: esxiFileSelect.value} : null;
+      busy = uploading ? 'upload' : importing ? 'import' : 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true;
+      progressBox.hidden = !uploading && !importing; cancel.hidden = !uploading;
+      progress.setAttribute('aria-label', importing ? 'OS ISO copy progress' : 'OS ISO upload progress');
       if (uploading) { progress.value = 0; cancel.disabled = false; progressText.textContent = 'Starting upload…'; }
-      setBusy(submit, uploading ? 'Uploading ISO…' : 'Verifying ISO…'); syncControls();
+      if (importing) { progress.removeAttribute('value'); progressText.textContent = 'Copying & verifying ISO… This may take several minutes.'; }
+      setBusy(submit, uploading ? 'Uploading ISO…' : importing ? 'Copying & verifying ISO…' : 'Verifying ISO…'); syncControls();
       try {
         const digest = checksum.value.trim().toLowerCase();
         const next = uploading ? await uploadMedia(file, digest, (loaded, total) => {
           if (!currentView()) return;
           if (loaded >= total) { progress.removeAttribute('value'); cancel.disabled = true; progressText.textContent = 'Upload complete. Verifying checksum and installation media…'; setBusy(submit, 'Verifying ISO…'); }
           else { progress.value = Math.round(loaded / total * 100); progressText.textContent = `${formatBytes(loaded)} of ${formatBytes(total)} uploaded`; }
-        }) : await api('/api/settings/media', {method: 'PUT', body: {media_id: serverSelect.value, sha256: digest}});
+        }) : importing ? await api('/api/settings/media/esxi', {method: 'POST', body: {...esxiSource, sha256: digest}}) : await api('/api/settings/media', {method: 'PUT', body: {media_id: serverSelect.value, sha256: digest}});
         if (!currentView()) return;
         mode = 'server'; fileInput.value = ''; renderCatalog(next);
-        successBox.textContent = `${next.selected?.name || 'OS ISO'} verified and saved. New deployments will use this media.`;
+        successBox.textContent = importing ? `${next.selected?.name || 'OS ISO'} copied from ESXi, verified, and saved. New deployments will use this copy.` : `${next.selected?.name || 'OS ISO'} verified and saved. New deployments will use this media.`;
         successBox.hidden = false;
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
       finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
     }}, el('div', {class: 'form-body'}, selectedSummary, errorBox, successBox,
-      el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose an ISO source'), el('label', {}, serverRadio, 'Select server media'), el('label', {}, uploadRadio, 'Upload an ISO')),
-      serverFields, uploadFields,
+      el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose an ISO source'), el('label', {}, serverRadio, 'GDeploy server'), el('label', {}, esxiRadio, 'ESXi datastore'), el('label', {}, uploadRadio, 'Upload an ISO')),
+      serverFields, esxiFields, uploadFields,
       field('Publisher SHA-256 checksum', checksum, el('span', {id: 'os-media-sha256-help'}, 'Copy the checksum from the OS publisher’s download page. GDeploy verifies the file before saving it.')),
       el('p', {class: 'media-compatibility'}, icon('info'), 'Automatic installation currently supports Ubuntu Server 24.04 LTS amd64 using autoinstall. Other ISOs are not supported.'), progressBox), el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), submit));
     const panel = el('section', {class: 'surface', id: 'os-media-panel', 'aria-labelledby': 'os-media-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'os-media-title'}, 'OS installation media'), el('p', {}, 'Choose and verify the ISO used to install your virtual machines.')), badge), form);
     $('.surface-header', panel).append(refresh);
     serverSelect.addEventListener('change', () => { checksum.value = currentItem()?.sha256 || ''; successBox.hidden = true; syncControls(); });
     fileInput.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
+    datastoreSelect.addEventListener('change', () => browseESXi(datastoreSelect.value, ''));
+    esxiFileSelect.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
     checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
     return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }

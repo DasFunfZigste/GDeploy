@@ -65,7 +65,8 @@ def tls_server(*certificates):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.server.requests.append(("GET", self.path, dict(self.headers), b""))
-            response = (
+            response = getattr(self.server, "download_body", None) if self.path.startswith("/folder/") else None
+            response = response if response is not None else (
                 b'<namespaces version="1.0"><namespace><name>urn:vim25</name>'
                 b'<version>8.0.3.0</version></namespace></namespaces>'
             )
@@ -280,6 +281,55 @@ def test_client_upload_uses_same_pinned_context_as_sdk(certificates, monkeypatch
                 client.upload_iso("datastore1", "gdeploy/067a159a-4055-4bfe-b5ed-3b34644b6ebc/ubuntu.iso", source)
                 assert server.requests[0][2]["Cookie"] == 'vmware_soap_session="test-session-secret"'
                 assert server.requests[0][3] == b"installation-media-secret"
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_client_download_streams_only_from_approved_certificate(certificates, monkeypatch, tmp_path, changed):
+    approved = certificates()
+    served = certificates() if changed else approved
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "irrelevant-missing-bundle.pem"))
+    with tls_server(served) as server:
+        server.download_body = b"\0" * (16 * 2048) + b"\x01CD001\x01" + b"installation-media" * 70000
+        client = ESXiClient(
+            f"127.0.0.1:{server.server_port}", "root", "password", verify_tls=False, trusted_certificate=approved.pem
+        )
+        host = SimpleNamespace(
+            runtime=SimpleNamespace(connectionState="connected", inMaintenanceMode=False),
+            datastore=[SimpleNamespace(name="datastore1", summary=SimpleNamespace(accessible=True))],
+        )
+        dc = SimpleNamespace(name="ha-datacenter")
+        si = MagicMock()
+        si.RetrieveContent.return_value.about.apiType = "HostAgent"
+        si._stub.cookie = 'vmware_soap_session="test-session-secret"'
+        connect = MagicMock(return_value=si)
+        monkeypatch.setattr(vmware, "SmartConnect", connect)
+        monkeypatch.setattr(vmware, "Disconnect", lambda instance: None)
+        monkeypatch.setattr(client, "_objects", lambda kind: [host] if kind is vim.HostSystem else [dc])
+        destination = tmp_path / "received.partial"
+        with client:
+            assert client.verify_tls is True
+            assert client._http.get_adapter("https://").context is connect.call_args.kwargs["sslContext"]
+            assert client._http.trust_env is False
+            if changed:
+                with pytest.raises(VMwareError, match="TLS certificate"):
+                    client.download_iso("datastore1", "ISO Library/ubuntu.iso", destination, max_bytes=2 * 1024**2)
+                assert server.requests == []
+                assert not destination.exists()
+            else:
+                count = client.download_iso(
+                    "datastore1", "ISO Library/ubuntu.iso", destination,
+                    max_bytes=2 * 1024**2, expected_size=len(server.download_body),
+                )
+                assert count == len(server.download_body)
+                assert destination.read_bytes() == server.download_body
+                assert len(server.requests) == 1
+                method, path, headers, body = server.requests[0]
+                assert method == "GET"
+                assert path.startswith("/folder/ISO%20Library/ubuntu.iso?")
+                assert headers["Cookie"] == 'vmware_soap_session="test-session-secret"'
+                assert headers["Accept-Encoding"] == "identity"
+                assert "Authorization" not in headers
+                assert body == b""
 
 
 @pytest.mark.parametrize("bundle", ["matching", "wrong", "missing"])

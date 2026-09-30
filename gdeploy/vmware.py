@@ -11,8 +11,10 @@ import asyncio
 import ipaddress
 import os
 import re
+import shutil
 import ssl
 import time
+import unicodedata
 import uuid
 from functools import wraps
 from http.cookies import SimpleCookie
@@ -23,6 +25,8 @@ from urllib.parse import quote, urlsplit
 import requests
 from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim, vmodl
+from urllib3.exceptions import HTTPError as HTTPTransportError
+from urllib3.exceptions import ReadTimeoutError
 
 from .tls import CertificateError, PinnedCertificateAdapter, certificate_context
 
@@ -103,6 +107,25 @@ def _split_datastore_path(path: str, owner_id: str) -> tuple[str, str]:
     return _datastore_name(datastore), _relative_path(relative, owner_id)
 
 
+def _media_path(path: str, *, folder: bool = False) -> str:
+    """Validate read-only library paths without widening deployment ownership rules."""
+    if path == "" and folder:
+        return path
+    if (
+        not isinstance(path, str)
+        or not path
+        or len(path) > 4096
+        or any(part in ("", ".", "..") for part in path.split("/"))
+        or any(char in path for char in "\\[]%")
+        or any(unicodedata.category(char).startswith("C") for char in path)
+        or str(PurePosixPath(path)) != path
+    ):
+        raise VMwareError("Choose a relative datastore media path without traversal, encoded paths, or control characters.")
+    if not folder and not path.lower().endswith(".iso"):
+        raise VMwareError("OS installation media must have an .iso filename.")
+    return path
+
+
 class ESXiClient:
     """An authenticated, short-lived connection to exactly one ESXi host."""
 
@@ -110,6 +133,11 @@ class ESXiClient:
     TASK_TIMEOUT = 900
     POLL_INTERVAL = 1.0
     UPLOAD_TIMEOUT = (15, 120)
+    MEDIA_LIST_LIMIT = 1000
+    DOWNLOAD_TIMEOUT = (15, 120)
+    DOWNLOAD_TOTAL_TIMEOUT = 3600
+    DOWNLOAD_CHUNK_BYTES = 1024**2
+    MEDIA_FREE_SPACE_RESERVE = 64 * 1024**2
 
     def __init__(
         self, host: str, username: str, password: str, verify_tls: bool = True, *, trusted_certificate: str | None = None
@@ -327,8 +355,8 @@ class ESXiClient:
             "vms": [{"name": name} for name in sorted(vm.name for vm in self._objects(vim.VirtualMachine))],
         }
 
-    def _wait_task(self, task: Any, operation: str, *, missing_ok: bool = False) -> Any:
-        deadline = time.monotonic() + self.TASK_TIMEOUT
+    def _wait_task(self, task: Any, operation: str, *, missing_ok: bool = False, read_only: bool = False) -> Any:
+        deadline = time.monotonic() + (self.SOCKET_TIMEOUT if read_only else self.TASK_TIMEOUT)
         while True:
             info = task.info
             if info.state == vim.TaskInfo.State.success:
@@ -339,10 +367,197 @@ class ESXiClient:
                     return None
                 raise VMwareError(f"{operation} failed: {self._safe_error(error)}")
             if time.monotonic() >= deadline:
+                if read_only:
+                    raise VMwareError(f"{operation} timed out. Check host connectivity and retry browsing this folder.")
                 raise VMwareError(
                     f"{operation} timed out. ESXi may still be processing the task; inspect and clean up this deployment before retrying."
                 )
             time.sleep(self.POLL_INTERVAL)
+
+    @_guarded("Browse ESXi installation media")
+    def browse_iso_media(self, datastore: str, folder: str = "") -> dict:
+        datastore_object = self._datastore(datastore)
+        folder = _media_path(folder, folder=True)
+        browser = vim.host.DatastoreBrowser
+        search = browser.SearchSpec(
+            query=[browser.FolderQuery(), browser.IsoImageQuery()],
+            details=browser.FileInfo.Details(fileType=True, fileSize=True, modification=False, fileOwner=False),
+            searchCaseInsensitive=True,
+            sortFoldersFirst=True,
+        )
+        result = self._wait_task(
+            datastore_object.browser.SearchDatastore_Task(datastorePath=f"[{datastore}] {folder}", searchSpec=search),
+            "Browse datastore media", read_only=True,
+        )
+        entries = result.file or []
+        if len(entries) > self.MEDIA_LIST_LIMIT:
+            raise VMwareError(
+                f"This folder contains more than {self.MEDIA_LIST_LIMIT} media entries. "
+                "Organize the datastore into smaller folders and browse again."
+            )
+        folders, files = [], []
+        seen = set()
+        for entry in entries:
+            # The ESXi SDK has no general symlink metadata. Exclude link types
+            # or flags if an API revision supplies them, and accept only known
+            # folder/ISO/plain-file results from the nonrecursive search.
+            if (
+                "link" in type(entry).__name__.lower()
+                or getattr(entry, "symlink", False)
+                or getattr(entry, "linkTarget", None)
+            ):
+                continue
+            is_folder = isinstance(entry, browser.FolderInfo)
+            if not is_folder and type(entry) not in (browser.FileInfo, browser.IsoImageInfo):
+                continue
+            name = entry.path
+            if is_folder and isinstance(name, str):
+                name = name.removesuffix("/")
+            if not isinstance(name, str) or not name or "/" in name:
+                continue
+            relative = f"{folder}/{name}" if folder else name
+            try:
+                _media_path(relative, folder=is_folder)
+            except VMwareError:
+                continue
+            if relative in seen:
+                raise VMwareError("ESXi returned duplicate media paths. Refresh the datastore browser before selecting a file.")
+            seen.add(relative)
+            if is_folder:
+                folders.append({"name": name, "path": relative})
+            else:
+                size = entry.fileSize
+                if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                    continue
+                files.append({"name": name, "path": relative, "size_bytes": size})
+        return {
+            "datastore": datastore,
+            "folder": folder,
+            "parent": str(PurePosixPath(folder).parent) if "/" in folder else "" if folder else None,
+            "folders": sorted(folders, key=lambda item: (item["name"].casefold(), item["name"])),
+            "files": sorted(files, key=lambda item: (item["name"].casefold(), item["name"])),
+        }
+
+    def _datastore_session_headers(self) -> dict:
+        cookie = SimpleCookie()
+        cookie.load(self._si._stub.cookie)
+        session = cookie.get("vmware_soap_session")
+        if session is None or not session.value or any(c in session.value for c in "\r\n"):
+            raise VMwareError("ESXi did not provide a valid datastore transfer session.")
+        return {"Cookie": f"vmware_soap_session={session.coded_value}"}
+
+    def _datastore_verify(self):
+        verify = self.verify_tls
+        if verify and self._trusted_certificate is None:
+            # Proxy discovery stays disabled while explicit private CA bundles
+            # are honored. Exact certificate pins always retain verify=True.
+            verify = os.environ.get("REQUESTS_CA_BUNDLE") or True
+        return verify
+
+    @_guarded("Download ESXi installation ISO")
+    def download_iso(
+        self, datastore: str, remote_path: str, destination: Path, *, max_bytes: int, expected_size: int | None = None
+    ) -> int:
+        """Copy a shared source ISO to an exclusive local file, never modifying ESXi."""
+        self._datastore(datastore)
+        remote_path = _media_path(remote_path)
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+            raise VMwareError("The OS ISO download size limit must be a positive integer.")
+        if expected_size is not None and (
+            isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0
+        ):
+            raise VMwareError("The selected ESXi OS ISO is empty or has an invalid file size. Refresh the media browser.")
+        if expected_size is not None and expected_size > max_bytes:
+            raise VMwareError("The selected ESXi OS ISO exceeds the allowed download size.")
+        destination = Path(destination)
+        headers = self._datastore_session_headers() | {"Accept-Encoding": "identity"}
+        response = None
+        created = completed = False
+        total = 0
+        deadline = time.monotonic() + self.DOWNLOAD_TOTAL_TIMEOUT
+        try:
+            if shutil.disk_usage(destination.parent).free < (expected_size or 0) + self.MEDIA_FREE_SPACE_RESERVE:
+                raise VMwareError("Not enough free space in the GDeploy data volume to download this OS ISO.")
+            try:
+                descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            except FileExistsError:
+                raise VMwareError("The local download destination already exists; it has not been changed.") from None
+            created = True
+            with os.fdopen(descriptor, "wb") as target:
+                assert self._http is not None
+                response = self._http.get(
+                    f"{self._origin}/folder/{quote(remote_path, safe='/')}",
+                    params={"dcPath": self._dc.name, "dsName": datastore},
+                    headers=headers,
+                    verify=self._datastore_verify(),
+                    timeout=self.DOWNLOAD_TIMEOUT,
+                    allow_redirects=False,
+                    stream=True,
+                )
+                if response.status_code in (301, 302, 303, 307, 308):
+                    raise VMwareError("ESXi redirected the datastore download; redirects are disabled to protect session credentials.")
+                if response.status_code in (401, 403):
+                    raise VMwareError("ESXi denied access to the OS ISO. Check the account's datastore browse and file download permissions.")
+                if response.status_code == 404:
+                    raise VMwareError("The selected ESXi OS ISO was not found. Refresh the media browser and select it again.")
+                if response.status_code != 200:
+                    raise VMwareError(f"ESXi rejected the OS ISO download (HTTP {response.status_code}).")
+                if response.headers.get("Content-Encoding", "identity").lower() not in ("", "identity"):
+                    raise VMwareError("ESXi returned an encoded download; an unchanged OS ISO file is required.")
+                raw_length = response.headers.get("Content-Length")
+                if raw_length is not None:
+                    if not re.fullmatch(r"[0-9]+", raw_length.strip()) or len(raw_length.strip()) > 20:
+                        raise VMwareError("ESXi returned an invalid OS ISO download size.")
+                    length = int(raw_length)
+                    if length <= 0:
+                        raise VMwareError("The selected ESXi OS ISO is empty.")
+                    if length > max_bytes:
+                        raise VMwareError("The ESXi OS ISO download exceeds the allowed size.")
+                    if expected_size is not None and length != expected_size:
+                        raise VMwareError("The ESXi OS ISO size changed. Refresh the media browser before importing it.")
+                    if shutil.disk_usage(destination.parent).free < length + self.MEDIA_FREE_SPACE_RESERVE:
+                        raise VMwareError("Not enough free space in the GDeploy data volume to download this OS ISO.")
+                else:
+                    length = None
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise VMwareError("The OS ISO download timed out. Check host connectivity and try importing it again.")
+                    # read1 returns available bytes after one socket read. In
+                    # contrast, iter_content can wait to fill an entire chunk
+                    # while a slow peer sends enough bytes to avoid inactivity
+                    # timeouts, preventing the total deadline being checked.
+                    chunk = response.raw.read1(self.DOWNLOAD_CHUNK_BYTES, decode_content=False)
+                    if time.monotonic() >= deadline:
+                        raise VMwareError("The OS ISO download timed out. Check host connectivity and try importing it again.")
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise VMwareError("The ESXi OS ISO download exceeds the allowed size.")
+                    if (length is not None and total > length) or (expected_size is not None and total > expected_size):
+                        raise VMwareError("The ESXi OS ISO size changed during download. Refresh the media browser and retry.")
+                    if shutil.disk_usage(destination.parent).free < len(chunk) + self.MEDIA_FREE_SPACE_RESERVE:
+                        raise VMwareError("The GDeploy data volume ran out of space while downloading the OS ISO.")
+                    target.write(chunk)
+                if not total or (length is not None and total != length) or (expected_size is not None and total != expected_size):
+                    raise VMwareError("The OS ISO download was incomplete. Refresh the media browser and try importing it again.")
+                target.flush()
+                os.fsync(target.fileno())
+            completed = True
+            return total
+        except ReadTimeoutError:
+            raise VMwareError("The ESXi download connection timed out. Check host connectivity and retry the import.") from None
+        except HTTPTransportError:
+            raise VMwareError("The HTTPS connection to ESXi failed during download. Check host connectivity and retry the import.") from None
+        except requests.exceptions.RequestException:
+            raise
+        except OSError:
+            raise VMwareError("Unable to save the downloaded OS ISO. Check the GDeploy data volume's free space and permissions.") from None
+        finally:
+            if response is not None:
+                response.close()
+            if created and not completed:
+                destination.unlink(missing_ok=True)
 
     def _make_directory(self, datastore: str, relative_path: str) -> None:
         try:
@@ -360,29 +575,19 @@ class ESXiClient:
         local_path = Path(local_path)
         if not local_path.is_file() or local_path.stat().st_size == 0:
             raise VMwareError("The remastered installation ISO is missing or empty.")
-        cookie = SimpleCookie()
-        cookie.load(self._si._stub.cookie)
-        session = cookie.get("vmware_soap_session")
-        if session is None or any(c in session.value for c in "\r\n"):
-            raise VMwareError("ESXi did not provide a valid datastore upload session.")
         headers = {
-            "Cookie": f"vmware_soap_session={session.coded_value}",
+            **self._datastore_session_headers(),
             "Content-Type": "application/octet-stream",
         }
         self._make_directory(datastore, str(PurePosixPath(remote_path).parent))
         assert self._http is not None
-        verify = self.verify_tls
-        if verify and self._trusted_certificate is None:
-            # Keep environment proxies disabled while honoring the explicitly
-            # configured CA bundle; pinned uploads must retain verify=True.
-            verify = os.environ.get("REQUESTS_CA_BUNDLE") or True
         with local_path.open("rb") as source:
             response = self._http.put(
                 f"{self._origin}/folder/{quote(remote_path, safe='/')}",
                 params={"dcPath": self._dc.name, "dsName": datastore},
                 data=source,
                 headers=headers,
-                verify=verify,
+                verify=self._datastore_verify(),
                 timeout=self.UPLOAD_TIMEOUT,
                 allow_redirects=False,
             )

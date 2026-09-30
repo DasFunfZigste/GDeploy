@@ -99,7 +99,7 @@ class Database:
         return [self.unseal(row[0]) for row in rows]
 
     def set_media_settings(self, value, *, uploaded=False):
-        """Save a verified selection, registering newly uploaded media in the same transaction."""
+        """Save a verified selection, registering newly copied/uploaded media in the same transaction."""
         with self.connect() as connection:
             if uploaded:
                 connection.execute("INSERT INTO media_files VALUES(?,?)", (value["id"], self.seal(value)))

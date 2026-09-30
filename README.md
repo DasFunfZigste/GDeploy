@@ -43,7 +43,7 @@ Keep your existing `.env` and data volume. A fresh installation starts with `adm
 ## Included
 
 - A guided form for applications, VM names, vCPUs, RAM, disks, datastore, port group, DHCP or static IPv4.
-- A **Setup** section with **ESXi connection** and **OS installation media** tabs, including browser ISO upload or selection from the server's media directory.
+- A **Setup** section with **ESXi connection** and **OS installation media** tabs. Choose an ISO from an ESXi datastore, upload it through the browser, or select it from the GDeploy server's media directory.
 - An optional **OS only** VM alongside the application roles.
 - Media checksum, inventory, name, capacity and network-input checks before provisioning.
 - Retrieve, inspect and explicitly trust an ESXi certificate from Setup, with no container restart.
@@ -61,7 +61,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.3.1` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.4.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -69,11 +69,13 @@ See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/REL
 
 1. Use a Docker host that can reach both ESXi and the guest network. Allow space for the OS ISO and several GiB more for temporary installation media.
 2. Open **Setup**, select the **ESXi connection** tab, and enter your ESXi hostname or IP. If its certificate is not already trusted, retrieve it, compare its SHA-256 fingerprint against a trusted ESXi source, and select **Trust certificate**. Then save your ESXi username/password and test the connection to load inventory.
-3. Select the **OS installation media** tab at the top of Setup. Upload the supported live-server ISO from your computer, or select a `.iso` file you placed in the server's `media/` directory. Enter its publisher's verified **SHA-256 checksum**, then validate and save the selection. Uploads are stored in `/data/media` in the persistent data volume; server files use the read-only `/media` mount. No environment edit or container restart is needed. Hashing a large ISO can take a few minutes.
+3. Select the **OS installation media** tab at the top of Setup. Choose **ESXi datastore** to browse your saved host's datastores and folders for an existing ISO, upload the supported live-server ISO from your computer, or select a `.iso` file from the GDeploy server's `media/` directory. Enter its publisher's verified **SHA-256 checksum**, then save the selection. ESXi ISOs are copied to GDeploy for verification and unattended-install preparation; the original datastore file is kept unchanged. Browser uploads and ESXi copies persist in `/data/media`; server files use the read-only `/media` mount. No environment edit or container restart is needed. Copying and hashing a large ISO can take several minutes.
 4. For Splunk, place your licensed **Splunk Enterprise Linux x86_64 .tgz** at `media/splunk.tgz`, verify its publisher checksum, and set `GDEPLOY_SPLUNK_SHA256` in the optional `.env` to that value. Preserve existing settings and apply this environment change with `docker compose up -d --force-recreate --wait`. GDeploy does not download Splunk or supply a license. Server-mounted media must be readable by container UID 10001: use directory mode 0755 and file mode 0644, or equivalent ACLs. Keep secrets out of `media/`.
 5. Select **New deployment**, choose application roles, and configure each separate VM. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
 
-The saved OS ISO and checksum are used for future deployments. Each queued deployment retains its selected ISO and checksum, so later Setup changes do not switch its source media. Keep the source file available and unchanged until that deployment finishes. Existing environment configuration still works when no selection has been saved in Setup: use `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256`, or the compatible legacy `GDEPLOY_UBUNTU_ISO` and `GDEPLOY_UBUNTU_SHA256` names.
+ESXi imports and browser uploads support ISOs up to **16 GiB**. The GDeploy host needs room for the retained local copy plus temporary remastering space. Datastore browsing requires `Datastore.Browse` and permission to download the selected file, using the saved ESXi account and certificate trust.
+
+The saved OS ISO and checksum are used for future deployments. Each queued deployment retains its selected local ISO and checksum, so later Setup changes do not switch its source media. Keep that local file available and unchanged until the deployment finishes. An imported ESXi copy can be reused without downloading the original again; changes to the original after a completed import do not change that copy. Existing environment configuration still works when no selection has been saved in Setup: use `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256`, or the compatible legacy `GDEPLOY_UBUNTU_ISO` and `GDEPLOY_UBUNTU_SHA256` names.
 
 To update a source installation for testing, run these commands in the same checkout:
 
@@ -82,7 +84,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded media and history. Refresh the browser and check **v0.3.1** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
+Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.4.0** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
 
 If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
 
@@ -91,8 +93,8 @@ The default Compose binding is `0.0.0.0:8000`. You can optionally restrict the b
 ## ESXi and network preparation
 
 - Use a standalone ESXi 8.0 U3 endpoint. vCenter, distributed switches and clusters are outside this release.
-- The ESXi account needs permission to read inventory, create/configure/power/delete VMs, allocate datastore space and manage the deployment's ISO files. ESXi licensing must permit provisioning through the vSphere API. Inventory checks prove authentication and read access; actual deployment operations validate write privileges and license capabilities.
-- The app connects to ESXi over HTTPS **443** for both API operations and datastore uploads. It verifies the certificate using the exact certificate you approved for that endpoint, or normal system/private CA trust when no certificate is approved.
+- The ESXi account needs permission to read inventory, create/configure/power/delete VMs, allocate datastore space and manage the deployment's ISO files. Selecting existing ESXi media also requires `Datastore.Browse` and file download access. ESXi licensing must permit provisioning through the vSphere API. Inventory checks prove authentication and read access; actual deployment operations validate write privileges and license capabilities.
+- The app connects to ESXi over HTTPS **443** for API operations and datastore downloads/uploads. It verifies the certificate using the exact certificate you approved for that endpoint, or normal system/private CA trust when no certificate is approved.
 - The app must reach guests on SSH **22**. Guests need DNS and HTTPS/HTTP access to Ubuntu mirrors and the official Elastic package repository; installation cannot complete on an isolated network without corresponding mirror support.
 - Kibana must reach Elasticsearch on HTTPS **9200**. Your browser needs access to Kibana **5601** and Splunk Web **8000**. Splunk's local verification uses its management API on **8089**. GDeploy does not configure your network firewall or switch.
 - Use static addresses or DHCP reservations for application VMs. Elasticsearch's certificate and Kibana's configuration use the assigned Elasticsearch IP; a later DHCP address change requires reconfiguration.
@@ -103,9 +105,9 @@ The default Compose binding is `0.0.0.0:8000`. You can optionally restrict the b
 
 In **Setup → ESXi connection**, retrieve the certificate for the entered host. Review its subject, issuer, validity dates, DNS/IP names and **SHA-256 fingerprint**. Compare that fingerprint with the certificate shown through a trusted ESXi management session before selecting **Trust certificate**; retrieving a certificate alone does not establish the host's identity. Save the connection credentials and test the connection.
 
-The approval is stored in the app database for that exact host/IP and survives restarts. API connections and datastore uploads require the approved certificate and valid dates. A changed or renewed certificate must be retrieved, reviewed and trusted again. Explicit approval also supports an ESXi IP address that is absent from the certificate's DNS/IP names. Removing trust in the same screen restores normal system/private CA verification. No CA file, environment edit or restart is needed for this workflow.
+The approval is stored in the app database for that exact host/IP and survives restarts. API connections and datastore downloads/uploads require the approved certificate and valid dates. A changed or renewed certificate must be retrieved, reviewed and trusted again. Explicit approval also supports an ESXi IP address that is absent from the certificate's DNS/IP names. Removing trust in the same screen restores normal system/private CA verification. No CA file, environment edit or restart is needed for this workflow.
 
-As an optional alternative for a private CA, make a PEM bundle containing the normal public roots plus that CA and mount it read-only (for example under `/media/esxi-ca-bundle.pem`). Set both `SSL_CERT_FILE=/media/esxi-ca-bundle.pem` and `REQUESTS_CA_BUNDLE=/media/esxi-ca-bundle.pem` in `.env`, then recreate the container. This allows the Python SOAP client and HTTPS uploader to validate the same certificate chain and hostname. Do not commit private keys.
+As an optional alternative for a private CA, make a PEM bundle containing the normal public roots plus that CA and mount it read-only (for example under `/media/esxi-ca-bundle.pem`). Set both `SSL_CERT_FILE=/media/esxi-ca-bundle.pem` and `REQUESTS_CA_BUNDLE=/media/esxi-ca-bundle.pem` in `.env`, then recreate the container. This allows the Python SOAP client and HTTPS file transfers to validate the same certificate chain and hostname. Do not commit private keys.
 
 ## Credentials and application behavior
 
@@ -129,7 +131,7 @@ A timed-out ESXi operation can still be running on the host. Inspect its tasks b
 
 ## Persistence and operation
 
-The Compose data volume mounted at `/data` contains the SQLite administrator account, approved ESXi certificates, saved OS ISO selection and history, encrypted secrets, uploaded ISOs under `/data/media`, and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. Installation media is removed from the datastore after the OS is ready. Source files in `media/` are never modified. Deployment history is retained after cleanup.
+The Compose data volume mounted at `/data` contains the SQLite administrator account, approved ESXi certificates, saved OS ISO selection and history, encrypted secrets, uploaded/imported ISOs under `/data/media`, and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. GDeploy removes its deployment-specific installation ISO from the datastore after the OS is ready. Original ESXi source ISOs and server files in `media/` are never modified or deleted by that cleanup. Deployment history is retained after cleanup.
 
 Run **one app container with one worker** against a data volume. Jobs are serialized; this release does not support multiple replicas. The container runs without root privileges or Linux capabilities, with a read-only root filesystem. Stop the app before taking a consistent backup of its complete data volume, including automatic bootstrap files, and any existing `.env`/`docker.env`. Store your chosen web-app credentials in your password manager; the private bootstrap credentials file is not a substitute for a backup. Do not use `docker compose down -v` unless you intend to erase the app's database and credentials.
 

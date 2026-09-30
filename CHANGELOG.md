@@ -4,6 +4,23 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-30
+
+### Added
+
+- An **ESXi datastore** source in **Setup → OS installation media**. Browse datastores and folders on the saved standalone ESXi host, select an existing ISO and enter its publisher-verified SHA-256 checksum.
+- Download and verify a persistent local copy in `/data/media` for unattended-install preparation. The copy retains its ESXi origin details and can be reused after restarts. GDeploy leaves the original datastore ISO unchanged and creates separate installation media for each deployment.
+- Use the saved ESXi credentials and certificate verification for browsing and downloads. Changing the saved host requires a fresh media selection, preventing a stale selection from importing from another endpoint.
+- Show import activity and errors while copying and verifying media. Failed imports retain the previous saved choice. Browser uploads and GDeploy server media remain available alongside the new source.
+
+### Installation and compatibility
+
+- Datastore media requires `Datastore.Browse` and file download access. Imports accept ISOs up to **16 GiB** and need enough free space on the GDeploy host for the retained copy plus later remastering workspace. Copying a large ISO can take several minutes.
+- Existing administrator credentials, encryption keys, ESXi certificate approvals, mounted/uploaded media and deployment history are preserved. Back up imported copies with the complete data volume; no environment edit or container restart is required to select media.
+- Automated installation still supports **Ubuntu Server 24.04 LTS amd64 live-server** media. ESXi import supplies a local source for the existing installer workflow; it does not add operating-system support.
+- Versions before **0.4.0** cannot use ESXi-origin media selections. Finish or resolve active jobs and choose a verified uploaded or server-mounted ISO before rollback, preserving the data volume and encryption configuration.
+- The installation and lab-acceptance guides now cover datastore browsing, copy verification, TLS/permission failures and source changes. Live ESXi acceptance remains required; automated checks do not establish compatibility with a particular host.
+
 ## [0.3.1] - 2026-09-30
 
 ### Fixed

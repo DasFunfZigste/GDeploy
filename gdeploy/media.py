@@ -8,7 +8,7 @@ import re
 import shutil
 import stat
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
@@ -111,11 +111,11 @@ class MediaManager:
         source = snapshot.get("source")
         if source == "server":
             valid = path.parent == self.server_dir and snapshot.get("id") == self._server_id(path)
-        elif source == "upload":
+        elif source in {"upload", "esxi"}:
             valid = (
                 path.parent == self.upload_dir
-                and re.fullmatch(r"upload_[0-9a-f]{32}", snapshot.get("id", ""))
-                and path.name == snapshot["id"][7:] + ".iso"
+                and re.fullmatch(source + r"_[0-9a-f]{32}", snapshot.get("id", ""))
+                and path.name == snapshot["id"].split("_", 1)[1] + ".iso"
             )
         else:
             valid = False
@@ -142,6 +142,10 @@ class MediaManager:
         """Hash the selected bytes; metadata alone never approves a deployment's media."""
         path = self._path(snapshot)
         expected = _checksum(snapshot.get("sha256"))
+        self._verify_iso(path, expected)
+        return path
+
+    def _verify_iso(self, path, expected):
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(descriptor, "rb") as handle:
@@ -163,7 +167,6 @@ class MediaManager:
                 raise MediaError("The OS ISO changed while it was being verified. Try selecting it again.")
         except OSError as exc:
             raise MediaError("The OS ISO is missing or unreadable. Check the media mount or upload it again.") from exc
-        return path
 
     def selected(self):
         saved = self.db.media_settings()
@@ -208,8 +211,10 @@ class MediaManager:
             try:
                 path = self._path(snapshot)
                 current = self._snapshot(
-                    path, name=snapshot["name"], source="upload", media_id=snapshot["id"], sha256=snapshot["sha256"]
+                    path, name=snapshot["name"], source=snapshot["source"], media_id=snapshot["id"], sha256=snapshot["sha256"]
                 )
+                if "origin" in snapshot:
+                    current["origin"] = snapshot["origin"]
                 candidates.append(current)
             except (OSError, MediaError):
                 continue
@@ -222,9 +227,12 @@ class MediaManager:
         for item in self._files():
             chosen = bool(selected and item["id"] == selected["id"])
             checksum = selected.get("sha256", "") if chosen else item["sha256"]
-            items.append({
+            entry = {
                 key: item[key] for key in ("id", "name", "size_bytes", "source")
-            } | {"sha256": checksum, "selected": chosen})
+            } | {"sha256": checksum, "selected": chosen}
+            if "origin" in item:
+                entry["origin"] = item["origin"]
+            items.append(entry)
         return {
             "items": items, "selected": selected, "ready": ready,
             "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": PROFILE,
@@ -239,6 +247,47 @@ class MediaManager:
         self.validate_snapshot(candidate)
         self.db.set_media_settings(candidate)
         return self.catalog()
+
+    def import_esxi(self, client, host, datastore, remote_path, sha256):
+        """Copy a shared datastore ISO locally; never mutate the source on ESXi."""
+        checksum = _checksum(sha256)
+        folder = str(PurePosixPath(remote_path).parent)
+        listing = client.browse_iso_media(datastore, "" if folder == "." else folder)
+        candidate = next((item for item in listing["files"] if item["path"] == remote_path), None)
+        if candidate is None:
+            raise MediaError("The selected ESXi ISO is no longer available. Refresh the folder and select it again.", 404)
+        name = _filename(candidate["name"])
+        size = candidate["size_bytes"]
+        if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_UPLOAD_BYTES:
+            raise MediaError("Choose a nonempty ESXi ISO no larger than 16 GiB.", 413)
+        token = uuid.uuid4().hex
+        partial = self.upload_dir / (token + ".partial")
+        final = self.upload_dir / (token + ".iso")
+        committed = False
+        owns_partial = False
+        owns_final = False
+        try:
+            self._prepare_upload(name, checksum, size)
+            client.download_iso(datastore, remote_path, partial, max_bytes=MAX_UPLOAD_BYTES, expected_size=size)
+            owns_partial = True
+            self._verify_iso(partial, checksum)
+            # An exclusive link avoids replacing any existing managed source.
+            os.link(partial, final, follow_symlinks=False)
+            owns_final = True
+            partial.unlink()
+            owns_partial = False
+            snapshot = self._snapshot(final, name=name, source="esxi", sha256=checksum, media_id="esxi_" + token)
+            snapshot["origin"] = {"host": host, "datastore": datastore, "path": remote_path}
+            self.db.set_media_settings(snapshot, uploaded=True)
+            committed = True
+            return self.catalog()
+        except OSError as exc:
+            raise MediaError("Unable to save the ESXi ISO copy. Check the GDeploy data volume's free space and permissions.", 507) from exc
+        finally:
+            if owns_partial:
+                partial.unlink(missing_ok=True)
+            if owns_final and not committed:
+                final.unlink(missing_ok=True)
 
     def _prepare_upload(self, filename, checksum, length):
         _filename(filename)
