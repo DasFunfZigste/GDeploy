@@ -29,6 +29,8 @@ class Database:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS esxi_certificates (endpoint TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS media_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS media_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS deployments (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
                     stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -85,6 +87,27 @@ class Database:
         with self.connect() as connection:
             row = connection.execute("SELECT value FROM esxi_certificates WHERE endpoint=?", (endpoint,)).fetchone()
         return self.unseal(row[0]) if row else None
+
+    def media_settings(self):
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
+        return self.unseal(row[0]) if row else None
+
+    def media_files(self):
+        with self.connect() as connection:
+            rows = connection.execute("SELECT value FROM media_files ORDER BY id").fetchall()
+        return [self.unseal(row[0]) for row in rows]
+
+    def set_media_settings(self, value, *, uploaded=False):
+        """Save a verified selection, registering newly uploaded media in the same transaction."""
+        with self.connect() as connection:
+            if uploaded:
+                connection.execute("INSERT INTO media_files VALUES(?,?)", (value["id"], self.seal(value)))
+            connection.execute("INSERT OR REPLACE INTO media_settings VALUES(1,?)", (self.seal(value),))
+            connection.execute(
+                "INSERT INTO audit VALUES(?,?)",
+                (now(), f"OS ISO selected: {value['name']}; SHA-256 {value['sha256']}"),
+            )
 
     def trust_esxi_certificate(self, endpoint, pem, fingerprint):
         value = {"pem": pem, "trusted_at": now()}

@@ -10,9 +10,11 @@ import threading
 import time
 import uuid
 from functools import lru_cache
+from pathlib import Path
 
 from .certificate_trust import certificate_endpoint
 from .guest import GuestConnectionError, GuestSession, build_seed_iso, generate_ssh_key
+from .media import MediaError, MediaManager
 from .vmware import ESXiClient
 
 
@@ -65,6 +67,7 @@ def media_hash(path, size, mtime_ns):
 class DeploymentService:
     def __init__(self, db, config, client_factory=ESXiClient):
         self.db, self.config, self.client_factory = db, config, client_factory
+        self.media = MediaManager(db, config)
         self.action_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = None
@@ -82,7 +85,7 @@ class DeploymentService:
 
     def client(self, settings):
         if not settings:
-            raise DeploymentError("Configure the ESXi connection in Settings first.")
+            raise DeploymentError("Configure the ESXi connection in Setup first.")
         options = dict(settings)
         # Trust must use either the approved endpoint certificate or the CA
         # store, including older deployment snapshots that disabled validation.
@@ -101,7 +104,7 @@ class DeploymentService:
         except Exception as exc:
             raise DeploymentError(safe_error(exc, settings)) from None
 
-    def preflight(self, spec, settings=None, exclude_id=None):
+    def preflight(self, spec, settings=None, exclude_id=None, os_media=None):
         settings = settings or self.db.settings()
         checks = []
 
@@ -139,7 +142,16 @@ class DeploymentService:
                 )
                 return None
 
-        ubuntu_size = media("Ubuntu 24.04 amd64 ISO", self.config.ubuntu_iso, self.config.ubuntu_sha256)
+        os_media = self.media.selected() if os_media is None else os_media
+        iso_size = None
+        try:
+            if not os_media:
+                raise MediaError("Select and verify an OS ISO in Setup first.")
+            source = self.media.validate_snapshot(os_media)
+            iso_size = source.stat().st_size
+            check("OS ISO", True, f"{os_media['name']} is available and its SHA-256 matches.")
+        except (MediaError, OSError) as exc:
+            check("OS ISO", False, str(exc))
         if any(vm["role"] == "splunk" for vm in spec["vms"]):
             media("Splunk Linux x86_64 package", self.config.splunk_package, self.config.splunk_sha256)
         check(
@@ -149,8 +161,8 @@ class DeploymentService:
             if shutil.which("xorriso")
             else "The ISO builder is missing; use the supplied Docker image.",
         )
-        if ubuntu_size is not None:
-            needed = ubuntu_size * 1.2 + 512 * 1024**2
+        if iso_size is not None:
+            needed = iso_size * 1.2 + 512 * 1024**2
             free = shutil.disk_usage(self.config.data_dir).free
             check(
                 "Local workspace",
@@ -158,7 +170,7 @@ class DeploymentService:
                 f"{free / 1024**3:.1f} GiB free; at least {needed / 1024**3:.1f} GiB needed for one temporary ISO.",
             )
         if not settings:
-            check("ESXi connection", False, "Save the ESXi connection in Settings.")
+            check("ESXi connection", False, "Save the ESXi connection in Setup.")
             return {"ok": False, "checks": checks}
         try:
             with self.client(settings) as esxi:
@@ -221,7 +233,7 @@ class DeploymentService:
         )
         networks = {network["name"] for network in inventory["networks"]}
         stores = {store["name"]: store for store in inventory["datastores"]}
-        iso_gb = ubuntu_size / 1024**3 if ubuntu_size is not None else 6
+        iso_gb = iso_size / 1024**3 if iso_size is not None else 6
         for vm in spec["vms"]:
             check(f"{vm['name']} network", vm["network"] in networks, f"Port group: {vm['network']}")
         for name in {vm["datastore"] for vm in spec["vms"]}:
@@ -240,7 +252,8 @@ class DeploymentService:
 
     def enqueue(self, spec, settings=None, parent_id=None):
         settings = settings or self.db.settings()
-        result = self.preflight(spec, settings, exclude_id=parent_id)
+        os_media = self.media.selected()
+        result = self.preflight(spec, settings, exclude_id=parent_id, os_media=os_media or {})
         if not result["ok"]:
             raise DeploymentError(
                 "Preflight failed: "
@@ -259,6 +272,7 @@ class DeploymentService:
             }
         data = {
             "esxi": settings,
+            "os_media": os_media,
             "vm_credentials": vm_credentials,
             "software": {
                 key: secrets.token_hex(24)
@@ -323,7 +337,7 @@ class DeploymentService:
                     pass
             self.stop_event.wait(10)
         raise DeploymentError(
-            f"Timed out waiting for Ubuntu on {vm['name']}. Check its ESXi console, DHCP/static network, Ubuntu mirror access, and TCP 22 reachability from GDeploy."
+            f"Timed out waiting for the operating system on {vm['name']}. Check its ESXi console, DHCP/static network, OS package mirror access, and TCP 22 reachability from GDeploy."
         )
 
     def run(self, deployment_id):
@@ -336,11 +350,16 @@ class DeploymentService:
             if not deployment:
                 raise DeploymentError("Deployment record is unavailable.")
             secret_data = deployment["secrets"]
+            # Jobs created before media selection existed retain their environment
+            # configuration. A later Setup edit must not switch a queued job's ISO.
+            os_media = secret_data.get("os_media") or self.media.legacy()
             vms = deployment["vms"]
             resources = deployment["resources"]
             artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.stage(deployment_id, "preflight", "Checking media, host capacity and deployment inputs")
-            result = self.preflight(deployment["spec"], secret_data["esxi"], exclude_id=deployment_id)
+            result = self.preflight(
+                deployment["spec"], secret_data["esxi"], exclude_id=deployment_id, os_media=os_media or {}
+            )
             if not result["ok"]:
                 raise DeploymentError(
                     "; ".join(c["name"] + ": " + c["message"] for c in result["checks"] if not c["ok"])
@@ -350,10 +369,13 @@ class DeploymentService:
                     if self.stop_event.is_set():
                         raise DeploymentError("Service shutdown requested.")
                     credential = secret_data["vm_credentials"][vm["name"]]
-                    self.stage(deployment_id, "preparing", f"Preparing unattended Ubuntu installation for {vm['name']}")
+                    self.stage(deployment_id, "preparing", f"Preparing unattended OS installation for {vm['name']}")
                     iso = artifact_dir / (vm["name"] + ".iso")
+                    if os_media:
+                        # A mounted file can be replaced while an earlier VM installs.
+                        self.media.validate_snapshot(os_media)
                     build_seed_iso(
-                        self.config.ubuntu_iso,
+                        Path(os_media["path"]) if os_media else self.config.ubuntu_iso,
                         iso,
                         vm,
                         credential["username"],
@@ -373,7 +395,7 @@ class DeploymentService:
                     self.stage(
                         deployment_id,
                         "installing_os",
-                        f"Installing Ubuntu on {vm['name']}; waiting for VMware Tools and SSH",
+                        f"Installing the operating system on {vm['name']}; waiting for VMware Tools and SSH",
                     )
                     self._wait_for_guest(esxi, vm, credential, deployment_id)
                     self.db.update(deployment_id, secrets=secret_data)
@@ -383,14 +405,15 @@ class DeploymentService:
                     vm["status"] = "os_ready"
                     self.db.update(deployment_id, vms=vms, resources=resources)
                     self.db.event(
-                        deployment_id, f"Ubuntu ready on {vm['name']} ({vm['ip']}); installation media removed"
+                        deployment_id, f"Operating system ready on {vm['name']} ({vm['ip']}); installation media removed"
                     )
                 elastic = None
                 for vm in sorted(
                     vms, key=lambda item: {"elasticsearch": 0, "kibana": 1, "splunk": 2, "ubuntu": 3}[item["role"]]
                 ):
                     credential = secret_data["vm_credentials"][vm["name"]]
-                    self.stage(deployment_id, "installing_software", f"Configuring {vm['role']} on {vm['name']}")
+                    role_label = "operating system" if vm["role"] == "ubuntu" else vm["role"]
+                    self.stage(deployment_id, "installing_software", f"Configuring {role_label} on {vm['name']}")
                     vm["status"] = "installing_software"
                     self.db.update(deployment_id, vms=vms)
                     with GuestSession(

@@ -2,6 +2,7 @@
 """Test the published-image setup recipe without connecting to ESXi."""
 
 import argparse
+import hashlib
 import http.cookiejar
 import json
 import os
@@ -73,12 +74,12 @@ def verify_login_and_storage(url, credentials, write=False):
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def request(path, payload=None, method="GET", csrf=None):
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/octet-stream" if isinstance(payload, bytes) else "application/json"}
         if csrf:
             headers["X-CSRF-Token"] = csrf
         req = urllib.request.Request(
             url + path,
-            data=json.dumps(payload).encode() if payload is not None else None,
+            data=payload if isinstance(payload, bytes) else json.dumps(payload).encode() if payload is not None else None,
             method=method,
             headers=headers,
         )
@@ -116,6 +117,10 @@ def verify_login_and_storage(url, credentials, write=False):
         credentials = f"Username: {new_username}\nPassword: {new_password}\n"
         session = request("/api/login", {"username": new_username, "password": new_password}, "POST")
     assert session["must_change_credentials"] is False
+    # Small ISO-format fixture exercises upload permissions and persistence;
+    # this smoke check never attempts an OS installation or contacts ESXi.
+    media_body = b"\0" * (16 * 2048) + b"\x01CD001\x01" + b"gdeploy-container-smoke"
+    media_checksum = hashlib.sha256(media_body).hexdigest()
     if write:
         request(
             "/api/settings",
@@ -123,9 +128,18 @@ def verify_login_and_storage(url, credentials, write=False):
             "PUT",
             session["csrf_token"],
         )
+        request(
+            f"/api/settings/media/upload?filename=container-smoke.iso&sha256={media_checksum}",
+            media_body, "POST", session["csrf_token"],
+        )
     settings = request("/api/settings")
     assert settings["host"] == "esxi.example.invalid" and settings["configured"] is True
     assert "password" not in settings
+    assert settings["iso_configured"] is True
+    media = request("/api/settings/media")
+    assert media["ready"] and media["selected"]["source"] == "upload"
+    assert media["selected"]["name"] == "container-smoke.iso"
+    assert media["selected"]["sha256"] == media_checksum
     request("/api/logout", {}, "POST", session["csrf_token"])
     return credentials
 

@@ -8,16 +8,16 @@
     route: 'deployments', detailId: null, routeEpoch: 0, pollBusy: false,
     search: '', filter: 'all', wizard: null, secrets: null, secretTimer: null,
     secretDeadline: 0, secretRequest: 0, toastTimer: null,
-    setupBusy: false,
+    setupBusy: false, mediaUpload: null,
   };
   const roles = {
-    ubuntu: {name: 'Ubuntu server', short: 'Ubuntu', description: 'A clean Linux server, ready for your own workloads.', cpu: 2, ram: 4, disk: 40, icon: 'terminal'},
+    ubuntu: {name: 'OS only', short: 'OS only', description: 'Install the operating system without additional software.', cpu: 2, ram: 4, disk: 40, icon: 'terminal'},
     elasticsearch: {name: 'Elasticsearch', short: 'Elasticsearch', description: 'Search and analytics, with TLS enabled.', cpu: 2, ram: 8, disk: 60, icon: 'layers'},
     kibana: {name: 'Kibana', short: 'Kibana', description: 'Visualize your data. Connected to Elasticsearch.', cpu: 2, ram: 4, disk: 40, icon: 'chart'},
     splunk: {name: 'Splunk Enterprise', short: 'Splunk', description: 'Search, monitor, and analyze machine data.', cpu: 4, ram: 8, disk: 60, icon: 'activity'},
   };
   const stageOrder = ['queued', 'preflight', 'preparing', 'creating', 'installing_os', 'installing_software', 'verifying', 'completed'];
-  const stageNames = {queued: 'Waiting in queue', preflight: 'Checking prerequisites', preparing: 'Preparing installation media', creating: 'Creating virtual machines', installing_os: 'Installing Ubuntu', installing_software: 'Installing software', verifying: 'Verifying services', completed: 'Ready to use', failed: 'Deployment failed', interrupted: 'Deployment interrupted', cleaning: 'Removing deployment resources', cleanup_failed: 'Cleanup needs attention', reverted: 'Resources removed'};
+  const stageNames = {queued: 'Waiting in queue', preflight: 'Checking prerequisites', preparing: 'Preparing installation media', creating: 'Creating virtual machines', installing_os: 'Install operating system', installing_software: 'Installing software', verifying: 'Verifying services', completed: 'Ready to use', failed: 'Deployment failed', interrupted: 'Deployment interrupted', cleaning: 'Removing deployment resources', cleanup_failed: 'Cleanup needs attention', reverted: 'Resources removed'};
   const statusNames = {queued: 'Queued', running: 'In progress', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', cleaning: 'Cleaning up', cleanup_failed: 'Cleanup failed', reverted: 'Reverted'};
   const failureStatuses = new Set(['failed', 'interrupted', 'cleanup_failed']);
   const busyStatuses = new Set(['queued', 'running', 'cleaning']);
@@ -160,6 +160,7 @@
   }
   function closeWorkspace() {
     state.routeEpoch++;
+    state.mediaUpload?.abort();
     hideCredentials();
     state.wizard = null;
     state.settings = null;
@@ -231,16 +232,17 @@
     if (!state.session) return;
     if (setupRequired()) { showSetup(); return; }
     const epoch = ++state.routeEpoch;
+    state.mediaUpload?.abort();
     globalError('');
     hideCredentials();
     state.detail = null;
     state.detailId = null;
     page.replaceChildren(loading('Loading your workspace…'));
     const hash = location.hash.slice(1);
-    if (hash === 'settings') {
+    if (hash === 'settings' || hash === 'setup') {
       state.route = 'settings';
       markNav('settings');
-      $('#breadcrumb').textContent = 'ESXi connection';
+      $('#breadcrumb').textContent = 'Setup';
       try {
         const settings = await api('/api/settings');
         if (epoch !== state.routeEpoch) return;
@@ -290,7 +292,7 @@
     const filter = el('select', {class: 'filter-select', 'aria-label': 'Filter by deployment status', onChange: event => { state.filter = event.target.value; renderDeploymentRows(); }}, el('option', {value: 'all'}, 'All statuses'), el('option', {value: 'active'}, 'In progress'), el('option', {value: 'completed'}, 'Completed'), el('option', {value: 'attention'}, 'Needs attention'), el('option', {value: 'reverted'}, 'Reverted'));
     filter.value = state.filter;
     const history = el('section', {class: 'surface', 'aria-labelledby': 'history-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'history-title'}, 'Deployment history', el('span', {class: 'count-badge'}, rows.length)), el('p', {}, 'Every deployment, from first boot to ready.')), rows.length ? el('div', {class: 'surface-header-actions'}, search, filter) : null), el('div', {id: 'deployment-rows'}));
-    const setupBanner = !state.settings?.configured ? el('div', {class: 'connection-banner'}, icon('server'), el('div', {}, el('strong', {}, 'Connect your ESXi host'), el('p', {}, 'Set up your host connection before creating your first deployment.')), el('a', {href: '#settings', class: 'button button-small'}, 'Configure connection', icon('arrow'))) : null;
+    const setupBanner = !state.settings?.configured || !state.settings?.iso_configured ? el('div', {class: 'connection-banner'}, icon('server'), el('div', {}, el('strong', {}, 'Finish your GDeploy setup'), el('p', {}, 'Connect an ESXi host and select an OS ISO before creating a deployment.')), el('a', {href: '#settings', class: 'button button-small'}, 'Open Setup', icon('arrow'))) : null;
     page.replaceChildren(...[heading('Deployments', 'Build your environment. We’ll take care of the setup.', button('New deployment', 'button-primary', openWizard, 'plus')), metrics, setupBanner, history].filter(Boolean));
     renderDeploymentRows();
   }
@@ -307,9 +309,145 @@
     const body = el('tbody');
     for (const row of rows) {
       const vmRows = row.vms || [];
-      body.append(el('tr', {}, el('td', {}, el('a', {class: 'deployment-name', href: `#deployment/${encodeURIComponent(row.id)}`}, row.name), el('div', {class: 'subline'}, vmRows.map(vm => (roles[vm.role] || {short: vm.role}).short).join(' · ') || 'Ubuntu 24.04 LTS')), el('td', {}, statusBadge(row.status)), el('td', {}, `${vmRows.length} ${vmRows.length === 1 ? 'VM' : 'VMs'}`, el('div', {class: 'subline'}, `${vmRows.reduce((n, vm) => n + Number(vm.cpu || 0), 0)} vCPU · ${vmRows.reduce((n, vm) => n + Number(vm.ram_gb || 0), 0)} GB RAM`)), el('td', {}, el('time', {datetime: row.created_at || ''}, date(row.created_at, true))), el('td', {}, el('a', {class: 'table-arrow', href: `#deployment/${encodeURIComponent(row.id)}`, 'aria-label': `View ${row.name}`}, icon('arrow')))));
+      body.append(el('tr', {}, el('td', {}, el('a', {class: 'deployment-name', href: `#deployment/${encodeURIComponent(row.id)}`}, row.name), el('div', {class: 'subline'}, vmRows.map(vm => (roles[vm.role] || {short: vm.role}).short).join(' · ') || 'OS deployment')), el('td', {}, statusBadge(row.status)), el('td', {}, `${vmRows.length} ${vmRows.length === 1 ? 'VM' : 'VMs'}`, el('div', {class: 'subline'}, `${vmRows.reduce((n, vm) => n + Number(vm.cpu || 0), 0)} vCPU · ${vmRows.reduce((n, vm) => n + Number(vm.ram_gb || 0), 0)} GB RAM`)), el('td', {}, el('time', {datetime: row.created_at || ''}, date(row.created_at, true))), el('td', {}, el('a', {class: 'table-arrow', href: `#deployment/${encodeURIComponent(row.id)}`, 'aria-label': `View ${row.name}`}, icon('arrow')))));
     }
     container.replaceChildren(el('div', {class: 'table-scroll'}, el('table', {}, el('thead', {}, el('tr', {}, ...['Deployment', 'Status', 'Resources', 'Created', ''].map(text => el('th', {scope: 'col'}, text)))), body)));
+  }
+  function formatBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return 'Size unavailable';
+    const units = ['B', 'KiB', 'MiB', 'GiB'];
+    const index = bytes > 0 ? Math.min(3, Math.floor(Math.log(bytes) / Math.log(1024))) : 0;
+    return `${new Intl.NumberFormat(undefined, {maximumFractionDigits: index ? 1 : 0}).format(bytes / (1024 ** index))} ${units[index]}`;
+  }
+  function uploadMedia(file, sha256, onProgress) {
+    return new Promise((resolve, reject) => {
+      if (!state.session || setupRequired()) { reject(new Error('Sign in with your configured administrator account before uploading media.')); return; }
+      const requestSession = state.session;
+      const xhr = new XMLHttpRequest();
+      const finish = () => { if (state.mediaUpload === xhr) state.mediaUpload = null; };
+      xhr.open('POST', `/api/settings/media/upload?filename=${encodeURIComponent(file.name)}&sha256=${encodeURIComponent(sha256)}`);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.setRequestHeader('Accept', 'application/json');
+      xhr.setRequestHeader('X-CSRF-Token', requestSession.csrf_token);
+      xhr.upload.onprogress = event => onProgress(event.loaded, event.lengthComputable ? event.total : file.size);
+      xhr.upload.onload = () => onProgress(file.size, file.size);
+      xhr.onload = () => {
+        finish();
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch { /* Error responses may not contain JSON. */ }
+        if (xhr.status >= 200 && xhr.status < 300) { resolve(data); return; }
+        if (state.session === requestSession) {
+          if (xhr.status === 401) showLogin('Your session has expired. Sign in to continue.');
+          if (xhr.status === 403 && data?.detail?.code === 'credentials_change_required') showSetup({...requestSession, must_change_credentials: true}, data.detail.message);
+        }
+        reject(new Error(errorText(data, `Upload failed (${xhr.status}).`)));
+      };
+      xhr.onerror = () => { finish(); reject(new Error('The upload connection was interrupted. Check your connection and try again.')); };
+      xhr.onabort = () => { finish(); reject(new Error('Upload canceled. Refresh the list to check the saved selection before retrying.')); };
+      state.mediaUpload = xhr;
+      xhr.send(file);
+    });
+  }
+  function createMediaPanel(onChange, onBusy) {
+    const viewEpoch = state.routeEpoch;
+    let catalog = null, mode = 'server', busy = '', externalBusy = false;
+    const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+    const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
+    const selectedSummary = el('div', {class: 'media-selected-summary'});
+    const badge = el('span', {class: 'status'}, 'Loading…');
+    const serverSelect = el('select', {id: 'os-media-server', name: 'media_id', required: true, 'aria-describedby': 'os-media-server-help'});
+    const fileInput = el('input', {id: 'os-media-file', name: 'iso_file', type: 'file', accept: '.iso', 'aria-describedby': 'os-media-file-help'});
+    const fileHelp = el('small', {id: 'os-media-file-help'}, 'Upload an .iso file from your computer.');
+    const checksum = el('input', {id: 'os-media-sha256', name: 'sha256', type: 'text', required: true, minlength: 64, maxlength: 64, pattern: '[a-fA-F0-9]{64}', placeholder: 'Paste the publisher’s 64-character SHA-256 checksum', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', class: 'mono', 'aria-describedby': 'os-media-sha256-help'});
+    const sourceInput = value => el('input', {type: 'radio', name: 'media-source', value, checked: mode === value, onChange: () => { mode = value; checksum.value = value === 'server' ? currentItem()?.sha256 || '' : ''; inlineError(errorBox, ''); successBox.hidden = true; syncControls(); }});
+    const serverRadio = sourceInput('server'), uploadRadio = sourceInput('upload');
+    const serverFields = el('div', {class: 'media-source-fields'}, field('OS ISO on the server', serverSelect), el('p', {class: 'media-help', id: 'os-media-server-help'}, 'Select a mounted ISO or a previous upload. To add server files, place them in the media folder beside compose.yaml, then refresh this list.'));
+    const uploadFields = el('div', {class: 'media-source-fields', hidden: true}, field('OS ISO file', fileInput), fileHelp);
+    const progress = el('progress', {max: 100, value: 0, 'aria-label': 'OS ISO upload progress'});
+    const progressText = el('span', {role: 'status', 'aria-live': 'polite'});
+    const cancel = button('Cancel upload', 'button-ghost button-small', () => state.mediaUpload?.abort());
+    const progressBox = el('div', {class: 'media-progress', hidden: true}, progress, el('div', {}, progressText, cancel));
+    const currentItem = () => catalog?.items?.find(item => item.id === serverSelect.value);
+    function syncControls() {
+      const locked = Boolean(busy || externalBusy || !catalog);
+      serverRadio.checked = mode === 'server'; uploadRadio.checked = mode === 'upload';
+      serverRadio.disabled = locked; uploadRadio.disabled = locked;
+      serverFields.hidden = mode !== 'server'; uploadFields.hidden = mode !== 'upload';
+      serverSelect.disabled = locked || mode !== 'server';
+      fileInput.disabled = locked || mode !== 'upload'; fileInput.required = mode === 'upload';
+      checksum.disabled = locked;
+      refresh.disabled = Boolean(busy || externalBusy);
+      submit.disabled = locked || (mode === 'server' && !serverSelect.value) || (mode === 'upload' && !fileInput.files.length);
+      if (!busy) submit.replaceChildren(icon(mode === 'upload' ? 'disc' : 'check'), mode === 'upload' ? 'Upload & use ISO' : 'Use selected ISO');
+      panel.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+    function renderCatalog(next) {
+      catalog = next;
+      const previousId = serverSelect.value;
+      serverSelect.replaceChildren(el('option', {value: ''}, next.items.length ? 'Choose an OS ISO' : 'No ISOs found on this server'), ...next.items.map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${item.source === 'upload' ? 'Uploaded' : 'Server'}`)));
+      serverSelect.value = next.selected?.id || (next.items.some(item => item.id === previousId) ? previousId : '');
+      if (mode === 'server') checksum.value = currentItem()?.sha256 || '';
+      fileHelp.textContent = `Upload an .iso file up to ${formatBytes(next.max_upload_bytes)}. Uploads are kept with GDeploy’s persistent data.`;
+      badge.className = next.ready ? 'status status-completed' : 'status';
+      badge.textContent = next.ready ? 'Ready for preflight' : 'Not configured';
+      if (next.selected) {
+        selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('disc'), el('div', {}, el('span', {class: 'eyebrow'}, 'SAVED OS ISO'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${next.selected.source === 'upload' ? 'Uploaded to GDeploy' : 'Server media'}`))), el('details', {class: 'media-integrity'}, el('summary', {}, 'Saved SHA-256 checksum'), el('code', {class: 'certificate-fingerprint'}, next.selected.sha256)));
+        if (!next.ready) selectedSummary.append(el('p', {class: 'media-help'}, 'The saved media is unavailable or needs attention. Choose a valid ISO below before deploying.'));
+      } else selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('disc'), el('div', {}, el('strong', {}, 'Choose your installation media'), el('p', {}, 'This OS ISO will be used for new deployments.'))));
+      onChange(next);
+    }
+    async function load() {
+      if (!currentView() || busy || externalBusy) return;
+      busy = 'load'; inlineError(errorBox, ''); syncControls(); setBusy(refresh, 'Refreshing…');
+      try {
+        const next = await api('/api/settings/media');
+        if (!currentView()) return;
+        if (!catalog && !next.items.length) mode = 'upload';
+        renderCatalog(next);
+      } catch (error) { if (currentView()) { inlineError(errorBox, error.message); badge.textContent = 'Couldn’t load media'; } }
+      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh list'); syncControls(); } }
+    }
+    const refresh = button('Refresh list', 'button-small', load, 'refresh');
+    const submit = button('Use selected ISO', 'button-primary', null, 'check'); submit.type = 'submit';
+    const form = el('form', {onSubmit: async event => {
+      event.preventDefault();
+      if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return;
+      const file = fileInput.files[0];
+      if (mode === 'upload' && (!file || !file.name.toLowerCase().endsWith('.iso') || !file.size || file.size > catalog.max_upload_bytes)) {
+        inlineError(errorBox, `Choose a nonempty .iso file no larger than ${formatBytes(catalog.max_upload_bytes)}.`); return;
+      }
+      const uploading = mode === 'upload';
+      busy = uploading ? 'upload' : 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true;
+      progressBox.hidden = !uploading;
+      if (uploading) { progress.value = 0; cancel.disabled = false; progressText.textContent = 'Starting upload…'; }
+      setBusy(submit, uploading ? 'Uploading ISO…' : 'Verifying ISO…'); syncControls();
+      try {
+        const digest = checksum.value.trim().toLowerCase();
+        const next = uploading ? await uploadMedia(file, digest, (loaded, total) => {
+          if (!currentView()) return;
+          if (loaded >= total) { progress.removeAttribute('value'); cancel.disabled = true; progressText.textContent = 'Upload complete. Verifying checksum and installation media…'; setBusy(submit, 'Verifying ISO…'); }
+          else { progress.value = Math.round(loaded / total * 100); progressText.textContent = `${formatBytes(loaded)} of ${formatBytes(total)} uploaded`; }
+        }) : await api('/api/settings/media', {method: 'PUT', body: {media_id: serverSelect.value, sha256: digest}});
+        if (!currentView()) return;
+        mode = 'server'; fileInput.value = ''; renderCatalog(next);
+        successBox.textContent = `${next.selected?.name || 'OS ISO'} verified and saved. New deployments will use this media.`;
+        successBox.hidden = false;
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
+    }}, el('div', {class: 'form-body'}, selectedSummary, errorBox, successBox,
+      el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose an ISO source'), el('label', {}, serverRadio, 'Select server media'), el('label', {}, uploadRadio, 'Upload an ISO')),
+      serverFields, uploadFields,
+      field('Publisher SHA-256 checksum', checksum, el('span', {id: 'os-media-sha256-help'}, 'Copy the checksum from the OS publisher’s download page. GDeploy verifies the file before saving it.')),
+      el('p', {class: 'media-compatibility'}, icon('info'), 'Automatic installation currently supports Ubuntu Server 24.04 LTS amd64 using autoinstall. Other ISOs are not supported.'), progressBox), el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), submit));
+    const panel = el('section', {class: 'surface', id: 'os-media-panel', 'aria-labelledby': 'os-media-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'os-media-title'}, 'OS installation media'), el('p', {}, 'Choose and verify the ISO used to install your virtual machines.')), badge), form);
+    $('.surface-header', panel).append(refresh);
+    serverSelect.addEventListener('change', () => { checksum.value = currentItem()?.sha256 || ''; successBox.hidden = true; syncControls(); });
+    fileInput.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
+    checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
+    return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
   function renderSettings() {
     const settings = state.settings || {};
@@ -329,6 +467,8 @@
     let certificateRequest = 0;
     let certificateBusy = '';
     let connectionBusy = '';
+    let mediaBusy = false;
+    let mediaControls = null;
     let fingerprintConfirmed = false;
     let trustButton = null;
     let removeButton = null;
@@ -345,7 +485,7 @@
       return value && !Number.isNaN(parsed.getTime()) ? new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}).format(parsed) : 'Not available';
     };
     function syncControls() {
-      const busy = Boolean(connectionBusy || certificateBusy);
+      const busy = Boolean(connectionBusy || certificateBusy || mediaBusy);
       const identityChanged = hostKey(host.value) !== hostKey(settings.host) || username.value.trim() !== (settings.username || '');
       const lockInputs = Boolean(connectionBusy || ['trust', 'remove'].includes(certificateBusy));
       host.disabled = lockInputs; username.disabled = lockInputs; password.disabled = lockInputs;
@@ -357,6 +497,7 @@
       if (removeButton) removeButton.disabled = busy;
       if (comparison) comparison.disabled = busy || !certificateUsable();
       certificatePanel.setAttribute('aria-busy', certificateBusy ? 'true' : 'false');
+      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy));
     }
     function renderCertificate() {
       trustButton = null; removeButton = null; comparison = null;
@@ -394,6 +535,7 @@
             certificate = result; certificateHost = hostKey(requestedHost); certificateSource = 'retrieved';
             if (state.settings && hostKey(state.settings.host) === certificateHost) state.settings.certificate_trust = result;
             state.inventory = null;
+            renderReadiness();
             certificateStatus.textContent = 'Certificate trusted for this host. Save the connection details, then test the saved connection. No restart is needed.';
           } catch (error) {
             if (!currentView() || request !== certificateRequest) return;
@@ -418,6 +560,7 @@
             certificate = null;
             if (state.settings && hostKey(state.settings.host) === hostKey(requestedHost)) state.settings.certificate_trust = null;
             state.inventory = null;
+            renderReadiness();
             certificateStatus.textContent = 'Saved trust removed. Standard certificate authority verification remains enabled. Retrieve the certificate to review trust again.';
           } catch (error) {
             if (currentView() && request === certificateRequest) { inlineError(certificateError, error.message); certificateStatus.textContent = 'Saved trust could not be removed.'; }
@@ -457,19 +600,21 @@
     const test = button('Test saved connection', '', async () => {
       if (!currentView() || test.disabled) return;
       inlineError(errorBox, ''); resultBox.hidden = true; connectionBusy = 'test'; setBusy(test, 'Connecting…'); syncControls();
+      state.inventory = null; renderReadiness();
       try {
         const inventory = await api('/api/inventory');
         if (!currentView()) return;
         state.inventory = inventory;
+        renderReadiness();
         resultBox.className = 'alert alert-success';
         resultBox.replaceChildren(el('strong', {}, `Connected to ${inventory.host?.name || settings.host}`), el('div', {class: 'inventory-summary'}, el('span', {}, `${inventory.host?.cpu_threads || 0} CPU threads`), el('span', {}, `${inventory.host?.memory_gb || 0} GB memory`), el('span', {}, `${inventory.datastores?.length || 0} datastores`), el('span', {}, `${inventory.networks?.length || 0} networks`)));
         resultBox.hidden = false;
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
       finally { if (currentView()) { connectionBusy = ''; test.replaceChildren(icon('refresh'), 'Test saved connection'); syncControls(); } }
     }, 'refresh');
-    const form = el('form', {class: 'surface', onSubmit: async event => {
+    const form = el('form', {class: 'surface', id: 'esxi-connection-panel', onSubmit: async event => {
       event.preventDefault();
-      if (!currentView() || connectionBusy || certificateBusy || !form.reportValidity()) return;
+      if (!currentView() || connectionBusy || certificateBusy || mediaBusy || !form.reportValidity()) return;
       const payload = {host: host.value.trim(), username: username.value.trim(), password: password.value, verify_tls: true};
       inlineError(errorBox, ''); resultBox.hidden = true; connectionBusy = 'save'; setBusy(save, 'Saving…'); syncControls();
       try {
@@ -483,7 +628,7 @@
         notify('ESXi connection saved. Test the connection to check access.');
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
       finally { if (currentView()) { connectionBusy = ''; save.replaceChildren(icon('check'), 'Save connection'); syncControls(); } }
-    }}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {}, 'Host connection'), el('p', {}, 'Review the certificate, then save the account used to manage your VMs.')), settings.configured ? el('span', {class: 'status status-completed'}, 'Configured') : el('span', {class: 'status'}, 'Not configured')), el('div', {class: 'form-body'}, errorBox, resultBox, field('ESXi host', host, el('span', {id: 'esxi-host-help'}, 'Use a hostname or IP address, without a URL or port. ESXi HTTPS uses port 443.')), certificatePanel, field('Username', username, 'Use an account with the required VM, network, and datastore permissions.'), field('Password', password, settings.configured ? 'Changing the host or username requires entering its password again.' : 'Your saved password is never returned by the settings API.'), el('div', {class: 'secure-note'}, icon('shield'), el('div', {}, el('strong', {}, 'Certificate verification stays enabled'), 'Use the trusted certificate above or the certificate authorities configured on the GDeploy server.'))), el('div', {class: 'form-footer'}, test, save));
+    }}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {}, 'ESXi connection'), el('p', {}, 'Review the certificate, then save the account used to manage your VMs.')), settings.configured ? el('span', {class: 'status status-completed'}, 'Configured') : el('span', {class: 'status'}, 'Not configured')), el('div', {class: 'form-body'}, errorBox, resultBox, field('ESXi host', host, el('span', {id: 'esxi-host-help'}, 'Use a hostname or IP address, without a URL or port. ESXi HTTPS uses port 443.')), certificatePanel, field('Username', username, 'Use an account with the required VM, network, and datastore permissions.'), field('Password', password, settings.configured ? 'Changing the host or username requires entering its password again.' : 'Your saved password is never returned by the settings API.'), el('div', {class: 'secure-note'}, icon('shield'), el('div', {}, el('strong', {}, 'Certificate verification stays enabled'), 'Use the trusted certificate above or the certificate authorities configured on the GDeploy server.'))), el('div', {class: 'form-footer'}, test, save));
     host.addEventListener('input', () => {
       certificateRequest++; certificateBusy = ''; certificate = null; fingerprintConfirmed = false;
       retrieve.replaceChildren(icon('refresh'), 'Retrieve certificate');
@@ -493,15 +638,23 @@
     });
     for (const input of [username, password]) input.addEventListener('input', () => { resultBox.hidden = true; syncControls(); });
     const item = (ready, title, description, symbol) => el('div', {class: `setup-item ${ready ? 'ready' : ''}`}, icon(ready ? 'checkCircle' : symbol), el('div', {}, el('strong', {}, title), el('p', {}, description)));
-    const readiness = el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Deployment prerequisites')), el('div', {class: 'setup-list'}, item(settings.configured, 'ESXi host', settings.configured ? 'Connection details saved. Use the connection test to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(settings.iso_configured, 'Ubuntu 24.04 installation media', settings.iso_configured ? 'Installation media configured. Preflight checks the file before deployment.' : 'Configure a local Ubuntu 24.04 live-server ISO on the GDeploy server.', 'disc'), item(settings.splunk_configured, 'Splunk installation package', settings.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Optional: configure a Splunk Enterprise Linux x86_64 .tgz package on the server.', 'layers')));
-    page.replaceChildren(heading('ESXi connection', 'Connect your infrastructure and prepare for deployment.'), el('div', {class: 'settings-grid'}, form, el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Installation media and package paths are configured on the GDeploy server. Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.'))));
-    renderCertificate(); syncControls();
+    const readiness = el('section', {class: 'surface', 'aria-label': 'Setup checklist'});
+    const steps = el('div', {class: 'setup-steps', 'aria-label': 'Setup sections'});
+    function renderReadiness() {
+      const saved = state.settings || settings;
+      const step = (number, title, description, ready, target) => el('button', {type: 'button', class: `setup-step ${ready ? 'ready' : ''}`, onClick: () => { const section = document.getElementById(target); section?.scrollIntoView({block: 'start'}); section?.querySelector('input,select')?.focus({preventScroll: true}); }}, el('span', {class: 'setup-step-number'}, ready ? icon('check') : number), el('span', {}, el('strong', {}, title), el('small', {}, description)), icon('arrow'));
+      steps.replaceChildren(step('1', 'ESXi connection', saved.configured ? state.inventory ? 'Connected to your host' : 'Connection saved · test access' : 'Connect your virtualization host', saved.configured, 'esxi-connection-panel'), step('2', 'OS installation media', saved.iso_configured ? 'OS ISO selected · ready for preflight' : 'Select or upload an OS ISO', saved.iso_configured, 'os-media-panel'));
+      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Select or upload installation media in the section below.', 'disc'), item(saved.splunk_configured, 'Splunk package · optional', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Only needed for Splunk: configure its Linux x86_64 .tgz package and checksum on the server.', 'layers')));
+    }
+    mediaControls = createMediaPanel(catalog => { if (state.settings) state.settings.iso_configured = catalog.ready; renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
+    page.replaceChildren(heading('Setup', 'Prepare GDeploy for its first deployment. You can update these settings anytime.'), steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, form, mediaControls.panel), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.'))));
+    renderReadiness(); renderCertificate(); syncControls(); mediaControls.load();
   }
   function field(label, input, hint) { return el('label', {class: 'field'}, el('span', {}, label), input, hint ? el('small', {}, hint) : null); }
   function renderDetail(data) {
     const vms = data.vms || [];
     const back = el('a', {class: 'back-link', href: '#deployments'}, icon('back'), 'All deployments');
-    const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), statusBadge(data.status)), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'} · Ubuntu 24.04 LTS · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
+    const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), statusBadge(data.status)), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'} · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
     const vmSurface = el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Virtual machines', el('span', {class: 'count-badge'}, vms.length))));
     for (const vm of vms) {
       const spec = (label, value) => el('div', {}, el('dt', {}, label), el('dd', {}, value || '—'));
@@ -517,7 +670,7 @@
     const left = el('div', {class: 'detail-main'}, data.error ? el('div', {class: 'alert alert-error', role: 'alert'}, el('strong', {}, 'Deployment needs attention\n'), data.error) : null, vmSurface, logs);
     const credentials = renderCredentials();
     const aside = el('aside', {class: 'detail-aside'}, renderProgress(data), credentials);
-    if (failureStatuses.has(data.status)) aside.append(el('section', {class: 'surface recovery-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Recover this deployment')), el('div', {class: 'recovery-body'}, el('p', {}, 'Delete the VMs and installation media owned by this failed deployment, then start again with the same configuration. All data on those VM disks will be deleted.'), button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger button-full', () => openRedeploy(data), 'refresh'))));
+    if (failureStatuses.has(data.status)) aside.append(el('section', {class: 'surface recovery-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Recover this deployment')), el('div', {class: 'recovery-body'}, el('p', {}, 'Delete the VMs and installation media owned by this failed deployment, then start again with the same VM configuration and the current OS ISO selection in Setup. All data on those VM disks will be deleted.'), button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger button-full', () => openRedeploy(data), 'refresh'))));
     page.replaceChildren(back, title, el('div', {class: 'detail-layout'}, left, aside));
   }
   function renderProgress(data) {
@@ -526,7 +679,7 @@
     const failed = failureStatuses.has(data.status);
     const percentage = completed ? 100 : index > 0 ? Math.round(index / (stageOrder.length - 1) * 100) : 0;
     const list = el('ol', {class: 'stage-list'});
-    const stages = [['preflight', 'Preflight checks'], ['preparing', 'Prepare installation media'], ['creating', 'Create virtual machines'], ['installing_os', 'Install Ubuntu 24.04'], ['installing_software', 'Install selected software'], ['verifying', 'Verify services']];
+    const stages = [['preflight', 'Preflight checks'], ['preparing', 'Prepare installation media'], ['creating', 'Create virtual machines'], ['installing_os', 'Install operating system'], ['installing_software', 'Install selected software'], ['verifying', 'Verify services']];
     for (const [key, label] of stages) {
       const stageIndex = stageOrder.indexOf(key);
       const done = completed || (index >= 0 && stageIndex < index);
@@ -639,7 +792,7 @@
     }, 'refresh');
     submit.disabled = true;
     confirm.addEventListener('input', () => { submit.disabled = confirm.value !== data.name; });
-    dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, 'Delete and start again?')), el('div', {class: 'confirm-body'}, el('p', {id: 'confirm-description'}, 'This permanently deletes the VMs, their disks, and installation media owned by ', el('strong', {}, data.name), '. A new deployment uses the same configuration and freshly generated credentials. Shared datastores and unrelated VMs are preserved.'), el('p', {}, 'If cleanup fails, GDeploy stops before creating a replacement.'), errorBox, field(`Type “${data.name}” to confirm`, confirm), el('div', {class: 'confirm-actions'}, cancel, submit)));
+    dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, 'Delete and start again?')), el('div', {class: 'confirm-body'}, el('p', {id: 'confirm-description'}, 'This permanently deletes the VMs, their disks, and installation media owned by ', el('strong', {}, data.name), '. A new deployment uses the same VM configuration, the current OS ISO selection in Setup, and freshly generated credentials. Shared datastores and unrelated VMs are preserved.'), el('p', {}, 'If cleanup fails, GDeploy stops before creating a replacement.'), errorBox, field(`Type “${data.name}” to confirm`, confirm), el('div', {class: 'confirm-actions'}, cancel, submit)));
     dialog.showModal();
     confirm.focus();
   }
@@ -647,7 +800,7 @@
 
   async function openWizard() {
     if (!state.session || setupRequired()) return;
-    if (!state.settings?.configured) { location.hash = 'settings'; notify('Save your ESXi connection to begin a deployment.'); return; }
+    if (!state.settings?.configured || !state.settings?.iso_configured) { location.hash = 'settings'; notify('Complete Setup with an ESXi connection and an OS ISO to begin a deployment.'); return; }
     hideCredentials();
     const dialog = $('#wizard-dialog');
     state.wizard = {step: 0, name: '', selected: new Set(['elasticsearch', 'kibana']), vms: {}, activeRole: 'elasticsearch', accepted: false, preflight: null, busy: true, error: ''};
@@ -662,7 +815,7 @@
     } catch (error) {
       if (state.wizard !== wizard) return;
       wizard.busy = false;
-      dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), el('div', {class: 'wizard-content'}, el('h3', {}, 'Couldn’t load your ESXi inventory'), el('p', {class: 'muted'}, 'Check the saved connection and your host’s certificate, permissions, and availability.'), el('div', {class: 'alert alert-error', role: 'alert'}, error.message), button('Open ESXi connection', 'button-primary', () => { closeWizard(); location.hash = 'settings'; }, 'server'))));
+      dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), el('div', {class: 'wizard-content'}, el('h3', {}, 'Couldn’t load your ESXi inventory'), el('p', {class: 'muted'}, 'Check the saved connection and your host’s certificate, permissions, and availability.'), el('div', {class: 'alert alert-error', role: 'alert'}, error.message), button('Open Setup', 'button-primary', () => { closeWizard(); location.hash = 'settings'; }, 'server'))));
     }
   }
   function closeWizard() {
@@ -690,7 +843,7 @@
     ensureVMs();
     const sidebar = el('aside', {class: 'wizard-sidebar', 'aria-label': 'Deployment steps'});
     ['Choose software', 'Configure VMs', 'Review & deploy'].forEach((label, index) => sidebar.append(el('div', {class: `wizard-step ${index === wizard.step ? 'active' : index < wizard.step ? 'done' : ''}`, ...(index === wizard.step ? {'aria-current': 'step'} : {})}, el('b', {}, index < wizard.step ? '✓' : index + 1), label)));
-    sidebar.append(el('p', {class: 'wizard-aside-note'}, 'Ubuntu 24.04 LTS is installed on each VM. Every selected role gets its own dedicated machine.'));
+    sidebar.append(el('p', {class: 'wizard-aside-note'}, 'The OS ISO selected in Setup is used for each VM. Every selected role gets its own dedicated machine.'));
     const content = el('div', {class: 'wizard-content', id: 'wizard-content'});
     if (wizard.error) content.append(el('div', {class: 'alert alert-error', role: 'alert'}, wizard.error));
     if (wizard.step === 0) renderBlueprint(content);
@@ -739,7 +892,7 @@
     const vm = wizard.vms[wizard.activeRole]; if (!vm) return;
     const form = el('div', {class: 'vm-resource-form', id: 'vm-resource-form', role: 'tabpanel', 'aria-labelledby': `tab-${vm.role}`});
     const input = (key, attrs = {}) => el('input', {...attrs, value: vm[key], onInput: event => { vm[key] = ['cpu', 'ram_gb', 'disk_gb'].includes(key) ? Number(event.target.value) : event.target.value; invalidatePreflight(); }});
-    form.append(el('div', {class: 'vm-form-header'}, roleIcon(vm.role), el('div', {}, el('h4', {}, roleName(vm.role)), el('p', {}, 'Ubuntu 24.04 LTS · Linux x86_64'))), field('Virtual machine name', input('name', {type: 'text', required: true, maxlength: 63, pattern: '[a-z](?:(?:[a-z0-9]|-)*[a-z0-9])?', autocomplete: 'off', spellcheck: 'false'}), 'A unique hostname starting with a letter; lowercase letters, numbers, and hyphens only.'), el('div', {class: 'field-grid three'}, field('CPU cores', input('cpu', {type: 'number', min: 1, max: 128, step: 1, required: true}), 'vCPU'), field('Memory', input('ram_gb', {type: 'number', min: ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role], max: 2048, step: 1, required: true}), 'GB RAM'), field('Disk size', input('disk_gb', {type: 'number', min: 25, max: 65536, step: 1, required: true}), 'GB · thin provisioned')));
+    form.append(el('div', {class: 'vm-form-header'}, roleIcon(vm.role), el('div', {}, el('h4', {}, roleName(vm.role)), el('p', {}, 'Operating system from your selected OS ISO'))), field('Virtual machine name', input('name', {type: 'text', required: true, maxlength: 63, pattern: '[a-z](?:(?:[a-z0-9]|-)*[a-z0-9])?', autocomplete: 'off', spellcheck: 'false'}), 'A unique hostname starting with a letter; lowercase letters, numbers, and hyphens only.'), el('div', {class: 'field-grid three'}, field('CPU cores', input('cpu', {type: 'number', min: 1, max: 128, step: 1, required: true}), 'vCPU'), field('Memory', input('ram_gb', {type: 'number', min: ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role], max: 2048, step: 1, required: true}), 'GB RAM'), field('Disk size', input('disk_gb', {type: 'number', min: 25, max: 65536, step: 1, required: true}), 'GB · thin provisioned')));
     const datastore = el('select', {required: true, onChange: event => { vm.datastore = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a datastore'), (state.inventory?.datastores || []).map(store => el('option', {value: store.name}, `${store.name} · ${Math.floor(Number(store.free_gb))} GB free`))); datastore.value = vm.datastore;
     const network = el('select', {required: true, onChange: event => { vm.network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a port group'), (state.inventory?.networks || []).map(net => el('option', {value: net.name}, net.name))); network.value = vm.network;
     form.append(el('div', {class: 'field-grid'}, field('Datastore', datastore, 'Storage destination on the ESXi host.'), field('Network / port group', network, 'Must be reachable from GDeploy.')), el('hr', {class: 'form-divider'}), el('div', {class: 'field-section-label'}, 'IP address configuration'));
@@ -805,7 +958,7 @@
     if (wizard.step === 0) {
       wizard.name = wizard.name.trim();
       if (!validHostname(wizard.name)) wizard.error = 'Choose a deployment name of 1–63 lowercase letters, numbers, or hyphens, beginning with a letter and ending with a letter or number.';
-      else if (!wizard.selected.size) wizard.error = 'Select at least one software role or Ubuntu server.';
+      else if (!wizard.selected.size) wizard.error = 'Select at least one software role or OS only.';
       else { ensureVMs(); wizard.step = 1; }
       renderWizard(); return;
     }

@@ -4,6 +4,29 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-30
+
+### Added
+
+- A **Setup** section containing **ESXi connection** and **OS installation media**, bringing initial GDeploy configuration into one place.
+- Upload an OS ISO from the browser or choose an existing `.iso` in the server's read-only media directory. Enter the publisher's verified SHA-256 checksum; GDeploy validates the file before saving the selection and retains the previous choice if validation fails.
+- Persist browser uploads under `/data/media` and the media selection in the app data volume. Changing the selected ISO needs no environment edit or container restart.
+- Show upload progress and errors, discard rejected/incomplete uploads, and clean up abandoned upload files after a restart while keeping registered media.
+- Save each new deployment's selected ISO path and checksum so later Setup changes do not switch media for queued or running jobs.
+
+### Changed
+
+- Use generic **OS ISO**, **OS only** and operating-system installation labels throughout the interface. Automated installation still supports **Ubuntu Server 24.04 LTS amd64 live-server** media; this release does not add other installers.
+- Add preferred `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256` environment names while preserving `GDEPLOY_UBUNTU_ISO` and `GDEPLOY_UBUNTU_SHA256` compatibility. A saved Setup selection takes precedence over environment media settings.
+- Update the installation walkthrough for browser-based media setup and simple source-image rebuilds using `git pull --ff-only` followed by `docker compose up -d --build --wait`.
+
+### Installation and compatibility
+
+- Existing administrator credentials, encryption keys, ESXi connection and certificate approvals, deployment history and environment media settings are preserved. Existing installations continue using their environment media configuration until an ISO is saved in Setup. When both environment naming schemes are set, `GDEPLOY_OS_*` takes precedence.
+- Keep source files available and unchanged for queued/running jobs. **Delete & redeploy** creates a new job using the current media selection. Back up uploaded ISOs with the complete data volume and preserve the server's `media/` directory.
+- Versions before **0.3.0** ignore saved media selections and the new environment names; provide the older version's verified media path/checksum configuration before rollback. Finish or resolve active jobs before changing versions.
+- Docker continues to publish `0.0.0.0:8000` by default. Existing bind overrides, data volumes and the read-only `/media` mount are retained.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added

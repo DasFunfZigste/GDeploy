@@ -1,8 +1,8 @@
 # GDeploy
 
-A dark, Docker-hosted control panel that creates Ubuntu VMs on **standalone VMware ESXi 8.0 Update 3** and installs selected applications. Splunk, Elasticsearch and Kibana each receive their own VM. Kibana connects to Elasticsearch using a service account token and verified TLS; Splunk runs independently.
+A dark, Docker-hosted control panel that creates VMs on **standalone VMware ESXi 8.0 Update 3**, installs the operating system from your selected OS ISO, and installs selected applications. Splunk, Elasticsearch and Kibana each receive their own VM. Kibana connects to Elasticsearch using a service account token and verified TLS; Splunk runs independently.
 
-**Initial release:** Ubuntu Server **24.04 LTS amd64 live-server** installation media, one administrator, one ESXi host, one VM per selected role per deployment. This is implementation-ready lab software; real ESXi deployment must be validated with your host, license, installation media and network before relying on it for production.
+**Supported installer:** Ubuntu Server **24.04 LTS amd64 live-server** installation media. The generic OS ISO labels do not add support for other installers. GDeploy supports one administrator, one ESXi host and one VM per selected role per deployment. This is implementation-ready lab software; real ESXi deployment must be validated with your host, license, installation media and network before relying on it for production.
 
 ## Quick start from source
 
@@ -16,7 +16,7 @@ docker compose up --build -d --wait
 
 The private repository requires your existing GitHub access. Building from source does not require a GHCR login. Open **`http://SERVER_LAN_IP:8000`** from another computer, or **http://localhost:8000** on the Docker host, and sign in with **username `admin` and password `admin`** on a fresh installation. The first sign-in requires a new username and password before you can use the app. After saving them, sign in again with your new credentials. The default settings enable LAN access immediately; replace `SERVER_LAN_IP` with the Docker host's actual address.
 
-On a fresh data volume, GDeploy creates the initial `admin`/`admin` account and a unique random encryption key automatically. Choose a username of 3–100 letters, digits, periods, underscores or hyphens, starting with a letter or digit; it cannot be `admin` in any capitalization. Choose a password of 12–1024 characters and enter it again to confirm. Completing setup signs out all sessions, and `admin`/`admin` no longer works. You can open the app before adding installation media; VM deployment requires the verified Ubuntu installer and checksum described below. No initial `.env` file or separate configuration command is required.
+On a fresh data volume, GDeploy creates the initial `admin`/`admin` account and a unique random encryption key automatically. Choose a username of 3–100 letters, digits, periods, underscores or hyphens, starting with a letter or digit; it cannot be `admin` in any capitalization. Choose a password of 12–1024 characters and enter it again to confirm. Completing setup signs out all sessions, and `admin`/`admin` no longer works. Open **Setup** to configure your ESXi connection and choose an OS ISO before deploying. No initial `.env` file or separate configuration command is required.
 
 ### Default network access and optional restrictions
 
@@ -43,9 +43,10 @@ Keep your existing `.env` and data volume. A fresh installation starts with `adm
 ## Included
 
 - A guided form for applications, VM names, vCPUs, RAM, disks, datastore, port group, DHCP or static IPv4.
-- Optional plain Ubuntu VM alongside the application roles.
+- A **Setup** section for ESXi connection and OS installation media, with browser ISO upload or selection from the server's media directory.
+- An optional **OS only** VM alongside the application roles.
 - Media checksum, inventory, name, capacity and network-input checks before provisioning.
-- Retrieve, inspect and explicitly trust an ESXi certificate from the connection screen, with no container restart.
+- Retrieve, inspect and explicitly trust an ESXi certificate from Setup, with no container restart.
 - Unattended Ubuntu installation using a remastered, bootable ISO and NoCloud autoinstall configuration.
 - Unique generated guest/application credentials, encrypted storage and an explicit **Credentials** view in every deployment.
 - Stage progress, persisted events and deployment history. Interrupted work is identified on restart.
@@ -60,18 +61,28 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.2.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.3.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
 ## Prepare installation media and deploy
 
-1. Use a Docker host that can reach both ESXi and the guest network. Allow several GiB of free local space for a temporary copy of the Ubuntu ISO.
-2. Place your vendor-verified **Ubuntu Server 24.04 amd64 live-server ISO** at `media/ubuntu.iso`. For Splunk, also place your licensed **Splunk Enterprise Linux x86_64 .tgz** at `media/splunk.tgz`. Verify downloads against the publishers' checksums before proceeding. GDeploy does not download Splunk or supply a license. On Linux, the container's UID 10001 must be able to read this bind mount: use directory mode 0755 and installer-file mode 0644, or equivalent ACLs. Keep secrets out of this public-media directory.
-3. Run `sha256sum media/ubuntu.iso` (and `sha256sum media/splunk.tgz` if used). Create or edit the optional `.env` and set `GDEPLOY_UBUNTU_SHA256` and, if used, `GDEPLOY_SPLUNK_SHA256` to those verified values. Keep one value per setting and preserve any existing contents. For an automatic installation, leave `GDEPLOY_SECRET_KEY` and `GDEPLOY_ADMIN_PASSWORD_HASH` absent or empty; the app reuses its saved encryption key and account in the data volume. Do not generate a replacement key.
-4. Apply the media settings with `docker compose up --build -d --wait --force-recreate`.
-5. Open **ESXi connection** and enter your ESXi hostname or IP. If its certificate is not already trusted, retrieve it, compare its SHA-256 fingerprint against a trusted ESXi source, and select **Trust certificate**. Then save your ESXi username/password and test the connection to load inventory.
-6. Select **New deployment**, choose application roles, and configure each separate VM. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
+1. Use a Docker host that can reach both ESXi and the guest network. Allow space for the OS ISO and several GiB more for temporary installation media.
+2. Open **Setup → ESXi connection** and enter your ESXi hostname or IP. If its certificate is not already trusted, retrieve it, compare its SHA-256 fingerprint against a trusted ESXi source, and select **Trust certificate**. Then save your ESXi username/password and test the connection to load inventory.
+3. In **Setup → OS installation media**, upload the supported live-server ISO from your computer, or select a `.iso` file you placed in the server's `media/` directory. Enter its publisher's verified **SHA-256 checksum**, then validate and save the selection. Uploads are stored in `/data/media` in the persistent data volume; server files use the read-only `/media` mount. No environment edit or container restart is needed. Hashing a large ISO can take a few minutes.
+4. For Splunk, place your licensed **Splunk Enterprise Linux x86_64 .tgz** at `media/splunk.tgz`, verify its publisher checksum, and set `GDEPLOY_SPLUNK_SHA256` in the optional `.env` to that value. Preserve existing settings and apply this environment change with `docker compose up -d --force-recreate --wait`. GDeploy does not download Splunk or supply a license. Server-mounted media must be readable by container UID 10001: use directory mode 0755 and file mode 0644, or equivalent ACLs. Keep secrets out of `media/`.
+5. Select **New deployment**, choose application roles, and configure each separate VM. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
+
+The saved OS ISO and checksum are used for future deployments. Each queued deployment retains its selected ISO and checksum, so later Setup changes do not switch its source media. Keep the source file available and unchanged until that deployment finishes. Existing environment configuration still works when no selection has been saved in Setup: use `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256`, or the compatible legacy `GDEPLOY_UBUNTU_ISO` and `GDEPLOY_UBUNTU_SHA256` names.
+
+To update a source installation for testing, run these commands in the same checkout:
+
+```sh
+git pull --ff-only
+docker compose up -d --build --wait
+```
+
+Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded media and history.
 
 If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
 
@@ -90,7 +101,7 @@ The default Compose binding is `0.0.0.0:8000`. You can optionally restrict the b
 
 ### Trust an ESXi certificate in the app
 
-On **ESXi connection**, retrieve the certificate for the entered host. Review its subject, issuer, validity dates, DNS/IP names and **SHA-256 fingerprint**. Compare that fingerprint with the certificate shown through a trusted ESXi management session before selecting **Trust certificate**; retrieving a certificate alone does not establish the host's identity. Save the connection credentials and test the connection.
+In **Setup → ESXi connection**, retrieve the certificate for the entered host. Review its subject, issuer, validity dates, DNS/IP names and **SHA-256 fingerprint**. Compare that fingerprint with the certificate shown through a trusted ESXi management session before selecting **Trust certificate**; retrieving a certificate alone does not establish the host's identity. Save the connection credentials and test the connection.
 
 The approval is stored in the app database for that exact host/IP and survives restarts. API connections and datastore uploads require the approved certificate and valid dates. A changed or renewed certificate must be retrieved, reviewed and trusted again. Explicit approval also supports an ESXi IP address that is absent from the certificate's DNS/IP names. Removing trust in the same screen restores normal system/private CA verification. No CA file, environment edit or restart is needed for this workflow.
 
@@ -110,7 +121,7 @@ As an optional alternative for a private CA, make a PEM bundle containing the no
 
 ## Failure recovery
 
-When a stage fails, inspect its error and ESXi console before selecting **Delete & redeploy**. Type the deployment name to confirm permanent deletion of that deployment's VMs and virtual disks, including any data already written. A fresh deployment uses the saved choices and new credentials.
+When a stage fails, inspect its error and ESXi console before selecting **Delete & redeploy**. Type the deployment name to confirm permanent deletion of that deployment's VMs and virtual disks, including any data already written. A fresh deployment uses the saved VM choices, the current OS ISO selection and new credentials.
 
 Cleanup verifies both the deployment UUID annotation and datastore paths before deleting a VM. It discovers tagged VMs even if the app stopped before recording their IDs. Shared datastores, networks, source media and unrelated VMs are retained. Manually moving a disk outside its deployment directory causes cleanup to stop for inspection. If deletion fails, no replacement is started; retry after fixing the cause. If cleanup succeeds but the new preflight fails, the error still appears under delete/redeploy and a later retry is safe.
 
@@ -118,7 +129,7 @@ A timed-out ESXi operation can still be running on the host. Inspect its tasks b
 
 ## Persistence and operation
 
-The Compose data volume mounted at `/data` contains the SQLite administrator account, approved ESXi certificates and history, encrypted secrets and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. Installation media is removed from the datastore after the OS is ready. Source files in `media/` are never modified. Deployment history is retained after cleanup.
+The Compose data volume mounted at `/data` contains the SQLite administrator account, approved ESXi certificates, saved OS ISO selection and history, encrypted secrets, uploaded ISOs under `/data/media`, and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. Installation media is removed from the datastore after the OS is ready. Source files in `media/` are never modified. Deployment history is retained after cleanup.
 
 Run **one app container with one worker** against a data volume. Jobs are serialized; this release does not support multiple replicas. The container runs without root privileges or Linux capabilities, with a read-only root filesystem. Stop the app before taking a consistent backup of its complete data volume, including automatic bootstrap files, and any existing `.env`/`docker.env`. Store your chosen web-app credentials in your password manager; the private bootstrap credentials file is not a substitute for a backup. Do not use `docker compose down -v` unless you intend to erase the app's database and credentials.
 

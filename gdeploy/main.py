@@ -16,6 +16,7 @@ from . import __version__
 from .certificate_trust import CertificateTrust, CertificateTrustError
 from .config import Config, hash_password, verify_password
 from .db import Database
+from .media import MediaError, MediaManager
 from .models import (
     AccountSetup,
     CertificateApproval,
@@ -23,6 +24,7 @@ from .models import (
     ConnectionSettings,
     DeploymentSpec,
     Login,
+    MediaSelection,
     RedeployRequest,
 )
 from .service import DeploymentError, DeploymentService
@@ -41,6 +43,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         )
         app.state.service = service_factory(app.state.db, app.state.config)
         app.state.certificates = CertificateTrust(app.state.db)
+        app.state.media = MediaManager(app.state.db, app.state.config)
+        app.state.media.recover_uploads()
         app.state.login_lock = threading.Lock()
         if start_worker:
             app.state.service.start()
@@ -113,6 +117,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.exception_handler(CertificateTrustError)
     async def certificate_error(request, exc):
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
+    @app.exception_handler(MediaError)
+    async def media_error(request, exc):
         return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
     @app.get("/api/health")
@@ -202,9 +210,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "verify_tls": True,
             "configured": bool(saved),
             "certificate_trust": request.app.state.certificates.saved(saved["host"]) if saved else None,
-            "iso_configured": os.access(cfg.ubuntu_iso, os.R_OK)
-            and cfg.ubuntu_iso.is_file()
-            and bool(cfg.ubuntu_sha256),
+            "iso_configured": request.app.state.media.catalog()["ready"],
             "splunk_configured": os.access(cfg.splunk_package, os.R_OK)
             and cfg.splunk_package.is_file()
             and bool(cfg.splunk_sha256),
@@ -221,6 +227,18 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             value["password"] = previous["password"]
         db.set_settings(value)
         return {"ok": True}
+
+    @app.get("/api/settings/media")
+    def media_settings(request: Request, current=Depends(authenticated)):
+        return request.app.state.media.catalog()
+
+    @app.put("/api/settings/media")
+    def select_media(payload: MediaSelection, request: Request, current=Depends(authenticated)):
+        return request.app.state.media.select(payload.media_id, payload.sha256)
+
+    @app.post("/api/settings/media/upload")
+    async def upload_media(request: Request, filename: str, sha256: str, current=Depends(authenticated)):
+        return await request.app.state.media.upload(request, filename, sha256)
 
     @app.get("/api/inventory")
     def inventory(request: Request, current=Depends(authenticated)):

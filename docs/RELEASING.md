@@ -15,7 +15,7 @@ User-facing releases live at https://github.com/DasFunfZigste/GDeploy/releases. 
    git push origin vX.Y.Z
    ```
 
-The tag workflow tests the code, builds the image, verifies automatic and manual bootstrap, required replacement of default credentials, Compose/Docker CLI login and account persistence, publishes to GHCR, verifies a pull by digest and a Docker archive load, then builds and uploads release assets. It publishes the GitHub Release only after all those checks pass. A normal branch commit does not create a release; the tag defines a finished iteration.
+The tag workflow tests the code, builds the image, verifies automatic and manual bootstrap, required replacement of default credentials, Compose/Docker CLI login, account persistence, and OS ISO upload/selection persistence, publishes to GHCR, verifies a pull by digest and a Docker archive load, then builds and uploads release assets. It publishes the GitHub Release only after all those checks pass. A normal branch commit does not create a release; the tag defines a finished iteration.
 
 ## Distribution and permissions
 

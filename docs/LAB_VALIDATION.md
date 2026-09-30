@@ -15,6 +15,13 @@ Use an isolated datastore/network with disposable VMs. This checklist verifies t
 
 Record your exact ESXi build, Ubuntu ISO checksum, Splunk version, Elastic version and any host-specific findings before expanding use.
 
+## Setup and OS installation media
+
+1. In **Setup**, test both uploading a supported OS ISO and selecting a file from the server's `media/` directory. Supply the publisher's verified SHA-256 checksum. A wrong checksum must leave the previous selection unchanged.
+2. Recreate the app container with the same data volume. Confirm the saved ISO, uploaded files, administrator account and ESXi trust remain available.
+3. Queue a deployment with one ISO, then change the Setup selection. Confirm the queued deployment keeps its original source. Replacing or deleting that source must stop the deployment before VM creation.
+4. Interrupt a browser upload and restart the container during another upload. Confirm incomplete upload files are removed and previously saved media remains available. Use a real multi-GiB installer to check transfer progress, disk capacity and any reverse proxy upload limits.
+
 ## ESXi certificate-trust checks
 
 Use a disposable ESXi lab endpoint for certificate replacement and invalid-date tests.

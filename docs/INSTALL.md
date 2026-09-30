@@ -1,6 +1,6 @@
 # Install GDeploy
 
-This guide installs **GDeploy 0.2.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.2.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions **Ubuntu Server 24.04 LTS amd64** guests on standalone **ESXi 8.0 Update 3**.
+This guide installs **GDeploy 0.3.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.3.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -20,7 +20,16 @@ Open **`http://SERVER_LAN_IP:8000`** from another computer, replacing `SERVER_LA
 
 Sign in with **username `admin` and password `admin`** on a fresh installation, then complete the required account setup described below. If Docker is not installed yet, complete section 1 and return here. An SSH tunnel remains optional; section 5 shows how to use one.
 
-The UI can start before installation media is ready. Before deploying VMs, place your vendor-verified Ubuntu ISO at `media/ubuntu.iso` in the clone, and optional licensed Splunk package at `media/splunk.tgz`. Section 3 explains the downloads and permissions. Calculate `sha256sum media/ubuntu.iso` (and the Splunk file if used), then create or edit the optional `.env` with `GDEPLOY_UBUNTU_SHA256` and `GDEPLOY_SPLUNK_SHA256` set to the verified values. Preserve existing settings and use one value per key. Automatic installations leave `GDEPLOY_SECRET_KEY` and `GDEPLOY_ADMIN_PASSWORD_HASH` absent or empty, so the saved encryption key and database account remain in use. Apply the media settings with `docker compose up --build -d --wait --force-recreate`.
+The UI can start before installation media is ready. Open **Setup** to configure **ESXi connection** and **OS installation media**. Upload an ISO from your computer or select a `.iso` file in the server's `media/` directory, enter its publisher's verified SHA-256 checksum, and save it. The OS ISO workflow needs no `.env` edit or container restart. Sections 3 and 6 explain media preparation and Setup. Splunk still uses a separate licensed package at `media/splunk.tgz` and its `GDEPLOY_SPLUNK_SHA256` environment setting.
+
+To update and rebuild for testing later, run these commands in the same clone:
+
+```sh
+git pull --ff-only
+docker compose up -d --build --wait
+```
+
+Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO, uploads and deployment history. Before upgrading with live deployments, complete the backup steps in section 8.
 
 ## Optional: restrict the bind address or change the port
 
@@ -154,7 +163,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.2.0
+GDEPLOY_VERSION=0.3.0
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -180,17 +189,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.2.0
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.3.0
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.2.0`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.3.0`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.2.0
+GDEPLOY_VERSION=0.3.0
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -205,12 +214,12 @@ docker load --input "downloads/gdeploy-${GDEPLOY_VERSION}-linux-amd64.image.tar.
 
 This restores the same versioned image locally. Use `docker compose up -d --wait --pull never` in section 5; the bootstrap and `docker run` commands also use the loaded image. Loading the image avoids a registry pull, but VM installation still needs the Ubuntu and Elastic package networks described in section 6.
 
-## 3. Add the Ubuntu and optional Splunk installers
+## 3. Prepare an OS ISO and optional Splunk installer
 
 On the Ubuntu server, working in `~/gdeploy`:
 
-1. Download the **Ubuntu Server 24.04 LTS amd64 live-server ISO** from [Ubuntu's official release directory](https://releases.ubuntu.com/24.04/). Verify it using Ubuntu's published checksums and [verification instructions](https://ubuntu.com/tutorials/how-to-verify-ubuntu).
-2. Copy the verified ISO to **`media/ubuntu.iso`**.
+1. Download the supported **Ubuntu Server 24.04 LTS amd64 live-server ISO** from [Ubuntu's official release directory](https://releases.ubuntu.com/24.04/). Verify its publisher checksum using Ubuntu's [verification instructions](https://ubuntu.com/tutorials/how-to-verify-ubuntu). Keep the verified SHA-256 value for Setup.
+2. Choose either browser upload from your computer after sign-in, or copy the ISO into the server's **`media/`** directory for the server picker. An `.iso` filename such as `os.iso` is suitable; no specific name is required for the picker.
 3. To deploy Splunk, download your licensed **Splunk Enterprise Linux x86_64 `.tgz`** from [Splunk](https://www.splunk.com/en_us/download/splunk-enterprise.html), verify its vendor checksum, and copy it to **`media/splunk.tgz`**. GDeploy does not provide Splunk installation media or a license.
 
 For example, replace these source paths with the files you downloaded:
@@ -218,21 +227,25 @@ For example, replace these source paths with the files you downloaded:
 ```sh
 cd "$HOME/gdeploy"
 mkdir -p media
-cp /path/to/ubuntu-24.04-live-server-amd64.iso media/ubuntu.iso
+# Only if using the server picker instead of browser upload:
+cp /path/to/downloaded-live-server-amd64.iso media/os.iso
 # Only if deploying Splunk:
 cp /path/to/splunk-linux-amd64.tgz media/splunk.tgz
 
 chmod 0755 media
-chmod 0644 media/ubuntu.iso
+# Only if the ISO was copied to the server:
+chmod 0644 media/os.iso
 # Only if the Splunk file is present:
 chmod 0644 media/splunk.tgz
 ```
 
-The app container runs as UID 10001 and needs read access to the directory and installers. Equivalent ACLs are also suitable. Keep passwords and private keys out of `media/`. Allow several GiB of free local disk beyond the source ISO for temporary media preparation, plus enough storage on ESXi for the selected VMs.
+The app container runs as UID 10001 and needs read access to server-mounted media. Equivalent ACLs are also suitable. The server directory is mounted read-only at `/media`; browser uploads are saved separately in `/data/media` within the persistent data volume. Keep passwords and private keys out of `media/`. Allow space for the ISO plus several GiB for temporary media preparation, and enough storage on ESXi for the selected VMs.
+
+For Splunk, enter the publisher-verified SHA-256 in the optional `.env` as `GDEPLOY_SPLUNK_SHA256`. Preserve existing contents and use one value per setting. If the app is already running, apply this environment change with `docker compose up -d --force-recreate --wait`. An OS ISO selected through Setup does not need an environment setting.
 
 ## 4. Choose automatic or manual credentials
 
-**Automatic setup:** skip the configuration script and continue to section 5. GDeploy creates the initial `admin`/`admin` account and a unique random encryption key on its first start with a fresh data volume. For VM provisioning, create or edit the optional `.env` to set `GDEPLOY_UBUNTU_SHA256` and, if used, `GDEPLOY_SPLUNK_SHA256` to your publisher-verified media hashes. Use `sha256sum media/ubuntu.iso` or `sha256sum media/splunk.tgz` to calculate them. Preserve existing settings; leave both administrator credential settings absent or empty. You may add these media settings after first start and recreate the container. Restrict `.env` to its owner if it contains private settings.
+**Automatic setup:** skip the configuration script and continue to section 5. GDeploy creates the initial `admin`/`admin` account and a unique random encryption key on its first start with a fresh data volume. Select the OS ISO through Setup after signing in. Leave both administrator credential settings absent or empty. If using Splunk, supply the verified package and its environment checksum as described in section 3. Preserve existing settings and restrict `.env` to its owner if it contains private settings.
 
 **Optional manual setup:** if you prefer credentials in host environment files, run the following script **before the first start on a fresh volume**. It uses the same initial `admin`/`admin` account, creates a unique random encryption key, and records the checksums of the media already present. The first sign-in still requires replacing the default credentials. Do not run it after automatic setup, against existing app data, or to recover a missing key.
 
@@ -243,7 +256,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.2.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.3.0 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -255,7 +268,7 @@ This creates:
 
 These files are readable only by their owner. Sign in with `admin`/`admin` after startup, complete account setup, and store your chosen credentials in your password manager. The bootstrap credentials file remains an initial-login record; it is not updated with your chosen password. Back up `.env` and the data volume together: **the encryption key is required to read saved ESXi and VM credentials**. Do not regenerate it during an upgrade. The script refuses to overwrite an existing configuration.
 
-Run the script after placing your media so it records their checksums. If you add or replace an installer later, verify it against the publisher, calculate `sha256sum media/ubuntu.iso` or `sha256sum media/splunk.tgz`, and update the matching `GDEPLOY_UBUNTU_SHA256` or `GDEPLOY_SPLUNK_SHA256` value in your active environment file before recreating the container.
+The optional script records checksums for its expected `media/ubuntu.iso` and `media/splunk.tgz` paths if present. You can instead choose or replace the OS ISO in Setup at any time without editing environment files. Verify replacement Splunk packages against the publisher and update `GDEPLOY_SPLUNK_SHA256` in your active environment file before recreating the container.
 
 ## 5. Start GDeploy with Docker Compose
 
@@ -283,13 +296,13 @@ When using the tunnel, open [http://localhost:8000](http://localhost:8000) on yo
 
 LAN access works with the default binding. For HTTPS access, put the app behind a reverse proxy and keep its port private to the proxy. Set `GDEPLOY_COOKIE_SECURE=true` and `FORWARDED_ALLOW_IPS` to the proxy address/network as seen by the container, and forward the original `Host` and `X-Forwarded-Proto` headers. Recreate the container after environment changes. Docker-published ports can bypass UFW rules, so do not assume UFW alone protects a port published on every interface.
 
-## 6. Connect to ESXi and deploy your first VMs
+## 6. Complete Setup and deploy your first VMs
 
 ### Trust the certificate and connect
 
 After completing first-sign-in account setup:
 
-1. Open **ESXi connection** and enter the standalone ESXi 8.0 Update 3 hostname or IP address.
+1. Open **Setup → ESXi connection** and enter the standalone ESXi 8.0 Update 3 hostname or IP address.
 2. Retrieve its certificate. The screen shows the **subject, issuer, SHA-256 fingerprint, validity dates and DNS/IP names** (subject alternative names).
 3. Compare the SHA-256 fingerprint with the certificate shown through a trusted ESXi management session or another independently trusted source. Retrieving a certificate alone does not establish the host's identity. Select **Trust certificate** once you have verified it.
 4. Enter and save the ESXi username/password, then test the connection to load inventory.
@@ -298,13 +311,35 @@ The approval applies to the exact entered host/IP on HTTPS **443** and is saved 
 
 Each new ESXi API or datastore-upload connection verifies the approved certificate exactly and checks its validity dates. Explicit approval supports a hostname or IP that is absent from the certificate's DNS/IP names. An expired, not-yet-valid, changed or renewed certificate blocks the connection; retrieve and review a replacement, then trust it before retrying. Approval for one address does not automatically cover another alias of the same server.
 
-You can remove the saved trust from **ESXi connection** to restore normal system/private CA verification. Trust changes apply to subsequent connections, including connections for existing deployments to that saved endpoint; an already-open connection may finish using the certificate it authenticated earlier.
+You can remove the saved trust from **Setup → ESXi connection** to restore normal system/private CA verification. Trust changes apply to subsequent connections, including connections for existing deployments to that saved endpoint; an already-open connection may finish using the certificate it authenticated earlier.
 
 The settings API requires `verify_tls=true`. Connections also verify TLS when older saved settings or deployment snapshots contain `verify_tls=false`. If an earlier setup relied on disabling verification, approve its certificate here or configure a trusted CA before connecting. This does not rewrite stored passwords or settings.
 
+### Select OS installation media
+
+In **Setup → OS installation media**:
+
+1. Select a `.iso` file already available in the server's `/media` directory or a previous upload, or choose **Upload an ISO** and select a file on your computer. The server directory corresponds to `media/` beside the Compose file. Browser uploads support files up to **16 GiB**.
+2. Enter the **SHA-256 checksum from the publisher's verified checksum list**. Computing a hash from an unverified download alone does not establish its source.
+3. Select **Use selected ISO** or **Upload & use ISO**. GDeploy checks the contents against the expected hash before saving the selection. Keep the page open while a large file uploads and hashes; this may take several minutes. Upload progress and cancellation are available on the form.
+4. Check the saved media details before starting a deployment. If verification fails, the error appears in Setup and the previously saved selection remains in place.
+
+The current unattended installer supports **Ubuntu Server 24.04 LTS amd64 live-server** media. A matching checksum verifies the file's integrity; it does not make an unsupported installer compatible. Browser uploads persist under `/data/media`, so back them up with the complete data volume. Server-mounted ISOs remain in your `media/` directory. Changing the selection needs no container restart.
+
+Queued and running deployments retain the ISO path and checksum selected when they were created. Keep those files present and unchanged until the jobs finish; a later Setup selection applies to future jobs. **Delete & redeploy** creates a new job with the current media selection.
+
+Existing environment-configured media remains available when there is no saved Setup selection. Preferred names are `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256`; legacy `GDEPLOY_UBUNTU_ISO` and `GDEPLOY_UBUNTU_SHA256` continue to work. For example, a manual configuration can use:
+
+```dotenv
+GDEPLOY_OS_ISO=/media/os.iso
+GDEPLOY_OS_SHA256=YOUR_PUBLISHER_VERIFIED_SHA256
+```
+
+Use a real 64-character SHA-256 value and recreate the container to apply environment changes. A saved Setup choice takes precedence over environment media settings. The compatible default path remains `/media/ubuntu.iso` when no ISO path is configured.
+
 ### Deploy your VMs
 
-1. Select **New deployment** and choose Ubuntu, Splunk, Elasticsearch and/or Kibana. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk runs independently.
+1. Select **New deployment** and choose OS only, Splunk, Elasticsearch and/or Kibana. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk runs independently.
 2. Enter each VM's name, CPU, RAM, disk size, datastore, port group and DHCP/static network settings.
 3. Run preflight, address any reported issues, and start deployment.
 4. Open the deployment to follow its stages and errors. When ready, use its application links and **Reveal credentials** panel for the VM passwords and application sign-in details.
@@ -330,7 +365,7 @@ For datastore uploads using CA verification, `REQUESTS_CA_BUNDLE` is honored exp
 
 If a deployment fails, inspect its errors and the ESXi task/console state. **Delete & redeploy** requires the deployment name as confirmation and permanently deletes the VMs and disks owned by that deployment before trying again. It creates fresh credentials. Application data on those disks is also deleted.
 
-This is an initial lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.2.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.3.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
@@ -356,7 +391,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.2.0
+  ghcr.io/dasfunfzigste/gdeploy:0.3.0
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -374,7 +409,7 @@ For a manually configured installation, refresh `docker.env` from its existing c
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.2.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.3.0 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 
@@ -403,9 +438,12 @@ Common startup issues:
 | Docker reports permission denied | Reconnect after adding your user to the Docker group, or consistently use `sudo docker`. |
 | Container exits or remains unhealthy | Read `docker compose logs`; verify Compose is at least 2.24 and any explicit credential settings are complete. Preserve the volume and restore original missing/damaged keys from backup. |
 | `admin`/`admin` no longer signs in | After account setup, use the username and password you chose. Existing older installations retain their original credentials rather than adopting the new default. |
-| Media preflight fails | Check the exact filenames, recorded checksums and UID 10001's read access. |
-| ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
+| Media verification or preflight fails | Check the selected ISO in Setup, its publisher checksum, available disk space and UID 10001's read access to server files. Keep media used by queued/running jobs present and unchanged. |
+| ISO upload is rejected or interrupted | Browser uploads are limited to 16 GiB. Check the data volume's free space and, if using a reverse proxy, its request-size and upload-timeout settings. The prior media selection remains saved. |
+| ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in Setup → ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
+
+Version **0.3.0** adds saved OS ISO selection and persistent browser uploads. Existing environment media settings remain a fallback until a selection is saved in Setup. The new `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256` names take precedence over their legacy `GDEPLOY_UBUNTU_*` equivalents when both are supplied. Include uploaded ISOs in the complete data-volume backup and preserve server-mounted `media/` files. Versions before **0.3.0** ignore Setup's media selection and the new environment names; supply the older version's verified media path/checksum settings before a rollback. Finish or resolve active jobs before changing versions.
 
 Version **0.2.0** adds an ESXi certificate-trust table without changing existing credentials or encryption keys. Back up the complete data volume to preserve approved certificates. If rolling back below **0.2.0**, older versions ignore these approvals and use their previous TLS settings, including any saved `verify_tls=false`. Review those settings and ensure certificate verification is enabled and trusts the intended host before using the older version. The approvals do not become CA certificates in older releases.
 

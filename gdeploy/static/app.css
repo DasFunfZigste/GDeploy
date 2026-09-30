@@ -976,6 +976,226 @@ td {
   gap:24px;
   align-items:start
 }
+.settings-main {
+  display:grid;
+  gap:24px;
+  min-width:0
+}
+.settings-main>.surface {
+  scroll-margin-top:24px
+}
+.setup-steps {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:16px;
+  margin:0 0 24px
+}
+.setup-step {
+  display:flex;
+  align-items:center;
+  gap:14px;
+  padding:18px;
+  text-align:left;
+  color:var(--text);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  background:var(--panel)
+}
+.setup-step:hover {
+  border-color:var(--border-light);
+  background:var(--panel-2)
+}
+.setup-step-number {
+  width:34px;
+  height:34px;
+  display:grid;
+  place-items:center;
+  flex-shrink:0;
+  border:1px solid var(--border-light);
+  border-radius:50%;
+  color:var(--muted);
+  font-size:12px
+}
+.setup-step.ready .setup-step-number {
+  color:var(--accent);
+  background:var(--accent-wash);
+  border-color:#396959
+}
+.setup-step>span:nth-child(2) {
+  flex:1;
+  min-width:0
+}
+.setup-step strong,.setup-step small {
+  display:block
+}
+.setup-step strong {
+  font-size:12px;
+  font-weight:600
+}
+.setup-step small {
+  font-size:11px;
+  margin-top:4px;
+  color:var(--muted)
+}
+.setup-step>svg {
+  width:16px;
+  height:16px;
+  color:var(--dim)
+}
+#os-media-panel>.surface-header {
+  flex-wrap:wrap;
+  gap:12px
+}
+#os-media-panel>.surface-header>div {
+  flex:1 1 220px
+}
+.media-selected-summary {
+  padding:18px;
+  margin-bottom:24px;
+  background:#121c1d;
+  border:1px solid var(--border);
+  border-radius:8px
+}
+.media-summary-heading {
+  display:flex;
+  align-items:flex-start;
+  gap:12px
+}
+.media-summary-heading>svg {
+  margin-top:2px;
+  color:var(--accent)
+}
+.media-summary-heading>div {
+  min-width:0
+}
+.media-summary-heading strong {
+  display:block;
+  font-size:12px;
+  overflow-wrap:anywhere
+}
+.media-summary-heading .eyebrow {
+  font-size:9px;
+  margin-bottom:6px
+}
+.media-summary-heading p {
+  color:var(--muted);
+  font-size:11px;
+  margin:5px 0 0
+}
+.media-integrity {
+  margin-top:15px;
+  font-size:10px;
+  color:var(--muted)
+}
+.media-integrity summary {
+  width:fit-content;
+  cursor:pointer
+}
+.media-integrity code {
+  margin-top:10px
+}
+.media-source-options {
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px 20px;
+  padding:0;
+  margin:0 0 22px;
+  border:0;
+  min-width:0
+}
+.media-source-options legend {
+  margin-bottom:12px;
+  color:#d4dfdb;
+  font-size:11px;
+  font-weight:600
+}
+.media-source-options label {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  font-size:12px;
+  color:var(--muted);
+  cursor:pointer
+}
+.media-source-options input {
+  accent-color:var(--accent);
+  margin:0
+}
+.media-source-fields {
+  margin-bottom:22px
+}
+.media-source-fields .field {
+  margin-bottom:7px
+}
+.media-help,.media-source-fields>small {
+  display:block;
+  font-size:11px;
+  line-height:1.7;
+  color:var(--muted);
+  margin:8px 0 0
+}
+.media-source-fields input[type=file] {
+  padding:7px;
+  overflow:hidden
+}
+.media-source-fields input::file-selector-button {
+  font:inherit;
+  border:0;
+  border-radius:4px;
+  color:var(--text);
+  background:var(--panel-3);
+  margin-right:10px;
+  padding:5px 8px;
+  cursor:pointer
+}
+.media-compatibility {
+  display:flex;
+  align-items:flex-start;
+  gap:8px;
+  font-size:11px;
+  line-height:1.7;
+  color:var(--muted);
+  margin:0
+}
+.media-compatibility>svg {
+  width:16px;
+  height:16px;
+  margin-top:2px
+}
+.media-progress {
+  margin-top:22px
+}
+.media-progress progress {
+  width:100%;
+  height:7px;
+  accent-color:var(--accent)
+}
+.media-progress>div {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-top:9px;
+  font-size:11px;
+  color:var(--muted)
+}
+.media-footer-note {
+  color:var(--muted);
+  font-size:10px
+}
+@media(max-width:700px) {
+  .setup-steps {
+    grid-template-columns:1fr;
+    gap:10px
+  }
+  #os-media-panel .form-footer {
+    flex-direction:column;
+    align-items:stretch
+  }
+  .media-progress>div {
+    flex-wrap:wrap
+  }
+}
 .form-body {
   padding:24px
 }
