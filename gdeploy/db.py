@@ -15,6 +15,10 @@ from cryptography.fernet import Fernet
 from .bootstrap import verify_password
 
 
+class MediaStateError(ValueError):
+    """A media mutation conflicted with a selection or deployment."""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -101,13 +105,90 @@ class Database:
     def set_media_settings(self, value, *, uploaded=False):
         """Save a verified selection, registering newly copied/uploaded media in the same transaction."""
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             if uploaded:
                 connection.execute("INSERT INTO media_files VALUES(?,?)", (value["id"], self.seal(value)))
+            else:
+                self._require_registered_media(connection, value)
             connection.execute("INSERT OR REPLACE INTO media_settings VALUES(1,?)", (self.seal(value),))
             connection.execute(
                 "INSERT INTO audit VALUES(?,?)",
                 (now(), f"OS ISO selected: {value['name']}; SHA-256 {value['sha256']}"),
             )
+
+    def clear_media_settings(self):
+        """Remove only the saved selection; queued jobs keep their media snapshots."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            removed = connection.execute("DELETE FROM media_settings WHERE id=1").rowcount
+            if removed:
+                connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Saved OS ISO selection cleared"))
+
+    def _require_registered_media(self, connection, value):
+        if not value:
+            return
+        saved = value
+        if value.get("source") in {"upload", "esxi"}:
+            row = connection.execute("SELECT value FROM media_files WHERE id=?", (value.get("id"),)).fetchone()
+            saved = self.unseal(row[0]) if row else None
+        path = Path(value.get("path", ""))
+        if (
+            not saved
+            or any(saved.get(key) != value.get(key) for key in ("id", "path", "source"))
+            or path.is_symlink()
+            or not path.is_file()
+        ):
+            raise MediaStateError("The OS ISO was removed or changed while this action was running. Refresh and select it again.")
+
+    def _active_media(self, connection):
+        rows = connection.execute(
+            "SELECT secrets FROM deployments WHERE status IN ('queued','running','cleaning')"
+        ).fetchall()
+        return [media for row in rows if (media := self.unseal(row[0]).get("os_media"))]
+
+    def media_storage_state(self):
+        """Read registered media, selection and active references from one database snapshot."""
+        with self.connect() as connection:
+            connection.execute("BEGIN")
+            rows = connection.execute("SELECT value FROM media_files ORDER BY id").fetchall()
+            selected = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
+            return {
+                "items": [self.unseal(row[0]) for row in rows],
+                "selected": self.unseal(selected[0]) if selected else None,
+                "references": self._active_media(connection),
+            }
+
+    @staticmethod
+    def media_delete_reason(value, selected, references):
+        def matches(other):
+            return other and (
+                value["id"] == other.get("id") or value["path"] == other.get("path")
+            )
+
+        if matches(selected):
+            return "Clear the saved selection or choose another OS ISO before deleting this one."
+        if any(matches(reference) for reference in references):
+            return "Used by a queued, running, or cleaning deployment."
+        return None
+
+    def delete_media(self, media_id, remove_file, *, fallback_selected=None):
+        """Serialize deletion with selection/import and deployment insertion, including across processes."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT value FROM media_files WHERE id=?", (media_id,)).fetchone()
+            if row is None:
+                return False
+            value = self.unseal(row[0])
+            selected = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
+            reason = self.media_delete_reason(
+                value, self.unseal(selected[0]) if selected else fallback_selected, self._active_media(connection)
+            )
+            if reason:
+                raise MediaStateError(reason)
+            remove_file(value)
+            connection.execute("DELETE FROM media_files WHERE id=?", (media_id,))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), f"Managed OS ISO deleted: {value['name']}"))
+            return True
 
     def trust_esxi_certificate(self, endpoint, pem, fingerprint):
         value = {"pem": pem, "trusted_at": now()}
@@ -220,6 +301,10 @@ class Database:
         stamp = now()
         vms = [dict(vm, status="pending", services=[]) for vm in spec["vms"]]
         with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            # Preflight and credential generation run before this transaction. A
+            # concurrent administrator may have removed a previously selected ISO.
+            self._require_registered_media(c, secret_data.get("os_media"))
             c.execute(
                 "INSERT INTO deployments VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (

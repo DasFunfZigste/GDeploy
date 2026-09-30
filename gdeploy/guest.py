@@ -8,13 +8,16 @@ and supply it on every later connection to the VM.
 from __future__ import annotations
 
 import io
+import errno
 import hashlib
 import ipaddress
 import json
+import os
 import posixpath
 import re
 import secrets as secret_tools
 import shlex
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -154,8 +157,22 @@ def _update_md5_manifest(original: str, mapped_files: dict[str, Path]) -> str:
     return "\n".join(result) + "\n"
 
 
+def _iso_tool_log(output, secrets):
+    """Redact before limiting diagnostics; never expose generated login material."""
+    text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output or "")
+    for value in sorted((value for value in secrets if value), key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    text = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "[redacted key]", text, flags=re.S)
+    text = re.sub(r"\$6\$[^\s\"']+", "[redacted password hash]", text)
+    text = re.sub(r"(?im)^(\s*(?:password|passwd|token|secret|authorized-keys)\s*[:=]).*$", r"\1 [redacted]", text)
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+    text = "".join(char for char in text if char in "\n\t" or ord(char) >= 32)
+    return [line[:1500] for line in text.splitlines()[-30:] if line.strip()]
+
+
 def build_seed_iso(
-    source_iso: Path, output_iso: Path, spec: dict, username: str, password: str, ssh_public_key: str
+    source_iso: Path, output_iso: Path, spec: dict, username: str, password: str, ssh_public_key: str,
+    *, log: Callable[[str, str], None] | None = None,
 ) -> None:
     """Replay the original ISO's boot metadata while adding a NoCloud seed."""
     source_iso, output_iso = Path(source_iso), Path(output_iso)
@@ -164,19 +181,60 @@ def build_seed_iso(
     if output_iso.exists():
         raise GuestError("Refusing to overwrite an existing deployment ISO.")
     data = _autoinstall_data(spec, username, password, ssh_public_key)
-    output_iso.parent.mkdir(parents=True, exist_ok=True)
+    secrets = (password, ssh_public_key, data["autoinstall"]["identity"]["password"])
+    step = "Create installation workspace"
+
+    def emit(message, level="info"):
+        if log is not None:
+            log(message, level)
+
+    def storage_details():
+        try:
+            usage = shutil.disk_usage(output_iso.parent)
+            emit(
+                f"Build filesystem {output_iso.parent}: {usage.free / 1024**3:.2f} GiB available, "
+                f"{usage.used / 1024**3:.2f} GiB used of {usage.total / 1024**3:.2f} GiB. "
+                "ISO workspace uses the data volume, not /tmp."
+            )
+        except OSError:
+            emit("Could not read available space for the build filesystem.", "warning")
+
     try:
+        output_iso.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        emit(f"Source ISO: {source_iso.name} ({source_iso.stat().st_size / 1024**3:.2f} GiB).")
+        storage_details()
         with tempfile.TemporaryDirectory(prefix="gdeploy-iso-", dir=output_iso.parent) as folder:
             root = Path(folder)
+            # xorriso and any subprocess scratch files share the disk-backed
+            # workspace, even when Docker deliberately limits /tmp to tmpfs.
+            environment = dict(os.environ, TMPDIR=str(root), TMP=str(root), TEMP=str(root))
+
+            def run(command, timeout):
+                emit(step)
+                try:
+                    result = subprocess.run(command, check=True, capture_output=True, timeout=timeout, env=environment)
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                    for line in _iso_tool_log(error.stderr, secrets):
+                        emit(f"xorriso: {line}", "error")
+                    raise
+                for line in _iso_tool_log(result.stderr, secrets):
+                    emit(f"xorriso: {line}")
+                emit(f"{step}: complete (xorriso exit 0).")
+
             files = {"/boot/grub/grub.cfg": root / "grub.cfg", "/boot/grub/loopback.cfg": root / "loopback.cfg"}
             for iso_path, local in files.items():
-                subprocess.run(
+                step = f"Extract {iso_path}"
+                run(
                     ["xorriso", "-osirrox", "on", "-indev", str(source_iso), "-extract", iso_path, str(local)],
-                    check=True,
-                    capture_output=True,
-                    timeout=120,
+                    120,
                 )
+                step = f"Update {iso_path} for unattended installation"
+                # ISO files commonly extract with mode 0444. Only these private
+                # working copies become writable; never change the source ISO.
+                local.chmod(0o644)
                 local.write_text(_patch_grub(local.read_text()))
+                emit(f"{step}: complete.")
+            step = "Write unattended installation settings"
             user_data, meta_data = root / "user-data", root / "meta-data"
             user_data.write_text("#cloud-config\n" + yaml.safe_dump(data, sort_keys=False))
             user_data.chmod(0o600)
@@ -185,27 +243,49 @@ def build_seed_iso(
             )
             files.update({"/nocloud/user-data": user_data, "/nocloud/meta-data": meta_data})
             manifest = root / "md5sum.txt"
-            subprocess.run(
+            step = "Extract /md5sum.txt"
+            run(
                 ["xorriso", "-osirrox", "on", "-indev", str(source_iso), "-extract", "/md5sum.txt", str(manifest)],
-                check=True,
-                capture_output=True,
-                timeout=120,
+                120,
             )
+            step = "Update installation media checksum manifest"
+            manifest.chmod(0o644)
             manifest.write_text(_update_md5_manifest(manifest.read_text(), files))
             files["/md5sum.txt"] = manifest
             command = ["xorriso", "-indev", str(source_iso), "-outdev", str(output_iso), "-boot_image", "any", "replay"]
             for iso_path, local in files.items():
                 command.extend(["-map", str(local), iso_path])
             command.extend(["-commit", "-end"])
-            subprocess.run(command, check=True, capture_output=True, timeout=1800)
+            step = "Write bootable unattended installation ISO"
+            run(command, 1800)
             output_iso.chmod(0o600)
-    except (OSError, subprocess.SubprocessError) as exc:
-        # xorriso output can contain the seed; do not put raw subprocess errors in logs.
-        if output_iso.exists():
-            output_iso.unlink()
-        raise GuestError(
-            "Could not build Ubuntu installation media; check xorriso, ISO format, and free disk space."
-        ) from exc
+            emit(f"Installation ISO prepared: {output_iso.stat().st_size / 1024**3:.2f} GiB.")
+    except (OSError, subprocess.SubprocessError, GuestError) as exc:
+        if isinstance(exc, subprocess.TimeoutExpired):
+            reason = f"xorriso exceeded the {exc.timeout}-second time limit"
+        elif isinstance(exc, subprocess.CalledProcessError):
+            reason = f"xorriso exited with status {exc.returncode}; review the tool output in Deployment logs"
+            if exc.returncode < 0:
+                reason += "; the process was terminated by a signal, so check the container memory limit and host logs"
+        elif isinstance(exc, OSError):
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                reason = "the build filesystem is full or its storage quota was reached; free space on the data volume"
+            elif exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+                reason = "permission denied or read-only filesystem; check data-volume access for container UID 10001"
+            elif isinstance(exc, FileNotFoundError) and exc.filename == "xorriso":
+                reason = "xorriso is missing; use the supplied GDeploy Docker image"
+            else:
+                reason = f"filesystem error {exc.errno}: {exc.strerror or 'unable to read or write installation files'}"
+        else:
+            reason = str(exc)
+        message = f"ISO build failed during '{step}': {reason}."
+        emit(message, "error")
+        storage_details()
+        try:
+            output_iso.unlink(missing_ok=True)
+        except OSError:
+            emit("Could not remove the partial installation ISO; check data-volume permissions.", "warning")
+        raise GuestError(message) from exc
 
 
 def _elasticsearch_config(ip: str) -> dict:

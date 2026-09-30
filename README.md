@@ -49,7 +49,8 @@ Keep your existing `.env` and data volume. A fresh installation starts with `adm
 - Retrieve, inspect and explicitly trust an ESXi certificate from Setup, with no container restart.
 - Unattended Ubuntu installation using a remastered, bootable ISO and NoCloud autoinstall configuration.
 - Unique generated guest/application credentials, encrypted storage and an explicit **Credentials** view in every deployment.
-- Stage progress, persisted events and deployment history. Interrupted work is identified on restart.
+- Stage progress, persisted events and expandable, copyable deployment logs with sanitized error details. Interrupted work is identified on restart.
+- Data-filesystem capacity and saved ISO usage in Setup, with protected deletion of unused uploaded or ESXi-imported copies.
 - Failed-deployment **delete & redeploy**, with typed confirmation and strict resource ownership checks.
 - Web-app authentication, required replacement of default sign-in credentials, expiring sessions, CSRF protection and sign-in throttling.
 
@@ -61,7 +62,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.4.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.5.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -84,7 +85,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.4.0** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
+Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.5.0** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
 
 If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
 
@@ -123,7 +124,9 @@ As an optional alternative for a private CA, make a PEM bundle containing the no
 
 ## Failure recovery
 
-When a stage fails, inspect its error and ESXi console before selecting **Delete & redeploy**. Type the deployment name to confirm permanent deletion of that deployment's VMs and virtual disks, including any data already written. A fresh deployment uses the saved VM choices, the current OS ISO selection and new credentials.
+When a stage fails, select **View deployment logs** in its error banner, or **View logs** in the **Deployment logs** card. Expand and copy the sanitized diagnostics to identify the failing step; older entries can show only the detail recorded at the time. Check the ESXi console before selecting **Delete & redeploy**. Type the deployment name to confirm permanent deletion of that deployment's VMs and virtual disks, including any data already written. A fresh deployment uses the saved VM choices, the current OS ISO selection and new credentials.
+
+Version 0.5.0 fixes media preparation when extracted GRUB/manifest files retain read-only permissions, and places that work's temporary files under `/data/artifacts`. It modifies only private working files. If preparation still fails, use the expanded logs to distinguish permissions, storage, source-media and tool errors; the ISO filename or an older generic error cannot identify the cause alone.
 
 Cleanup verifies both the deployment UUID annotation and datastore paths before deleting a VM. It discovers tagged VMs even if the app stopped before recording their IDs. Shared datastores, networks, source media and unrelated VMs are retained. Manually moving a disk outside its deployment directory causes cleanup to stop for inspection. If deletion fails, no replacement is started; retry after fixing the cause. If cleanup succeeds but the new preflight fails, the error still appears under delete/redeploy and a later retry is safe.
 
@@ -132,6 +135,10 @@ A timed-out ESXi operation can still be running on the host. Inspect its tasks b
 ## Persistence and operation
 
 The Compose data volume mounted at `/data` contains the SQLite administrator account, approved ESXi certificates, saved OS ISO selection and history, encrypted secrets, uploaded/imported ISOs under `/data/media`, and temporary media work. Automatic installations also keep `bootstrap.json` and the initial `bootstrap-credentials.txt` there. Source Compose normally names the volume `gdeploy_gdeploy-data`; the release bundle defaults to `gdeploy-data`. GDeploy removes its deployment-specific installation ISO from the datastore after the OS is ready. Original ESXi source ISOs and server files in `media/` are never modified or deleted by that cleanup. Deployment history is retained after cleanup.
+
+Open **Setup → OS installation media → Storage & saved ISOs** to check capacity and remove unused copies. The displayed capacity belongs to the filesystem backing `/data` as seen inside the container; it is not a whole-host disk inventory. The default volume has no GDeploy storage quota and uses available space on that filesystem. The separate 256 MiB `/tmp` mount is not the ISO workspace limit. You can also check with `docker compose exec gdeploy df -h /data /tmp`.
+
+Select **Delete** beside an unused upload or ESXi copy, then confirm **Delete ISO**. Selected media and files referenced by queued, running or cleaning deployments are protected. To remove the current default, select **Clear saved selection** or choose another ISO first. Clearing does not delete the file; existing environment media settings become the fallback. This lets you clear and delete your only unused copy without needing room for a replacement upload. Active deployments keep their original source and protection. Deletion removes only GDeploy's saved copy and leaves original ESXi files and the read-only server media mount untouched. The [storage walkthrough](docs/INSTALL.md#manage-storage-and-saved-isos) explains capacity limits, cleanup and expanding the backing storage when needed.
 
 Run **one app container with one worker** against a data volume. Jobs are serialized; this release does not support multiple replicas. The container runs without root privileges or Linux capabilities, with a read-only root filesystem. Stop the app before taking a consistent backup of its complete data volume, including automatic bootstrap files, and any existing `.env`/`docker.env`. Store your chosen web-app credentials in your password manager; the private bootstrap credentials file is not a substitute for a backup. Do not use `docker compose down -v` unless you intend to erase the app's database and credentials.
 

@@ -8,7 +8,7 @@
     route: 'deployments', detailId: null, routeEpoch: 0, pollBusy: false,
     search: '', filter: 'all', wizard: null, secrets: null, secretTimer: null,
     secretDeadline: 0, secretRequest: 0, toastTimer: null,
-    setupBusy: false, mediaUpload: null, setupTab: null,
+    setupBusy: false, mediaUpload: null, setupTab: null, openLogs: new Set(),
   };
   const roles = {
     ubuntu: {name: 'OS only', short: 'OS only', description: 'Install the operating system without additional software.', cpu: 2, ram: 4, disk: 40, icon: 'terminal'},
@@ -170,6 +170,7 @@
     state.deployments = [];
     state.detail = null;
     state.detailId = null;
+    state.openLogs.clear();
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
     page.replaceChildren();
     clearTimeout(state.toastTimer);
@@ -357,6 +358,7 @@
   function createMediaPanel(onChange, onBusy) {
     const viewEpoch = state.routeEpoch;
     let catalog = null, mode = 'server', busy = '', externalBusy = false;
+    let storage = null, storageBusy = false, storageRequest = 0;
     let esxiListing = null, browseBusy = false, browseRequest = 0;
     let browseTarget = {datastore: '', folder: ''};
     const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
@@ -365,7 +367,15 @@
     const originLabel = origin => origin ? `${origin.host} · [${origin.datastore}] ${origin.path}` : '';
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
     const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
+    const storageError = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+    const storageSummary = el('div', {id: 'media-storage-summary'}, loading('Checking storage…'));
+    const storedMediaList = el('div', {class: 'stored-media-list', id: 'stored-media-list'});
+    const storageRefresh = button('Refresh storage', 'button-small', () => loadStorage(), 'refresh');
+    storageRefresh.id = 'media-storage-refresh';
+    const storageSection = el('section', {class: 'media-storage', 'aria-labelledby': 'media-storage-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h3', {id: 'media-storage-title'}, 'Storage & saved ISOs'), el('p', {}, 'Manage uploaded ISOs and copies saved from ESXi.')), storageRefresh), el('div', {class: 'media-storage-body'}, storageError, storageSummary, storedMediaList));
     const selectedSummary = el('div', {class: 'media-selected-summary'});
+    const clearSelection = button('Clear saved selection', 'button-small button-ghost', clearMediaSelection);
+    clearSelection.id = 'os-media-clear-selection';
     const badge = el('span', {class: 'status'}, 'Loading…');
     const serverSelect = el('select', {id: 'os-media-server', name: 'media_id', required: true, 'aria-describedby': 'os-media-server-help'});
     const fileInput = el('input', {id: 'os-media-file', name: 'iso_file', type: 'file', accept: '.iso', 'aria-describedby': 'os-media-file-help'});
@@ -413,7 +423,7 @@
       return separator < 0 ? '' : browseTarget.folder.slice(0, separator);
     }
     function syncControls() {
-      const locked = Boolean(busy || externalBusy || !catalog);
+      const locked = Boolean(busy || externalBusy || storageBusy || !catalog);
       for (const radio of [serverRadio, uploadRadio, esxiRadio]) { radio.checked = mode === radio.value; radio.disabled = locked; }
       serverFields.hidden = mode !== 'server'; uploadFields.hidden = mode !== 'upload'; esxiFields.hidden = mode !== 'esxi';
       serverSelect.disabled = locked || mode !== 'server';
@@ -428,6 +438,9 @@
       checksum.disabled = locked || (mode === 'esxi' && (!state.settings?.configured || browseBusy));
       refresh.disabled = Boolean(busy || externalBusy);
       refresh.hidden = mode === 'esxi';
+      storageRefresh.disabled = Boolean(busy || externalBusy || storageBusy);
+      clearSelection.disabled = Boolean(locked || !catalog?.has_saved_selection);
+      for (const control of storedMediaList.querySelectorAll('button[data-delete-id]')) control.disabled = Boolean(busy || externalBusy || storageBusy || !storage?.items.find(item => item.id === control.dataset.deleteId)?.can_delete);
       submit.disabled = locked || (mode === 'server' && !serverSelect.value) || (mode === 'upload' && !fileInput.files.length) || (mode === 'esxi' && (browseBusy || !currentEsxiHost() || !currentEsxiFile()));
       if (!busy) submit.replaceChildren(icon(mode === 'server' ? 'check' : 'disc'), mode === 'upload' ? 'Upload & use ISO' : mode === 'esxi' ? 'Copy & use ISO' : 'Use selected ISO');
       const serverItem = currentItem();
@@ -437,6 +450,83 @@
       esxiLocation.textContent = currentEsxiFile() ? `${esxiListing.host} · [${esxiListing.datastore}] ${esxiFileSelect.value}` : '';
       esxiBrowser.setAttribute('aria-busy', browseBusy ? 'true' : 'false');
       panel.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+    async function clearMediaSelection() {
+      if (!currentView() || busy || externalBusy || storageBusy || !catalog?.has_saved_selection) return;
+      busy = 'clear'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true;
+      setBusy(clearSelection, 'Clearing…'); syncControls();
+      try {
+        const next = await api('/api/settings/media', {method: 'DELETE'});
+        if (!currentView()) return;
+        renderCatalog(next);
+        successBox.textContent = next.selected ? 'Saved selection cleared. The server-configured ISO is now selected. Active deployments keep their saved media.' : 'Saved selection cleared. Choose an ISO before creating another deployment. Active deployments keep their saved media.';
+        successBox.hidden = false;
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally {
+        if (currentView()) { await loadStorage(); busy = ''; clearSelection.replaceChildren('Clear saved selection'); onBusy(false); syncControls(); }
+      }
+    }
+    function renderStorage(next) {
+      storage = next;
+      const disk = next.data_filesystem;
+      const percent = disk.total_bytes > 0 ? Math.max(0, Math.min(100, Math.round(disk.used_bytes / disk.total_bytes * 100))) : 0;
+      storageSummary.replaceChildren(el('div', {class: 'storage-filesystem'}, el('div', {class: 'storage-heading'}, el('strong', {}, 'GDeploy data filesystem'), el('span', {}, `${percent}% used`)), el('progress', {max: 100, value: percent, 'aria-label': 'Data filesystem space used'}), el('div', {class: 'storage-capacity'}, el('span', {}, el('strong', {}, formatBytes(disk.used_bytes)), ' used'), el('span', {}, el('strong', {}, formatBytes(disk.free_bytes)), ' available'), el('span', {}, `${formatBytes(disk.total_bytes)} total`)), el('p', {class: 'media-help'}, 'Capacity available to GDeploy at ', el('code', {}, disk.path), '. This is the container-visible filesystem and may also contain other host data.')),
+        el('dl', {class: 'storage-breakdown'}, el('div', {}, el('dt', {}, 'Saved ISO files'), el('dd', {}, formatBytes(next.managed_iso_bytes))), el('div', {}, el('dt', {}, 'Deployment workspace'), el('dd', {}, formatBytes(next.workspace_bytes)))),
+        el('p', {class: 'media-help'}, 'Installation media is built in the deployment workspace. Both saved ISOs and temporary files need free space on this filesystem. Mounted server ISOs are managed on the host.'));
+      storedMediaList.replaceChildren(el('h4', {}, 'Saved ISO files', el('span', {class: 'count-badge'}, next.items.length)));
+      if (!next.items.length) { storedMediaList.append(el('p', {class: 'media-help'}, 'No uploaded ISOs or ESXi copies are stored yet. Use the source options above to add one.')); return; }
+      for (const item of next.items) {
+        const reasonId = `media-delete-reason-${item.id}`;
+        const reason = item.delete_reason || (!item.available ? item.can_delete ? 'The file is missing. Delete to remove its saved entry.' : 'This saved file is unavailable.' : '');
+        const remove = button('Delete', 'button-small button-danger', () => openDeleteMedia(item));
+        remove.dataset.deleteId = item.id;
+        remove.setAttribute('aria-label', `Delete ${item.name}`);
+        if (reason) { remove.setAttribute('aria-describedby', reasonId); remove.title = reason; }
+        remove.disabled = !item.can_delete;
+        storedMediaList.append(el('article', {class: 'stored-media-item'}, el('div', {class: 'stored-media-info'}, el('div', {class: 'stored-media-name'}, icon('disc'), el('strong', {}, item.name), item.selected ? el('span', {class: 'status status-completed'}, 'Selected') : null), el('p', {class: 'media-help'}, `${formatBytes(item.size_bytes)} · ${sourceLabel(item)}${item.available ? '' : ' · File unavailable'}`), item.origin ? el('p', {class: 'media-origin'}, originLabel(item.origin)) : null, reason ? el('p', {class: 'media-delete-reason', id: reasonId}, reason) : null), remove));
+      }
+      syncControls();
+    }
+    async function loadStorage() {
+      if (!currentView() || storageBusy) return;
+      const request = ++storageRequest;
+      storageBusy = true; inlineError(storageError, ''); setBusy(storageRefresh, 'Refreshing…'); syncControls();
+      try {
+        const next = await api('/api/settings/storage');
+        if (currentView() && request === storageRequest) renderStorage(next);
+      } catch (error) {
+        if (currentView() && request === storageRequest) { inlineError(storageError, error.message); if (!storage) storageSummary.replaceChildren(el('p', {class: 'media-help'}, 'Storage information is unavailable. Refresh to try again.')); }
+      } finally {
+        if (currentView() && request === storageRequest) { storageBusy = false; storageRefresh.replaceChildren(icon('refresh'), 'Refresh storage'); syncControls(); }
+      }
+    }
+    function openDeleteMedia(item) {
+      if (!currentView() || busy || externalBusy || storageBusy || !item.can_delete) return;
+      const dialog = $('#confirm-dialog');
+      const deleteError = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+      const dismiss = button('Cancel', '', () => dialog.close());
+      const remove = button('Delete ISO', 'button-danger', async () => {
+        if (!currentView()) { dialog.close(); return; }
+        if (busy || externalBusy || storageBusy) return;
+        busy = 'delete'; onBusy(true); inlineError(deleteError, ''); setBusy(remove, 'Deleting…'); dismiss.disabled = true;
+        dialog.dataset.busy = 'true'; syncControls();
+        try {
+          const next = await api(`/api/settings/media/${encodeURIComponent(item.id)}`, {method: 'DELETE'});
+          if (!currentView()) return;
+          renderStorage(next);
+          if (catalog) renderCatalog({...catalog, items: catalog.items.filter(candidate => candidate.id !== item.id)});
+          dialog.close();
+          successBox.textContent = `${item.name} deleted from GDeploy storage.`; successBox.hidden = false;
+          notify('Saved ISO deleted.');
+        } catch (error) {
+          if (currentView()) { inlineError(deleteError, error.message); await loadStorage(); }
+        } finally {
+          delete dialog.dataset.busy; dismiss.disabled = false; remove.disabled = false; remove.replaceChildren('Delete ISO');
+          if (currentView()) { busy = ''; onBusy(false); syncControls(); }
+        }
+      });
+      dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, 'Delete saved ISO?')), el('div', {class: 'confirm-body'}, el('p', {}, 'Permanently delete ', el('strong', {}, item.name), ` from GDeploy and free ${formatBytes(item.size_bytes)}? You would need to upload or copy it again to use it later.`), item.source === 'esxi' ? el('p', {}, 'The original ISO on ESXi stays unchanged.') : null, el('p', {}, 'Selected media and files used by active deployments cannot be deleted.'), deleteError, el('div', {class: 'confirm-actions'}, dismiss, remove)));
+      dialog.showModal(); dismiss.focus();
     }
     async function browseESXi(datastore = '', folder = '') {
       if (!currentView() || mode !== 'esxi' || busy || externalBusy) return;
@@ -487,13 +577,16 @@
         if (next.selected.origin) selectedSummary.append(el('p', {class: 'media-origin'}, el('strong', {}, 'Copied from ESXi'), el('span', {}, originLabel(next.selected.origin))));
         if (!next.ready) selectedSummary.append(el('p', {class: 'media-help'}, 'The saved media is unavailable or needs attention. Choose a valid ISO below before deploying.'));
       } else selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('disc'), el('div', {}, el('strong', {}, 'Choose your installation media'), el('p', {}, 'This OS ISO will be used for new deployments.'))));
+      if (next.has_saved_selection) selectedSummary.append(el('div', {class: 'media-clear-selection'}, clearSelection, el('p', {class: 'media-help'}, 'Clear the saved selection before deleting its ISO. Files are kept until you delete them below. Queued and running deployments keep their media; a server-configured ISO may become the default.')));
       onChange(next);
     }
     async function load() {
       if (!currentView() || busy || externalBusy) return;
       busy = 'load'; inlineError(errorBox, ''); syncControls(); setBusy(refresh, 'Refreshing…');
       try {
-        const next = await api('/api/settings/media');
+        const [catalogResult] = await Promise.allSettled([api('/api/settings/media'), loadStorage()]);
+        if (catalogResult.status === 'rejected') throw catalogResult.reason;
+        const next = catalogResult.value;
         if (!currentView()) return;
         if (!catalog && !next.items.length) mode = 'upload';
         renderCatalog(next);
@@ -504,7 +597,7 @@
     const submit = button('Use selected ISO', 'button-primary', null, 'check'); submit.type = 'submit';
     const form = el('form', {onSubmit: async event => {
       event.preventDefault();
-      if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return;
+      if (!currentView() || busy || externalBusy || storageBusy || !catalog || !form.reportValidity()) return;
       const file = fileInput.files[0];
       if (mode === 'upload' && (!file || !file.name.toLowerCase().endsWith('.iso') || !file.size || file.size > catalog.max_upload_bytes)) {
         inlineError(errorBox, `Choose a nonempty .iso file no larger than ${formatBytes(catalog.max_upload_bytes)}.`); return;
@@ -530,13 +623,13 @@
         successBox.textContent = importing ? `${next.selected?.name || 'OS ISO'} copied from ESXi, verified, and saved. New deployments will use this copy.` : `${next.selected?.name || 'OS ISO'} verified and saved. New deployments will use this media.`;
         successBox.hidden = false;
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
-      finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
+      finally { if (currentView()) { await loadStorage(); busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
     }}, el('div', {class: 'form-body'}, selectedSummary, errorBox, successBox,
       el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose an ISO source'), el('label', {}, serverRadio, 'GDeploy server'), el('label', {}, esxiRadio, 'ESXi datastore'), el('label', {}, uploadRadio, 'Upload an ISO')),
       serverFields, esxiFields, uploadFields,
       field('Publisher SHA-256 checksum', checksum, el('span', {id: 'os-media-sha256-help'}, 'Copy the checksum from the OS publisher’s download page. GDeploy verifies the file before saving it.')),
       el('p', {class: 'media-compatibility'}, icon('info'), 'Automatic installation currently supports Ubuntu Server 24.04 LTS amd64 using autoinstall. Other ISOs are not supported.'), progressBox), el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), submit));
-    const panel = el('section', {class: 'surface', id: 'os-media-panel', 'aria-labelledby': 'os-media-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'os-media-title'}, 'OS installation media'), el('p', {}, 'Choose and verify the ISO used to install your virtual machines.')), badge), form);
+    const panel = el('section', {class: 'surface', id: 'os-media-panel', 'aria-labelledby': 'os-media-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'os-media-title'}, 'OS installation media'), el('p', {}, 'Choose and verify the ISO used to install your virtual machines.')), badge), form, storageSection);
     $('.surface-header', panel).append(refresh);
     serverSelect.addEventListener('change', () => { checksum.value = currentItem()?.sha256 || ''; successBox.hidden = true; syncControls(); });
     fileInput.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
@@ -786,6 +879,10 @@
   }
   function field(label, input, hint) { return el('label', {class: 'field'}, el('span', {}, label), input, hint ? el('small', {}, hint) : null); }
   function renderDetail(data) {
+    const previousLogBody = $('#deployment-log-body');
+    const logScrollTop = previousLogBody?.scrollTop || 0;
+    const logsAtEnd = previousLogBody && previousLogBody.scrollHeight - previousLogBody.clientHeight - logScrollTop < 12;
+    const focusedLogControl = $('#deployment-logs')?.contains(document.activeElement) ? document.activeElement.id : null;
     const vms = data.vms || [];
     const back = el('a', {class: 'back-link', href: '#deployments'}, icon('back'), 'All deployments');
     const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), statusBadge(data.status)), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'} · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
@@ -797,15 +894,46 @@
     if (!vms.length) vmSurface.append(el('p', {class: 'no-events'}, 'VM details will appear as provisioning starts.'));
     const logList = el('ol', {class: 'log-list', 'aria-label': 'Deployment events'});
     for (const event of data.events || []) {
-      const severity = ['error', 'warning'].includes(event.level) ? event.level : '';
-      logList.append(el('li', {class: `log-item ${severity}`}, el('time', {datetime: event.at || '', title: date(event.at, true)}, eventTime(event.at)), el('span', {class: 'log-message'}, event.message)));
+      const severity = ['error', 'warning', 'info', 'debug'].includes(event.level) ? event.level : 'info';
+      logList.append(el('li', {class: `log-item ${severity}`}, el('div', {class: 'log-meta'}, el('time', {datetime: event.at || '', title: date(event.at, true)}, eventTime(event.at)), el('span', {class: 'log-level'}, severity.toUpperCase())), el('span', {class: 'log-message'}, event.message)));
     }
-    const logs = el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Activity log'), el('span', {class: 'muted small'}, busyStatuses.has(data.status) ? 'Updates automatically' : `${data.events?.length || 0} events`)), data.events?.length ? logList : el('p', {class: 'no-events'}, 'No events recorded yet.'));
-    const left = el('div', {class: 'detail-main'}, data.error ? el('div', {class: 'alert alert-error', role: 'alert'}, el('strong', {}, 'Deployment needs attention\n'), data.error) : null, vmSurface, logs);
+    const logBody = el('div', {class: 'deployment-log-body', id: 'deployment-log-body', tabindex: '0', 'aria-label': 'Recorded deployment logs'}, data.events?.length ? logList : el('p', {class: 'no-events'}, 'No events recorded yet.'));
+    const logCopy = button('Copy logs', 'button-small', async () => {
+      const text = [`Deployment: ${data.name}`, `Status: ${statusNames[data.status] || data.status}`, ...(data.error ? [`Error: ${data.error}`] : []), '', ...(data.events || []).map(event => `${event.at || 'Time unavailable'} [${String(event.level || 'info').toUpperCase()}] ${event.message}`)].join('\n');
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+        await navigator.clipboard.writeText(text);
+        notify('Deployment logs copied.');
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(logBody);
+        const selection = window.getSelection();
+        selection?.removeAllRanges(); selection?.addRange(range);
+        logBody.focus({preventScroll: true});
+        notify('Logs selected. Use your browser’s Copy command to copy them.');
+      }
+    }, 'copy');
+    logCopy.id = 'deployment-log-copy'; logCopy.disabled = !data.events?.length;
+    const logContents = el('div', {id: 'deployment-log-contents'}, el('div', {class: 'log-toolbar'}, el('p', {}, 'Recorded events and installation-media diagnostics. Earlier releases may only have saved a summary; additional detail appears on a new attempt.'), logCopy), logBody);
+    function setLogsOpen(open, focus = false) {
+      if (open) state.openLogs.add(data.id); else state.openLogs.delete(data.id);
+      logContents.hidden = !open;
+      logToggle.setAttribute('aria-expanded', String(open));
+      logToggle.replaceChildren(icon('terminal'), open ? 'Hide logs' : 'View logs');
+      if (focus) { if (open) logBody.scrollTop = logBody.scrollHeight; logToggle.focus({preventScroll: true}); logs.scrollIntoView({block: 'nearest'}); }
+    }
+    const logToggle = button('View logs', 'button-small', () => setLogsOpen(!state.openLogs.has(data.id)), 'terminal');
+    logToggle.id = 'deployment-log-toggle'; logToggle.setAttribute('aria-controls', 'deployment-log-contents');
+    const logs = el('section', {class: 'surface', id: 'deployment-logs', 'aria-labelledby': 'deployment-logs-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'deployment-logs-title'}, 'Deployment logs'), el('p', {}, `${data.events?.length || 0} recorded events${busyStatuses.has(data.status) ? ' · Updates automatically' : ''}`)), logToggle), logContents);
+    setLogsOpen(state.openLogs.has(data.id));
+    const failure = data.error ? el('div', {class: 'alert alert-error deployment-error', role: 'alert'}, el('strong', {}, 'Deployment needs attention'), el('p', {}, data.error), button('View deployment logs', 'button-small', () => setLogsOpen(true, true), 'terminal')) : null;
+    const left = el('div', {class: 'detail-main'}, failure, vmSurface, logs);
     const credentials = renderCredentials();
     const aside = el('aside', {class: 'detail-aside'}, renderProgress(data), credentials);
     if (failureStatuses.has(data.status)) aside.append(el('section', {class: 'surface recovery-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Recover this deployment')), el('div', {class: 'recovery-body'}, el('p', {}, 'Delete the VMs and installation media owned by this failed deployment, then start again with the same VM configuration and the current OS ISO selection in Setup. All data on those VM disks will be deleted.'), button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger button-full', () => openRedeploy(data), 'refresh'))));
     page.replaceChildren(back, title, el('div', {class: 'detail-layout'}, left, aside));
+    if (state.openLogs.has(data.id)) logBody.scrollTop = logsAtEnd ? logBody.scrollHeight : logScrollTop;
+    if (focusedLogControl) document.getElementById(focusedLogControl)?.focus({preventScroll: true});
   }
   function renderProgress(data) {
     const index = stageOrder.indexOf(data.stage);
@@ -902,7 +1030,9 @@
     try {
       const data = await api(`/api/deployments/${encodeURIComponent(id)}`);
       if (id !== state.detailId || epoch !== state.routeEpoch) return;
-      if (JSON.stringify(data) !== JSON.stringify(state.detail)) { state.detail = data; renderDetail(data); }
+      const selection = window.getSelection();
+      const selectingLogs = selection && !selection.isCollapsed && $('#deployment-logs')?.contains(selection.anchorNode);
+      if (JSON.stringify(data) !== JSON.stringify(state.detail) && !selectingLogs) { state.detail = data; renderDetail(data); }
       if (manual) notify('Deployment details refreshed.');
     } catch (error) { if (manual || epoch === state.routeEpoch) globalError(error.message); }
   }

@@ -61,7 +61,7 @@ def test_queued_job_keeps_media_after_setup_changes(config, spec, monkeypatch, l
     choose(service, second, second_checksum)
     sources = []
 
-    def capture_source(source, *args):
+    def capture_source(source, *args, **kwargs):
         sources.append(source)
         raise DeploymentError("Stop after source selection, before any VM creation")
 

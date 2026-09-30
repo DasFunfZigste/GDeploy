@@ -211,7 +211,7 @@ def test_job_ownership_persistence_success_and_cleanup(config, spec, monkeypatch
     monkeypatch.setattr(module, "GuestSession", FakeGuest)
     monkeypatch.setattr(module, "generate_ssh_key", lambda: ("test-private", "test-public"))
     monkeypatch.setattr(
-        module, "build_seed_iso", lambda source, destination, *args: destination.write_bytes(b"test-iso")
+        module, "build_seed_iso", lambda source, destination, *args, **kwargs: destination.write_bytes(b"test-iso")
     )
     service = DeploymentService(db, config, FakeESXi)
     preflight_calls = []

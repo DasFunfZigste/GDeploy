@@ -4,6 +4,27 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-30
+
+### Added
+
+- An expandable **Deployment logs** view with sanitized event/error details and **Copy logs**. Failed deployments link directly to it. Previously recorded failures retain their original detail; updating cannot recover diagnostic output that was not saved.
+- **Storage & saved ISOs** in **Setup → OS installation media**, showing total, used and available space on the container-visible GDeploy data filesystem, plus saved ISO and deployment-workspace usage.
+- Delete unused uploaded or ESXi-imported ISO copies after confirmation. The selected ISO and copies referenced by queued, running or cleaning deployments are protected. Server-mounted media and original ESXi datastore files cannot be deleted through this control.
+- **Clear saved selection** removes the default media choice without deleting its file, so the only unused saved copy can then be deleted without uploading a replacement first. Existing environment media settings become the fallback; active deployments keep their original ISO snapshots and deletion protection.
+
+### Fixed
+
+- Make privately extracted GRUB configuration and manifest files writable before patching installation media. ISO metadata can preserve read-only permissions during extraction, causing media preparation to fail for the non-root container account. The source ISO remains unchanged.
+- Keep installation-media subprocess temporary files in the private deployment workspace under `/data/artifacts`, avoiding the separate 256 MiB `/tmp` memory filesystem for that work.
+- Retain bounded, sanitized media-preparation diagnostics so new failures show their underlying tool error instead of only a generic preparation message. This addresses a reproduced permissions failure; an earlier generic error alone does not establish its cause on another installation.
+
+### Installation and compatibility
+
+- Update a source installation with `git pull --ff-only` and `docker compose up -d --build --wait`, then refresh the browser and check **v0.5.0** in the footer. Open a deployment's **View logs**, or **Setup → OS installation media → Storage & saved ISOs** for storage and media management.
+- The existing `/data` volume already has no GDeploy-imposed capacity limit; it uses its backing filesystem's available space. This release does not expand host disks or expose every host filesystem. Check `docker compose exec gdeploy df -h /data /tmp` if space is low.
+- Preserve the existing data volume, `.env`, encryption key, account, certificate approvals, media and history. Finish or resolve active jobs before upgrading. Deleting a saved ISO removes that local copy; restore it from backup or upload/import it again if needed. Ubuntu installer support and the default `0.0.0.0:8000` binding are unchanged.
+
 ## [0.4.0] - 2026-09-30
 
 ### Added

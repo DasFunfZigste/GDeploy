@@ -221,7 +221,8 @@ class MediaManager:
         return sorted(candidates, key=lambda item: (item["name"].lower(), item["id"]))
 
     def catalog(self):
-        selected = self.selected()
+        saved = self.db.media_settings()
+        selected = saved or self.legacy()
         ready = bool(selected and self._available(selected))
         items = []
         for item in self._files():
@@ -236,7 +237,111 @@ class MediaManager:
         return {
             "items": items, "selected": selected, "ready": ready,
             "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": PROFILE,
+            "has_saved_selection": saved is not None,
         }
+
+    def clear_selection(self):
+        self.db.clear_media_settings()
+        return self.catalog()
+
+    @staticmethod
+    def _directory_bytes(directory, suffix=None):
+        """Measure visible regular-file sizes without following links into other storage."""
+        if directory.is_symlink():
+            return 0
+        total = 0
+        for root, _, files in os.walk(directory, followlinks=False):
+            for name in files:
+                if suffix and not name.endswith(suffix):
+                    continue
+                try:
+                    info = (Path(root) / name).stat(follow_symlinks=False)
+                    if stat.S_ISREG(info.st_mode):
+                        total += info.st_size
+                except OSError:
+                    # A worker/upload may remove a temporary file during measurement.
+                    continue
+        return total
+
+    def storage(self):
+        """Report the filesystem backing GDeploy data, not the inaccessible host root."""
+        try:
+            usage = shutil.disk_usage(self.config.data_dir)
+        except OSError as exc:
+            raise MediaError("Unable to measure the GDeploy data filesystem. Check its mount and permissions.", 507) from exc
+        state = self.db.media_storage_state()
+        selected = state["selected"] or self.legacy()
+        items = []
+        for saved in state["items"]:
+            reason = self.db.media_delete_reason(saved, selected, state["references"])
+            size = 0
+            available = False
+            try:
+                path = self._managed_path(saved)
+                info = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    raise MediaError("This managed ISO is not a regular file; check the data volume.", 409)
+                size = info.st_size
+                available = True
+            except FileNotFoundError:
+                # An unselected stale registry entry can safely be removed.
+                pass
+            except (MediaError, OSError):
+                reason = "This managed ISO is unreadable or unsafe to delete; check the data volume."
+            entry = {key: saved[key] for key in ("id", "name", "source")}
+            entry.update({
+                "size_bytes": size, "available": available,
+                "selected": bool(selected and (
+                    selected.get("id") == saved["id"] or selected.get("path") == saved["path"]
+                )),
+                "can_delete": reason is None, "delete_reason": reason,
+            })
+            if "origin" in saved:
+                entry["origin"] = saved["origin"]
+            items.append(entry)
+        return {
+            "data_filesystem": {
+                "path": str(self.config.data_dir),
+                "label": "GDeploy data filesystem (container-visible)",
+                "total_bytes": usage.total, "used_bytes": usage.used, "free_bytes": usage.free,
+            },
+            "managed_iso_bytes": sum(item["size_bytes"] for item in items),
+            "workspace_bytes": self._directory_bytes(self.config.data_dir / "artifacts")
+            + self._directory_bytes(self.upload_dir, suffix=".partial"),
+            "items": sorted(items, key=lambda item: (item["name"].lower(), item["id"])),
+        }
+
+    def _managed_path(self, snapshot):
+        if snapshot.get("source") not in {"upload", "esxi"}:
+            raise MediaError("Only ISO copies stored by GDeploy can be deleted here.", 409)
+        return self._path(snapshot)
+
+    def delete(self, media_id):
+        if not re.fullmatch(r"(?:upload|esxi)_[0-9a-f]{32}", media_id):
+            raise MediaError("Only ISO copies stored by GDeploy can be deleted here.", 404)
+
+        def remove_file(snapshot):
+            path = self._managed_path(snapshot)
+            try:
+                # Use an opened directory rather than resolving an arbitrary path
+                # at unlink time. Never follow a replaced media directory or file.
+                directory = os.open(self.upload_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    info = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode):
+                        raise MediaError("This managed ISO is not a regular file; check the data volume.", 409)
+                    os.unlink(path.name, dir_fd=directory)
+                finally:
+                    os.close(directory)
+            except FileNotFoundError:
+                # Remove a stale registration without touching any other file.
+                pass
+            except OSError as exc:
+                raise MediaError("Unable to delete the managed OS ISO. Check the GDeploy data volume's permissions.", 507) from exc
+
+        if not self.db.delete_media(media_id, remove_file, fallback_selected=self.legacy()):
+            raise MediaError("That managed OS ISO no longer exists. Refresh the storage list.", 404)
+        return self.storage()
 
     def select(self, media_id, sha256):
         checksum = _checksum(sha256)

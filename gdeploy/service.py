@@ -381,6 +381,7 @@ class DeploymentService:
                         credential["username"],
                         credential["password"],
                         credential["public_key"],
+                        log=lambda text, level: self.db.event(deployment_id, safe_error(text, secret_data), level),
                     )
                     remote = f"gdeploy/{deployment_id}/{vm['name']}.iso"
                     resources.append({"datastore": vm["datastore"], "path": remote})

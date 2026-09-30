@@ -202,6 +202,7 @@ def smoke_configured(image):
             assert_published_binding(container, "127.0.0.1", port)
             uid = run(*compose, "exec", "-T", "gdeploy", "id", "-u", env=env, capture=True).stdout.strip()
             assert uid == "10001"
+            run(*compose, "exec", "-T", "gdeploy", "python", "-c", (root / "scripts/smoke_iso.py").read_text(), env=env)
             credentials = verify_login_and_storage(url, credentials, write=True)
             run(*compose, "down", env=env)
             run(

@@ -1,4 +1,5 @@
 import hashlib
+import errno
 import io
 import json
 import re
@@ -103,7 +104,8 @@ menuentry "HWE" {
         guest._patch_grub("menuentry Other {}")
 
 
-def test_iso_replays_boot_metadata_and_updates_media_manifest(tmp_path, monkeypatch, spec):
+@pytest.mark.parametrize("extracted_mode", [0o644, 0o444])
+def test_iso_replays_boot_metadata_and_updates_media_manifest(tmp_path, monkeypatch, spec, extracted_mode):
     source, output = tmp_path / "source.iso", tmp_path / "output.iso"
     source.write_bytes(b"test source")
     captured = {}
@@ -111,6 +113,8 @@ def test_iso_replays_boot_metadata_and_updates_media_manifest(tmp_path, monkeypa
 
     def run(command, **kwargs):
         commands.append(command)
+        assert Path(kwargs["env"]["TMPDIR"]).parent == output.parent
+        assert kwargs["env"]["TMP"] == kwargs["env"]["TEMP"] == kwargs["env"]["TMPDIR"]
         if "-extract" in command:
             index = command.index("-extract")
             path, local = command[index + 1 : index + 3]
@@ -125,6 +129,7 @@ def test_iso_replays_boot_metadata_and_updates_media_manifest(tmp_path, monkeypa
                 )
             else:
                 Path(local).write_text("set timeout=30\n linux /casper/vmlinuz ---\n initrd /casper/initrd\n")
+            Path(local).chmod(extracted_mode)
         else:
             for index, word in enumerate(command):
                 if word == "-map":
@@ -143,6 +148,7 @@ def test_iso_replays_boot_metadata_and_updates_media_manifest(tmp_path, monkeypa
         assert f"{digest}  .{path}" in manifest
     assert "2" * 32 + "  ./casper/filesystem.squashfs" in manifest
     assert output.stat().st_mode & 0o777 == 0o600
+    assert source.read_bytes() == b"test source"
 
 
 def test_iso_failure_deletes_partial_output_and_never_exposes_tool_output(tmp_path, monkeypatch, spec):
@@ -158,6 +164,68 @@ def test_iso_failure_deletes_partial_output_and_never_exposes_tool_output(tmp_pa
         guest.build_seed_iso(source, output, spec, "gdeploy", "password-unique", "ssh-rsa AAAA")
     assert "secret text" not in str(caught.value)
     assert not output.exists()
+
+
+def test_iso_failure_logs_step_exit_space_and_redacts_generated_secrets(tmp_path, monkeypatch, spec):
+    source, output = tmp_path / "source.iso", tmp_path / "output.iso"
+    source.touch()
+    data = guest._autoinstall_data(spec, "gdeploy", "password-unique", "ssh-rsa AAAA")
+    password_hash = data["autoinstall"]["identity"]["password"]
+    monkeypatch.setattr(guest, "_autoinstall_data", lambda *args: data)
+    logs = []
+
+    def fail(command, **kwargs):
+        diagnostic = (
+            "xorriso : FAILURE : Cannot find path '/boot/grub/grub.cfg' in loaded ISO\n"
+            f"password-unique {password_hash} ssh-rsa AAAA\n"
+            "password: another-secret\n"
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-material\n-----END OPENSSH PRIVATE KEY-----"
+        )
+        raise subprocess.CalledProcessError(5, command, stderr=diagnostic.encode())
+
+    monkeypatch.setattr(guest.subprocess, "run", fail)
+    with pytest.raises(guest.GuestError, match="Extract /boot/grub/grub.cfg.*status 5"):
+        guest.build_seed_iso(source, output, spec, "gdeploy", "password-unique", "ssh-rsa AAAA", log=lambda text, level: logs.append((text, level)))
+    messages = "\n".join(text for text, _ in logs)
+    for secret in ("password-unique", password_hash, "ssh-rsa AAAA", "another-secret", "private-material"):
+        assert secret not in messages
+    assert "Cannot find path '/boot/grub/grub.cfg'" in messages
+    assert "GiB available" in messages
+    assert any(level == "error" for _, level in logs)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("failure, expected", [
+    (OSError(errno.ENOSPC, "No space left on device"), "filesystem is full"),
+    (OSError(errno.EDQUOT, "Disk quota exceeded"), "storage quota"),
+    (PermissionError(errno.EACCES, "Permission denied"), "permission denied"),
+    (OSError(errno.EROFS, "Read-only file system"), "read-only filesystem"),
+    (FileNotFoundError(errno.ENOENT, "No such file", "xorriso"), "xorriso is missing"),
+    (subprocess.TimeoutExpired("xorriso", 120, stderr=b"timed out"), "120-second time limit"),
+    (subprocess.CalledProcessError(-9, "xorriso"), "container memory limit"),
+])
+def test_iso_build_failure_categories(tmp_path, monkeypatch, spec, failure, expected):
+    source, output = tmp_path / "source.iso", tmp_path / "output.iso"
+    source.touch()
+
+    def fail(*args, **kwargs):
+        output.write_bytes(b"partial")
+        raise failure
+
+    monkeypatch.setattr(guest.subprocess, "run", fail)
+    with pytest.raises(guest.GuestError, match=expected):
+        guest.build_seed_iso(source, output, spec, "gdeploy", "password-unique", "ssh-rsa AAAA")
+    assert not output.exists()
+    assert source.exists()
+
+
+def test_iso_tool_log_redacts_before_bounding():
+    secret = "SECRET" * 800
+    lines = guest._iso_tool_log(("line\n" * 40) + secret + "\nlast diagnostic", [secret])
+    assert len(lines) == 30
+    assert lines[-1] == "last diagnostic"
+    assert "SECRET" not in "\n".join(lines)
+    assert "[redacted]" in lines
 
 
 def test_elastic_and_kibana_require_verified_tls(credentials):

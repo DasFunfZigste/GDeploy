@@ -11,10 +11,13 @@ services:
     ports:
       - "${GDEPLOY_BIND_IP:-0.0.0.0}:${GDEPLOY_PORT:-8000}:8000"
     volumes:
+      # Persistent ISOs and build workspace use available backing-filesystem
+      # space. No application-level capacity quota is imposed on this volume.
       - gdeploy-data:/data
       - ./media:/media:ro
     read_only: true
     tmpfs:
+      # Small runtime scratch only; ISO builder subprocesses use /data/artifacts.
       - /tmp:size=256m,mode=1777
     cap_drop:
       - ALL

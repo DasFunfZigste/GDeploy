@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .certificate_trust import CertificateTrust, CertificateTrustError, certificate_endpoint
 from .config import Config, hash_password, verify_password
-from .db import Database
+from .db import Database, MediaStateError
 from .media import MediaError, MediaManager
 from .models import (
     AccountSetup,
@@ -129,6 +129,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     async def media_error(request, exc):
         return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
+    @app.exception_handler(MediaStateError)
+    async def media_conflict(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     @app.get("/api/health")
     def health(request: Request):
         service = request.app.state.service
@@ -237,6 +241,18 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.get("/api/settings/media")
     def media_settings(request: Request, current=Depends(authenticated)):
         return request.app.state.media.catalog()
+
+    @app.delete("/api/settings/media")
+    def clear_media_selection(request: Request, current=Depends(authenticated)):
+        return request.app.state.media.clear_selection()
+
+    @app.get("/api/settings/storage")
+    def storage_settings(request: Request, current=Depends(authenticated)):
+        return request.app.state.media.storage()
+
+    @app.delete("/api/settings/media/{media_id}")
+    def delete_media(media_id: str, request: Request, current=Depends(authenticated)):
+        return request.app.state.media.delete(media_id)
 
     @app.put("/api/settings/media")
     def select_media(payload: MediaSelection, request: Request, current=Depends(authenticated)):
