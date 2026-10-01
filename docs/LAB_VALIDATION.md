@@ -26,6 +26,15 @@ Record your exact ESXi build, Ubuntu ISO checksum, Splunk version, Elastic versi
 
 Hiding is a presentation control. It does not verify guest readiness, resume a failed job, change its final status or clean its installation media. Record full guest/provisioning acceptance separately.
 
+## SSH access for the gdeploy user
+
+1. Open **Setup → SSH access** using both navigation and `/#settings/ssh`. Save an Ed25519 public key, then multiple supported keys with comments. Verify saved fingerprints with `ssh-keygen -lf KEY.pub`. Try duplicate keys with different comments; confirm only one copy is retained. Reload/recreate the app with the same volume and verify the saved list persists.
+2. Submit malformed public-key data, a private key, options preceding a key and an unsupported key type. Confirm the error identifies the entry without exposing its contents and leaves the saved settings unchanged. Verify authentication, account setup and CSRF checks protect this API.
+3. Queue a deployment with key A, change Setup to key B before the job begins, and confirm its generated ISO contains its automation key and A only. A newly queued deployment must use B. Check all selected roles receive the same administrator-key snapshot while keeping different generated automation keys.
+4. In disposable real guests, connect as `gdeploy` using each saved private key with `ssh -o PasswordAuthentication=no -o IdentitiesOnly=yes -i PRIVATE_KEY gdeploy@VM_IP`. Confirm the matching public keys exist in `~gdeploy/.ssh/authorized_keys`, file ownership/modes permit authentication, password/sudo behavior still works, and GDeploy can continue software installation using its automation key.
+5. Clear the saved list. Confirm future VMs still have their generated automation key but no saved administrator keys, while existing VMs and queued jobs retain their original keys. Do not describe clearing Setup as key revocation. Test an older queued record without a snapshot and a newly created replacement job separately.
+6. Check keyboard navigation across all three Setup tabs, draft preservation when switching tabs, mobile layout and safe literal rendering of key comments. Save failures must keep the unsaved draft visible and allow retry.
+
 ## Setup and OS installation media
 
 1. Open **Setup → OS installation media** and test all three sources: **ESXi datastore**, browser upload, and GDeploy server media. For the ESXi source, complete the datastore checks below. For each source, supply the publisher's verified SHA-256 checksum. A wrong checksum must leave the previous selection unchanged.

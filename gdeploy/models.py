@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .ssh_keys import MAX_SSH_KEY_BYTES, MAX_SSH_KEYS
 
 
 class StrictModel(BaseModel):
@@ -64,6 +66,11 @@ class ConnectionSettings(CertificateHost):
     @classmethod
     def trim_connection_fields(cls, value):
         return value.strip()
+
+
+class SSHKeySettings(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False, strict=True)
+    public_keys: list[Annotated[str, Field(max_length=MAX_SSH_KEY_BYTES)]] = Field(max_length=MAX_SSH_KEYS)
 
 
 class MediaSelection(StrictModel):

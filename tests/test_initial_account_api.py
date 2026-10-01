@@ -52,6 +52,8 @@ def test_every_business_endpoint_is_blocked_before_setup(default_client, spec):
     identifier = str(uuid4())
     requests = [
         ("GET", "/api/settings", None),
+        ("GET", "/api/settings/ssh-keys", None),
+        ("PUT", "/api/settings/ssh-keys", {"public_keys": []}),
         ("PUT", "/api/settings", {"host": "esxi.invalid", "username": "root", "password": "test-only"}),
         ("GET", "/api/inventory", None),
         ("GET", "/api/deployments", None),

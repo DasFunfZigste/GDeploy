@@ -28,8 +28,10 @@ from .models import (
     Login,
     MediaSelection,
     RedeployRequest,
+    SSHKeySettings,
 )
 from .service import DeploymentError, DeploymentService
+from .ssh_keys import SSHKeyError, ssh_public_key_details
 from .vmware import VMwareError
 
 STATIC = Path(__file__).parent / "static"
@@ -139,6 +141,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     async def media_conflict(request, exc):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
+    @app.exception_handler(SSHKeyError)
+    async def ssh_key_error(request, exc):
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
     @app.get("/api/health")
     def health(request: Request):
         service = request.app.state.service
@@ -227,10 +233,22 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "configured": bool(saved),
             "certificate_trust": request.app.state.certificates.saved(saved["host"]) if saved else None,
             "iso_configured": request.app.state.media.catalog()["ready"],
+            "ssh_key_count": len(request.app.state.db.ssh_public_keys()),
             "splunk_configured": os.access(cfg.splunk_package, os.R_OK)
             and cfg.splunk_package.is_file()
             and bool(cfg.splunk_sha256),
         }
+
+    @app.get("/api/settings/ssh-keys")
+    def ssh_keys(request: Request, current=Depends(authenticated)):
+        keys = ssh_public_key_details(request.app.state.db.ssh_public_keys())
+        return {"keys": keys, "count": len(keys)}
+
+    @app.put("/api/settings/ssh-keys")
+    def save_ssh_keys(payload: SSHKeySettings, request: Request, current=Depends(authenticated)):
+        saved = request.app.state.db.set_ssh_public_keys(payload.public_keys)
+        keys = ssh_public_key_details(saved)
+        return {"keys": keys, "count": len(keys)}
 
     @app.put("/api/settings")
     def save_settings(payload: ConnectionSettings, request: Request, current=Depends(authenticated)):

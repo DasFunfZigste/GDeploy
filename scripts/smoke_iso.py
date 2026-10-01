@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from gdeploy.guest import build_seed_iso
+from gdeploy.guest import build_seed_iso, generate_ssh_key
 
 
 def xorriso(*arguments):
@@ -51,9 +51,14 @@ def main():
         assert extracted.stat().st_mode & 0o222 == 0, "Fixture must preserve read-only ISO permissions"
         output = root / "artifacts" / "customized.iso"
         events = []
+        _, automation_key = generate_ssh_key()
+        _, administrator_key = generate_ssh_key()
+        _, second_administrator_key = generate_ssh_key()
+        extra_keys = [administrator_key, second_administrator_key]
         build_seed_iso(
             source, output, {"name": "smoke-vm", "ip_mode": "dhcp"}, "gdeploy",
-            "smoke-password-only", "ssh-rsa AAAA smoke", log=lambda text, level: events.append(text),
+            "smoke-password-only", automation_key, authorized_ssh_keys=extra_keys,
+            log=lambda text, level: events.append(text),
         )
         assert output.stat().st_size > 256 * 1024**2, "Build must exceed the /tmp tmpfs limit"
         assert output.stat().st_mode & 0o777 == 0o600
@@ -65,10 +70,17 @@ def main():
         assert "autoinstall noprompt" in patched.read_text()
         settings = yaml.safe_load(seed.read_text())["autoinstall"]
         assert settings["identity"]["hostname"] == "smoke-vm"
+        assert settings["identity"]["username"] == "gdeploy"
         assert settings["identity"]["password"].startswith("$6$")
+        installed_keys = settings["ssh"]["authorized-keys"]
+        assert [key.split()[:2] for key in installed_keys] == [
+            key.split()[:2] for key in [automation_key, *extra_keys]
+        ], "Remastered ISO must preserve automation access and install every saved administrator key"
+        assert settings["ssh"]["install-server"] and settings["ssh"]["allow-pw"]
         assert "smoke-password-only" not in "\n".join(events)
         assert settings["identity"]["password"] not in "\n".join(events)
-    print("Real xorriso: read-only ISO metadata, non-root remastering, >256 MiB data-volume output, and secret-free diagnostics passed.")
+        assert all(key.split()[1] not in "\n".join(events) for key in installed_keys)
+    print("Real xorriso: non-root remastering, read-only source metadata, >256 MiB output, administrator SSH keys, and redacted diagnostics passed.")
 
 
 if __name__ == "__main__":

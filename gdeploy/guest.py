@@ -29,6 +29,8 @@ import paramiko
 import yaml
 from passlib.hash import sha512_crypt
 
+from .ssh_keys import SSHKeyError, normalize_ssh_public_keys
+
 
 class GuestError(RuntimeError):
     """A sanitized failure provisioning the guest."""
@@ -62,13 +64,24 @@ def _ipv4(value: str) -> str:
         raise GuestError("Guest must have a valid IPv4 address.") from exc
 
 
-def _autoinstall_data(spec: dict, username: str, password: str, ssh_public_key: str) -> dict:
+def _autoinstall_data(
+    spec: dict, username: str, password: str, ssh_public_key: str, authorized_ssh_keys: list[str] | None = None,
+) -> dict:
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", username):
         raise GuestError("Ubuntu username must start with a letter and be at most 32 characters.")
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", spec["name"]):
         raise GuestError("Invalid Ubuntu hostname.")
     _safe_text(password, "OS password")
     _safe_text(ssh_public_key, "SSH public key")
+    # Keep GDeploy's generated automation key first, even when an administrator
+    # supplied the same public key with a different comment. Validate extras
+    # again because queued records can outlive the settings that produced them.
+    try:
+        additional_keys = normalize_ssh_public_keys(authorized_ssh_keys if authorized_ssh_keys is not None else [])
+    except SSHKeyError:
+        raise GuestError("Saved deployment SSH public keys are invalid. Review SSH access in Setup before redeploying.") from None
+    automation_identity = " ".join(ssh_public_key.split()[:2])
+    ssh_keys = [ssh_public_key] + [key for key in additional_keys if " ".join(key.split()[:2]) != automation_identity]
     network: dict = {"match": {"driver": "vmxnet3"}, "dhcp6": False}
     if spec["ip_mode"] == "dhcp":
         network["dhcp4"] = True
@@ -104,7 +117,7 @@ def _autoinstall_data(spec: dict, username: str, password: str, ssh_public_key: 
             },
             "network": {"version": 2, "ethernets": {"gdeploy": network}},
             "storage": {"layout": {"name": "direct"}},
-            "ssh": {"install-server": True, "allow-pw": True, "authorized-keys": [ssh_public_key]},
+            "ssh": {"install-server": True, "allow-pw": True, "authorized-keys": ssh_keys},
             "packages": ["open-vm-tools", "openssh-server", "python3", "ca-certificates"],
             "updates": "security",
             "late-commands": [
@@ -172,7 +185,7 @@ def _iso_tool_log(output, secrets):
 
 def build_seed_iso(
     source_iso: Path, output_iso: Path, spec: dict, username: str, password: str, ssh_public_key: str,
-    *, log: Callable[[str, str], None] | None = None,
+    *, authorized_ssh_keys: list[str] | None = None, log: Callable[[str, str], None] | None = None,
 ) -> None:
     """Replay the original ISO's boot metadata while adding a NoCloud seed."""
     source_iso, output_iso = Path(source_iso), Path(output_iso)
@@ -180,8 +193,13 @@ def build_seed_iso(
         raise GuestError("A separate readable Ubuntu 24.04 live-server ISO is required.")
     if output_iso.exists():
         raise GuestError("Refusing to overwrite an existing deployment ISO.")
-    data = _autoinstall_data(spec, username, password, ssh_public_key)
-    secrets = (password, ssh_public_key, data["autoinstall"]["identity"]["password"])
+    data = _autoinstall_data(spec, username, password, ssh_public_key, authorized_ssh_keys)
+    installed_keys = data["autoinstall"]["ssh"]["authorized-keys"]
+    # Tool errors may print a whole YAML key or only its encoded key material.
+    secrets = (
+        password, data["autoinstall"]["identity"]["password"], *installed_keys,
+        *(key.split()[1] for key in installed_keys if len(key.split()) >= 2),
+    )
     step = "Create installation workspace"
 
     def emit(message, level="info"):

@@ -29,7 +29,15 @@ def safe_error(error, secret_data=None):
         nonlocal text
         if isinstance(value, dict):
             for key, child in value.items():
-                if (
+                if key in {"public_key", "authorized_ssh_keys"}:
+                    public_keys = child if isinstance(child, list) else [child]
+                    for public_key in public_keys:
+                        if isinstance(public_key, str) and public_key:
+                            text = text.replace(public_key, "[redacted public key]")
+                            parts = public_key.split()
+                            if len(parts) >= 2:
+                                text = text.replace(parts[1], "[redacted public key]")
+                elif (
                     any(
                         word in key
                         for word in (
@@ -273,6 +281,7 @@ class DeploymentService:
         data = {
             "esxi": settings,
             "os_media": os_media,
+            "authorized_ssh_keys": self.db.ssh_public_keys(),
             "vm_credentials": vm_credentials,
             "software": {
                 key: secrets.token_hex(24)
@@ -381,6 +390,9 @@ class DeploymentService:
                         credential["username"],
                         credential["password"],
                         credential["public_key"],
+                        # Missing snapshots are legacy jobs: never adopt keys
+                        # added to Setup after that deployment was queued.
+                        authorized_ssh_keys=secret_data.get("authorized_ssh_keys", []),
                         log=lambda text, level: self.db.event(deployment_id, safe_error(text, secret_data), level),
                     )
                     remote = f"gdeploy/{deployment_id}/{vm['name']}.iso"

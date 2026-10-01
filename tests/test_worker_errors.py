@@ -65,7 +65,8 @@ def test_build_diagnostics_are_persisted_redacted_and_survive_failure(config, sp
     monkeypatch.setattr(service, "preflight", lambda *args, **kwargs: {"ok": True, "checks": []})
     monkeypatch.setattr(module, "generate_ssh_key", lambda: ("generated-private", "generated-public"))
 
-    def fail(source, output, vm, username, password, key, *, log):
+    def fail(source, output, vm, username, password, key, *, authorized_ssh_keys, log):
+        assert authorized_ssh_keys == []
         log("Extract /boot/grub/grub.cfg", "info")
         log(f"Test diagnostic: {password} esxi-password-unique", "error")
         raise GuestError("ISO build failed during extraction: xorriso exited with status 5.")

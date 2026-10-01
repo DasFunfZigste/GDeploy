@@ -43,7 +43,7 @@ Keep your existing `.env` and data volume. A fresh installation starts with `adm
 ## Included
 
 - A guided form with a visible configuration section for every selected VM, each with its own name, vCPUs, RAM, disk, datastore, port group, DHCP or static IPv4.
-- A **Setup** section with **ESXi connection** and **OS installation media** tabs. Choose an ISO from an ESXi datastore, upload it through the browser, or select it from the GDeploy server's media directory.
+- A **Setup** section with **ESXi connection**, **OS installation media** and **SSH access** tabs. Choose an ISO from an ESXi datastore, upload it through the browser, or select it from the GDeploy server's media directory. Optionally save your SSH public keys for the `gdeploy` user on future VMs.
 - An optional **OS only** VM alongside the application roles.
 - Media checksum, inventory, name, capacity and network-input checks before provisioning.
 - Retrieve, inspect and explicitly trust an ESXi certificate from Setup, with no container restart.
@@ -63,7 +63,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.6.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.7.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -86,7 +86,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.6.0** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
+Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.7.0** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
 
 If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
 
@@ -113,6 +113,8 @@ As an optional alternative for a private CA, make a PEM bundle containing the no
 
 ## Credentials and application behavior
 
+- Open **Setup → SSH access** to save one or multiple OpenSSH public keys, one per line. GDeploy installs the saved keys for the `gdeploy` user on every VM in newly queued deployments, alongside its separate automation key. You can review fingerprints and edit or clear the saved list. Ed25519, RSA (2048 bits or larger) and ECDSA are supported, with up to 50 keys; duplicate key material is saved once. Keep private keys on your own workstation. See the [SSH setup instructions](docs/INSTALL.md#configure-ssh-access-for-new-vms) for key creation and login examples.
+- Each queued deployment captures its key list. Later Setup edits do not change queued jobs or existing VMs, and removing a saved key does not revoke access on an existing VM. A new delete-and-redeploy job uses the latest saved keys. Older queued jobs with no saved-key snapshot keep their original automation key only.
 - The chosen web-app username and password hash are stored in the database and survive container rebuilds. The initial `bootstrap-credentials.txt` is not updated after account setup; save your chosen credentials in your password manager. Account setup leaves the encryption key and bootstrap/environment files unchanged.
 - Each VM receives the OS administrator **`gdeploy`**, a different random password, and a separate automation SSH key. VM names remain hostnames; they are not passwords.
 - Open a deployment and select **Reveal credentials** to see the exact VM username/password, IP, SSH host key, application URL and application credentials. Reveals are recorded in the deployment events. The browser conceals the panel automatically after one minute and when navigating away. Copying a value leaves it in your operating-system clipboard until replaced.

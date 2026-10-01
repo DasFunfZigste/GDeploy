@@ -13,6 +13,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from .bootstrap import verify_password
+from .ssh_keys import normalize_ssh_public_keys
 
 
 class MediaStateError(ValueError):
@@ -37,6 +38,7 @@ class Database:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS esxi_certificates (endpoint TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS ssh_public_keys (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS deployments (
@@ -96,6 +98,24 @@ class Database:
         with self.connect() as c:
             c.execute("INSERT OR REPLACE INTO settings VALUES(1,?)", (self.seal(value),))
         self.audit("ESXi connection settings updated")
+
+    def ssh_public_keys(self):
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM ssh_public_keys WHERE id=1").fetchone()
+        return self.unseal(row[0]) if row else []
+
+    def set_ssh_public_keys(self, public_keys):
+        """Validate all entries before atomically saving them and their audit event."""
+        normalized = normalize_ssh_public_keys(public_keys)
+        encrypted = self.seal(normalized)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("INSERT OR REPLACE INTO ssh_public_keys(id,value) VALUES(1,?)", (encrypted,))
+            connection.execute(
+                "INSERT INTO audit VALUES(?,?)",
+                (now(), f"Administrator SSH public keys updated: {len(normalized)} saved for future deployments."),
+            )
+        return normalized
 
     def esxi_certificate(self, endpoint):
         with self.connect() as connection:

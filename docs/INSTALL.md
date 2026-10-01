@@ -1,6 +1,6 @@
 # Install GDeploy
 
-This guide installs **GDeploy 0.6.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.6.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
+This guide installs **GDeploy 0.7.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.7.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -29,7 +29,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO, uploaded/imported copies and deployment history. Refresh the browser and check **v0.6.0** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
+Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO, uploaded/imported copies and deployment history. Refresh the browser and check **v0.7.0** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
 
 ## Optional: restrict the bind address or change the port
 
@@ -163,7 +163,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.6.0
+GDEPLOY_VERSION=0.7.0
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -189,17 +189,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.6.0
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.7.0
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.6.0`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.7.0`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.6.0
+GDEPLOY_VERSION=0.7.0
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -256,7 +256,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.6.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.7.0 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -402,13 +402,34 @@ For datastore downloads/uploads using CA verification, `REQUESTS_CA_BUNDLE` is h
 
 If a deployment fails, inspect its errors and the ESXi task/console state. **Delete & redeploy** requires the deployment name as confirmation and permanently deletes the VMs and disks owned by that deployment before trying again. It creates fresh credentials. Application data on those disks is also deleted.
 
+### Configure SSH access for new VMs
+
+Open **Setup → SSH access**, or go directly to `http://SERVER_LAN_IP:8000/#settings/ssh`. Paste one or more **public** keys, one complete OpenSSH key per line, then save. Each key normally starts with `ssh-ed25519`, `ssh-rsa` or `ecdsa-sha2-`; an optional trailing comment identifies its owner. Review the saved fingerprints and key count. Duplicate key material is saved only once, even when comments differ. GDeploy supports up to 50 keys: Ed25519, RSA of at least 2048 bits, and ECDSA on the NIST P-256, P-384 or P-521 curves. Private keys, authorized-keys options and SSH certificates are not accepted.
+
+If you already have a key pair, copy the contents of its `.pub` file. If you need a new key pair, run these commands **on the workstation you will SSH from**, choosing an unused filename and following the prompts:
+
+```sh
+ssh-keygen -t ed25519 -f ~/.ssh/gdeploy_ed25519 -C "you@your-workstation"
+cat ~/.ssh/gdeploy_ed25519.pub
+```
+
+Paste the output of `cat` into Setup. Keep the file without `.pub`, `~/.ssh/gdeploy_ed25519`, on your workstation; it is your private key and must not be pasted into GDeploy. After creating a VM, use its address from the deployment details:
+
+```sh
+ssh -i ~/.ssh/gdeploy_ed25519 gdeploy@VM_IP
+```
+
+The saved keys are installed for the **`gdeploy` Linux user** on every VM in newly queued deployments. The generated automation key, guest password and existing sudo behavior remain available. SSH keys do not sign you into the GDeploy web app. This section is optional and can remain empty.
+
+Edit the list and save to add or remove keys; save an empty list to stop adding administrator keys to future deployments. Each job captures the saved list when queued, so subsequent edits do not affect already queued jobs or existing VMs. Removing a key here does **not** revoke it on a VM that already exists; manage that VM's `~gdeploy/.ssh/authorized_keys` separately. New **Delete & redeploy** jobs use the latest saved list and still permanently delete the original VMs as described above. Existing jobs created before this feature keep their original automation key only. Settings persist across rebuilds using the same data volume, without a container restart to apply changes to future jobs.
+
 ### Manage deployment history
 
 Select **Hide** beside a finished record in **Deployment history**, or **Hide from history** on its detail page. The record disappears from the default list. Enable **Show hidden** to include hidden records with a **Hidden** badge, then select **Restore** in the row or **Restore to history** on the detail page. Hidden records remain accessible through their direct links, and their visibility setting survives container restarts and rebuilds using the same data volume. Queued, running and cleaning jobs cannot be hidden.
 
 Hiding changes only history visibility. It preserves VMs and their disks, the original status, logs, credentials, ownership and resource reservations. For example, a healthy OS-only VM can be kept while its failed readiness-check record is hidden. Hiding does not mark that job successful, retry its checks, finish provisioning or detach/delete its installation media. This release does not change the cloud-init readiness check. Use the deployment logs and ESXi console to assess unfinished work; **Delete & redeploy** is for deliberately replacing the deployment's VMs.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.6.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.7.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
@@ -434,7 +455,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.6.0
+  ghcr.io/dasfunfzigste/gdeploy:0.7.0
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -452,7 +473,7 @@ For a manually configured installation, refresh `docker.env` from its existing c
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.6.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.7.0 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 

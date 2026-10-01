@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-01
+
+### Added
+
+- **Setup → SSH access** saves one or more SSH public keys for the `gdeploy` Linux user on every VM in future deployments. Paste one OpenSSH public key per line, review its fingerprint, and save the list. Edit the list to remove keys or clear it for future deployments.
+- Validate public-key encoding and supported key types before saving; reject private keys and malformed entries without exposing their contents in errors. Support Ed25519, RSA of at least 2048 bits, and ECDSA keys. Duplicate key material is installed once, regardless of its comment.
+- Capture the saved key list when each deployment is queued and include it in the unattended OS installation alongside that VM's generated automation key. Later Setup edits do not change already queued deployments or existing VMs. New delete-and-redeploy jobs use the current saved key list.
+
+### Installation and compatibility
+
+- Update with `git pull --ff-only` and `docker compose up -d --build --wait`, refresh the browser, and check **v0.7.0**. SSH access configuration is optional; leaving it empty keeps the existing generated automation key and password login behavior.
+- Public-key settings persist in the existing encrypted data volume. Keep private keys on your workstation. Saving or removing public keys in Setup does not grant or revoke access on VMs that already exist.
+- Existing jobs without an SSH-key snapshot retain their original behavior. This release does not modify cloud-init readiness checks or automatically repair older failed deployments. Earlier GDeploy versions do not install these saved administrator keys; finish queued work before rolling back.
+
 ## [0.6.0] - 2026-10-01
 
 ### Added

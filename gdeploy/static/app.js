@@ -246,7 +246,7 @@
     state.detailId = null;
     page.replaceChildren(loading('Loading your workspace…'));
     const hash = location.hash.slice(1);
-    const setupRoute = /^(?:settings|setup)(?:\/(connection|media))?$/.exec(hash);
+    const setupRoute = /^(?:settings|setup)(?:\/(connection|media|ssh))?$/.exec(hash);
     if (setupRoute) {
       state.route = 'settings';
       markNav('settings');
@@ -694,7 +694,109 @@
     checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
     return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
-  function renderSettings() {
+  function createSSHAccessPanel(onSaved, onBusy, initialDraft) {
+    const viewEpoch = state.routeEpoch;
+    let savedKeys = [], loaded = false, busy = false, externalBusy = false;
+    const removalButtons = new Map();
+    const keyIdentity = value => value.trim().split(/\s+/).slice(0, 2).join(' ');
+    const savedText = () => savedKeys.map(key => key.public_key).join('\n');
+    const draftLines = () => editor.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const changed = () => draftLines().join('\n') !== savedText();
+    const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const errorBox = el('div', {id: 'ssh-keys-error', class: 'alert alert-error', role: 'alert', hidden: true});
+    const successBox = el('div', {id: 'ssh-keys-success', class: 'alert alert-success', role: 'status', hidden: true});
+    const badge = el('span', {class: 'status'}, 'Optional');
+    const editor = el('textarea', {id: 'ssh-public-keys', rows: 7, maxlength: 819249, spellcheck: 'false', autocomplete: 'off', autocapitalize: 'none', 'aria-describedby': 'ssh-public-keys-help ssh-keys-scope', placeholder: 'ssh-ed25519 AAAA… your-name@your-computer', onInput: () => { inlineError(errorBox, ''); successBox.hidden = true; syncControls(); }});
+    const savedList = el('ul', {class: 'ssh-key-list', id: 'ssh-saved-keys', 'aria-label': 'Saved SSH public keys'});
+    const savedSummary = el('p', {class: 'ssh-key-summary'});
+    const saveNote = el('span', {class: 'media-footer-note'});
+    const retry = button('Retry loading keys', 'button-small', () => load(), 'refresh'); retry.hidden = true;
+    const discard = button('Discard changes', 'button-ghost', () => { editor.value = savedText(); inlineError(errorBox, ''); successBox.hidden = true; syncControls(); });
+    const save = button('Save SSH keys', 'button-primary', null, 'check'); save.type = 'submit';
+    function syncControls() {
+      const locked = busy || externalBusy;
+      const dirty = loaded && changed();
+      const clearing = savedKeys.length > 0 && !draftLines().length;
+      editor.disabled = !loaded || locked;
+      save.disabled = !loaded || locked || !dirty;
+      discard.disabled = !loaded || locked || !dirty;
+      retry.disabled = locked;
+      if (!busy) save.replaceChildren(icon('check'), clearing ? 'Save & remove all keys' : 'Save SSH keys');
+      saveNote.textContent = clearing ? 'Saving removes all administrator public keys from future deployments.' : dirty ? 'Unsaved changes. Save to apply them to future deployments.' : 'Saved changes apply to future deployments.';
+      const identities = new Set(draftLines().map(keyIdentity));
+      for (const [identity, control] of removalButtons) {
+        const included = identities.has(identity);
+        control.disabled = !loaded || locked || !included;
+        control.textContent = included ? 'Remove from draft' : 'Removal pending';
+      }
+      panel.setAttribute('aria-busy', String(busy));
+    }
+    function renderSaved() {
+      removalButtons.clear(); savedList.replaceChildren();
+      badge.textContent = savedKeys.length ? `${savedKeys.length} ${savedKeys.length === 1 ? 'key' : 'keys'} saved` : 'Optional';
+      badge.className = savedKeys.length ? 'status status-completed' : 'status';
+      savedSummary.textContent = savedKeys.length ? 'These keys are currently saved. Edit the text above or remove a key from the draft, then save your changes.' : 'No administrator public keys saved. This optional step does not block deployment.';
+      for (const key of savedKeys) {
+        const identity = keyIdentity(key.public_key);
+        const remove = button('Remove from draft', 'button-small button-ghost', () => {
+          editor.value = draftLines().filter(line => keyIdentity(line) !== identity).join('\n');
+          inlineError(errorBox, ''); successBox.hidden = true; syncControls(); editor.focus();
+        });
+        remove.setAttribute('aria-label', `Remove public key ${key.fingerprint} from draft`);
+        removalButtons.set(identity, remove);
+        savedList.append(el('li', {class: 'ssh-key-item'}, el('div', {class: 'ssh-key-info'}, el('strong', {}, key.comment || 'No comment'), el('span', {class: 'ssh-key-type'}, key.type), el('code', {class: 'ssh-key-fingerprint'}, key.fingerprint)), remove));
+      }
+    }
+    async function load() {
+      if (!currentView() || busy) return;
+      busy = true; loaded = false; retry.hidden = true;
+      inlineError(errorBox, ''); savedSummary.textContent = 'Loading saved public keys…';
+      onBusy(true); syncControls();
+      try {
+        const result = await api('/api/settings/ssh-keys');
+        if (!currentView()) return;
+        savedKeys = result.keys; loaded = true; editor.value = initialDraft === undefined ? savedText() : initialDraft;
+        initialDraft = undefined;
+        renderSaved(); onSaved(result.count);
+      } catch (error) {
+        if (currentView()) { inlineError(errorBox, error.message); savedSummary.textContent = 'Saved keys could not be loaded. Retry before making changes.'; retry.hidden = false; }
+      } finally {
+        if (currentView()) { busy = false; onBusy(false); syncControls(); }
+      }
+    }
+    const form = el('form', {onSubmit: async event => {
+      event.preventDefault();
+      if (!currentView() || !loaded || busy || externalBusy || !changed()) return;
+      inlineError(errorBox, ''); successBox.hidden = true;
+      const lines = draftLines();
+      if (/-----BEGIN[^\r\n]*PRIVATE KEY-----/i.test(editor.value)) {
+        inlineError(errorBox, 'Paste only SSH public keys from .pub files. Keep private keys on your own device; private keys must not be sent to GDeploy.'); editor.focus(); return;
+      }
+      if (lines.length > 50) { inlineError(errorBox, 'Save up to 50 SSH public keys, one complete key per line.'); editor.focus(); return; }
+      busy = true; onBusy(true); setBusy(save, 'Saving keys…'); syncControls();
+      try {
+        const result = await api('/api/settings/ssh-keys', {method: 'PUT', body: {public_keys: lines}});
+        if (!currentView()) return;
+        savedKeys = result.keys; editor.value = savedText(); renderSaved(); onSaved(result.count);
+        successBox.textContent = result.count ? `${result.count} SSH public ${result.count === 1 ? 'key saved' : 'keys saved'}. They will be installed for gdeploy on newly queued deployments.` : 'Administrator public keys cleared for future deployments. Existing and already queued VMs are unchanged.';
+        successBox.hidden = false;
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally { if (currentView()) { busy = false; onBusy(false); syncControls(); } }
+    }}, el('div', {class: 'form-body'}, errorBox, successBox,
+      el('p', {class: 'ssh-access-intro'}, 'Add your public SSH keys to sign in as ', el('code', {}, 'gdeploy'), ' on each new virtual machine. Keep the matching private keys on your own devices.'),
+      field('SSH public keys', editor, el('span', {id: 'ssh-public-keys-help'}, 'Paste one complete .pub key per line, up to 50 keys. Supported: Ed25519, RSA (2048 bits or larger), and ECDSA. Do not paste private keys.')),
+      el('p', {class: 'ssh-keys-scope', id: 'ssh-keys-scope'}, 'Changes apply only to deployments queued after you save. Existing and already queued VMs keep their current keys. Password access and GDeploy’s own automation key remain available.'), retry),
+      el('div', {class: 'form-footer'}, saveNote, el('div', {class: 'ssh-save-actions'}, discard, save)));
+    const panel = el('section', {class: 'surface', id: 'ssh-access-panel', 'aria-labelledby': 'ssh-access-title'},
+      el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'ssh-access-title'}, 'SSH access'), el('p', {}, 'Optional public keys for administrator access to new VMs.')), badge), form,
+      el('section', {class: 'ssh-saved-section', 'aria-labelledby': 'ssh-saved-title'}, el('h3', {id: 'ssh-saved-title'}, 'Saved public keys'), savedSummary, savedList),
+      el('section', {class: 'ssh-help-section', 'aria-labelledby': 'ssh-connect-title'}, el('h3', {id: 'ssh-connect-title'}, 'Connect from your computer'),
+        el('p', {}, 'Use an existing public key from a ', el('code', {}, '.pub'), ' file, or create a key pair on your computer with ', el('code', {}, 'ssh-keygen -t ed25519'), '. Paste only the public key above.'),
+        el('p', {}, 'After deployment, connect using the matching private key:'), el('pre', {}, el('code', {}, 'ssh -i ~/.ssh/id_ed25519 gdeploy@VM_IP')),
+        el('p', {}, 'Replace the private-key path and VM_IP with your values. Find the VM’s IP address in its deployment details.')));
+    return {panel, load, getDraft() { return loaded && changed() ? editor.value : undefined; }, setExternalBusy(value) { externalBusy = value; syncControls(); }};
+  }
+  function renderSettings(initialSSHdraft) {
     const settings = state.settings || {};
     const viewEpoch = state.routeEpoch;
     const hostKey = value => String(value || '').trim().toLowerCase();
@@ -714,6 +816,8 @@
     let connectionBusy = '';
     let mediaBusy = false;
     let mediaControls = null;
+    let sshBusy = false;
+    let sshControls = null;
     let fingerprintConfirmed = false;
     let trustButton = null;
     let removeButton = null;
@@ -730,7 +834,7 @@
       return value && !Number.isNaN(parsed.getTime()) ? new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}).format(parsed) : 'Not available';
     };
     function syncControls() {
-      const busy = Boolean(connectionBusy || certificateBusy || mediaBusy);
+      const busy = Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy);
       const identityChanged = hostKey(host.value) !== hostKey(settings.host) || username.value.trim() !== (settings.username || '');
       const lockInputs = Boolean(connectionBusy || ['trust', 'remove'].includes(certificateBusy));
       host.disabled = lockInputs; username.disabled = lockInputs; password.disabled = lockInputs;
@@ -742,7 +846,8 @@
       if (removeButton) removeButton.disabled = busy;
       if (comparison) comparison.disabled = busy || !certificateUsable();
       certificatePanel.setAttribute('aria-busy', certificateBusy ? 'true' : 'false');
-      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy));
+      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || sshBusy));
+      sshControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy));
     }
     function renderCertificate() {
       trustButton = null; removeButton = null; comparison = null;
@@ -859,7 +964,7 @@
     }, 'refresh');
     const form = el('form', {class: 'surface', id: 'esxi-connection-panel', onSubmit: async event => {
       event.preventDefault();
-      if (!currentView() || connectionBusy || certificateBusy || mediaBusy || !form.reportValidity()) return;
+      if (!currentView() || connectionBusy || certificateBusy || mediaBusy || sshBusy || !form.reportValidity()) return;
       const payload = {host: host.value.trim(), username: username.value.trim(), password: password.value, verify_tls: true};
       inlineError(errorBox, ''); resultBox.hidden = true; connectionBusy = 'save'; setBusy(save, 'Saving…'); syncControls();
       try {
@@ -869,7 +974,7 @@
         const updated = await api('/api/settings');
         if (!currentView()) return;
         state.settings = updated; state.inventory = null;
-        renderSettings();
+        renderSettings(sshControls?.getDraft());
         notify('ESXi connection saved. Test the connection to check access.');
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
       finally { if (currentView()) { connectionBusy = ''; save.replaceChildren(icon('check'), 'Save connection'); syncControls(); } }
@@ -905,8 +1010,9 @@
       const tab = el('button', {type: 'button', class: 'setup-step', id: `setup-tab-${key}`, role: 'tab', 'aria-controls': `setup-panel-${key}`, 'aria-selected': 'false', tabindex: '-1', onClick: () => selectSetupTab(key), onKeydown: event => {
         if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
-        const names = ['connection', 'media'];
-        const next = event.key === 'Home' ? names[0] : event.key === 'End' ? names[1] : names[(names.indexOf(key) + 1) % names.length];
+        const names = Object.keys(tabs);
+        const direction = ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1;
+        const next = event.key === 'Home' ? names[0] : event.key === 'End' ? names[names.length - 1] : names[(names.indexOf(key) + direction + names.length) % names.length];
         selectSetupTab(next, {focus: true});
       }}, marker, el('span', {}, el('strong', {}, title), description));
       tabs[key] = {button: tab, marker, description, number};
@@ -914,6 +1020,7 @@
     }
     createSetupTab('connection', '1', 'ESXi connection');
     createSetupTab('media', '2', 'OS installation media');
+    createSetupTab('ssh', '3', 'SSH access');
     function renderReadiness() {
       const saved = state.settings || settings;
       const updateTab = (key, ready, description) => {
@@ -924,14 +1031,18 @@
       };
       updateTab('connection', saved.configured, saved.configured ? state.inventory ? 'Connected to your host' : 'Connection saved · test access' : 'Connect your virtualization host');
       updateTab('media', saved.iso_configured, saved.iso_configured ? 'OS ISO selected · ready for preflight' : 'Select or upload an OS ISO');
-      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(saved.splunk_configured, 'Splunk package · optional', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Only needed for Splunk: configure its Linux x86_64 .tgz package and checksum on the server.', 'layers')));
+      const sshCount = Number(saved.ssh_key_count || 0);
+      updateTab('ssh', sshCount > 0, sshCount ? `${sshCount} public ${sshCount === 1 ? 'key' : 'keys'} saved · optional` : 'Optional · add your public keys');
+      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · optional', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Only needed for Splunk: configure its Linux x86_64 .tgz package and checksum on the server.', 'layers')));
     }
     mediaControls = createMediaPanel(catalog => { if (state.settings) state.settings.iso_configured = catalog.ready; renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
+    sshControls = createSSHAccessPanel(count => { if (state.settings) state.settings.ssh_key_count = count; renderReadiness(); }, value => { sshBusy = value; syncControls(); }, initialSSHdraft);
     panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form);
     panels.media = el('div', {id: 'setup-panel-media', role: 'tabpanel', 'aria-labelledby': 'setup-tab-media', tabindex: '0'}, mediaControls.panel);
-    page.replaceChildren(heading('Setup', 'Choose a section below to connect your ESXi host or select an OS ISO.'), steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, panels.connection, panels.media), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.'))));
+    panels.ssh = el('div', {id: 'setup-panel-ssh', role: 'tabpanel', 'aria-labelledby': 'setup-tab-ssh', tabindex: '0'}, sshControls.panel);
+    page.replaceChildren(heading('Setup', 'Connect ESXi, select an OS ISO, and optionally add your SSH public keys.'), steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, panels.connection, panels.media, panels.ssh), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.'))));
     selectSetupTab(state.setupTab || (settings.configured && !settings.iso_configured ? 'media' : 'connection'), {updateHash: false});
-    renderReadiness(); renderCertificate(); syncControls(); mediaControls.load();
+    renderReadiness(); renderCertificate(); syncControls(); mediaControls.load(); sshControls.load();
   }
   function field(label, input, hint) { return el('label', {class: 'field'}, el('span', {}, label), input, hint ? el('small', {}, hint) : null); }
   function renderDetail(data) {

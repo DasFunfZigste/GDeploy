@@ -2,6 +2,7 @@
 """Test the published-image setup recipe without connecting to ESXi."""
 
 import argparse
+import base64
 import hashlib
 import http.cookiejar
 import json
@@ -13,6 +14,13 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+# Public Ed25519 key from RFC 8032 test vector 1; used only in isolated smoke volumes.
+SMOKE_SSH_KEY = "ssh-ed25519 " + base64.b64encode(
+    b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
+    + bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+).decode("ascii") + " container-smoke"
 
 
 HOST_ROUTE_PROBE = """
@@ -98,7 +106,7 @@ def verify_login_and_storage(url, credentials, write=False):
     if session["must_change_credentials"]:
         assert write, "The chosen administrator account did not survive container recreation"
         assert request("/api/session")["must_change_credentials"] is True
-        for path in ("/api/settings", "/api/deployments"):
+        for path in ("/api/settings", "/api/settings/ssh-keys", "/api/deployments"):
             try:
                 request(path)
             except urllib.error.HTTPError as error:
@@ -139,10 +147,19 @@ def verify_login_and_storage(url, credentials, write=False):
             f"/api/settings/media/upload?filename=container-smoke.iso&sha256={media_checksum}",
             media_body, "POST", session["csrf_token"],
         )
+        saved_keys = request(
+            "/api/settings/ssh-keys", {"public_keys": [SMOKE_SSH_KEY, SMOKE_SSH_KEY]},
+            "PUT", session["csrf_token"],
+        )
+        assert saved_keys["count"] == 1, "Duplicate SSH keys must be saved once"
     settings = request("/api/settings")
     assert settings["host"] == "esxi.example.invalid" and settings["configured"] is True
     assert "password" not in settings
     assert settings["iso_configured"] is True
+    assert settings["ssh_key_count"] == 1
+    ssh_keys = request("/api/settings/ssh-keys")
+    assert ssh_keys["count"] == 1 and ssh_keys["keys"][0]["public_key"] == SMOKE_SSH_KEY
+    assert ssh_keys["keys"][0]["fingerprint"].startswith("SHA256:")
     media = request("/api/settings/media")
     assert media["ready"] and media["selected"]["source"] == "upload"
     assert media["selected"]["name"] == "container-smoke.iso"
