@@ -367,7 +367,8 @@ def test_active_media_protection_is_independent_of_history_limit(manager, spec):
         for number in range(501):
             newer = dict(original) | {"id": str(number), "status": "completed", "created_at": "9999"}
             connection.execute(
-                "INSERT INTO deployments VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", tuple(newer.values())
+                "INSERT INTO deployments (" + ",".join(newer) + ") VALUES(" + ",".join("?" for _ in newer) + ")",
+                tuple(newer.values()),
             )
     assert all(item["id"] != "old-active" for item in manager.db.list())
     with pytest.raises(MediaStateError, match="deployment"):

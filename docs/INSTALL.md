@@ -1,6 +1,6 @@
 # Install GDeploy
 
-This guide installs **GDeploy 0.5.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.5.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
+This guide installs **GDeploy 0.6.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.6.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -29,7 +29,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO, uploaded/imported copies and deployment history. Refresh the browser and check **v0.5.0** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
+Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO, uploaded/imported copies and deployment history. Refresh the browser and check **v0.6.0** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
 
 ## Optional: restrict the bind address or change the port
 
@@ -163,7 +163,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.5.0
+GDEPLOY_VERSION=0.6.0
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -189,17 +189,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.5.0
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.6.0
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.5.0`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.6.0`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.5.0
+GDEPLOY_VERSION=0.6.0
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -256,7 +256,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.5.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.6.0 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -374,8 +374,8 @@ If available space is still insufficient, arrange more capacity on the filesyste
 
 ### Deploy your VMs
 
-1. Select **New deployment** and choose OS only, Splunk, Elasticsearch and/or Kibana. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk runs independently.
-2. Enter each VM's name, CPU, RAM, disk size, datastore, port group and DHCP/static network settings.
+1. Open **Setup**, listed above **Deployments** in the navigation, to finish ESXi and OS ISO configuration. Select **New deployment**, enter a deployment label and choose OS only, Splunk, Elasticsearch and/or Kibana. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk runs independently.
+2. In **Configure VMs**, fill in each role's visible section with its own VM name, CPU, RAM, disk size, datastore, port group and DHCP/static network settings. Elasticsearch and Kibana have separate sections and VM names. The deployment label groups the job; it is not a shared VM name. Use the section navigation to move between forms; all selected forms stay visible together. Review the separate values for every VM before continuing.
 3. Run preflight, address any reported issues, and start deployment.
 4. Open the deployment to follow its stages and errors. In **Deployment logs**, select **View logs** to expand recorded events and sanitized diagnostic details, and **Copy logs** to copy them. The failure banner's **View deployment logs** opens the same view. When ready, use the application links and **Reveal credentials** panel for the VM passwords and application sign-in details.
 
@@ -402,7 +402,13 @@ For datastore downloads/uploads using CA verification, `REQUESTS_CA_BUNDLE` is h
 
 If a deployment fails, inspect its errors and the ESXi task/console state. **Delete & redeploy** requires the deployment name as confirmation and permanently deletes the VMs and disks owned by that deployment before trying again. It creates fresh credentials. Application data on those disks is also deleted.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.5.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+### Manage deployment history
+
+Select **Hide** beside a finished record in **Deployment history**, or **Hide from history** on its detail page. The record disappears from the default list. Enable **Show hidden** to include hidden records with a **Hidden** badge, then select **Restore** in the row or **Restore to history** on the detail page. Hidden records remain accessible through their direct links, and their visibility setting survives container restarts and rebuilds using the same data volume. Queued, running and cleaning jobs cannot be hidden.
+
+Hiding changes only history visibility. It preserves VMs and their disks, the original status, logs, credentials, ownership and resource reservations. For example, a healthy OS-only VM can be kept while its failed readiness-check record is hidden. Hiding does not mark that job successful, retry its checks, finish provisioning or detach/delete its installation media. This release does not change the cloud-init readiness check. Use the deployment logs and ESXi console to assess unfinished work; **Delete & redeploy** is for deliberately replacing the deployment's VMs.
+
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.6.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
@@ -428,7 +434,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.5.0
+  ghcr.io/dasfunfzigste/gdeploy:0.6.0
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -446,7 +452,7 @@ For a manually configured installation, refresh `docker.env` from its existing c
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.5.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.6.0 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 
@@ -479,12 +485,15 @@ Common startup issues:
 | ESXi datastore source is absent or cannot load | Check the app footer shows v0.4.0 or later, save and test the ESXi connection, and confirm certificate trust, `Datastore.Browse` and file download access. Refresh the listing after changing hosts. |
 | ESXi ISO import fails | Check the selected file still exists, its publisher checksum matches, its size is at most 16 GiB, and the GDeploy data volume has room for the copy. Review the displayed TLS, permission or transfer error before retrying. The original datastore file and previous saved selection remain intact. |
 | Media verification or preflight fails | Check the selected ISO in Setup, its publisher checksum, available disk space and UID 10001's read access to server files. Keep media used by queued/running jobs present and unchanged. |
-| Media preparation reports permission denied or only a generic ISO error | Update to v0.5.0, then open the deployment's **View logs**. This version fixes read-only extracted GRUB/manifest working files and uses `/data/artifacts` for subprocess temporary files. Check the new diagnostic for the failing path/tool, plus `/data` free space and permissions. An older generic error alone does not establish which condition failed. |
+| Media preparation reports permission denied or only a generic ISO error | Update to v0.5.0 or later, then open the deployment's **View logs**. These releases fix read-only extracted GRUB/manifest working files and use `/data/artifacts` for subprocess temporary files. Check the new diagnostic for the failing path/tool, plus `/data` free space and permissions. An older generic error alone does not establish which condition failed. |
 | Data storage is full or appears smaller than the host disk | Check **Storage & saved ISOs** and run `docker compose exec gdeploy df -h /data /tmp`. The app sees the backing data filesystem, not all host disks. Delete eligible unused ISO copies or expand/migrate that backing storage; `/tmp` is a separate 256 MiB mount. |
 | A saved ISO cannot be deleted | Use **Clear saved selection** or select another ISO if this is the current choice. Resolve any queued, running or cleaning deployment using it; clearing the default does not remove that protection. Only uploaded/ESXi-imported local copies can be deleted in Setup; server-mounted files and original ESXi ISOs are outside this control. |
 | ISO upload is rejected or interrupted | Browser uploads are limited to 16 GiB. Check the data volume's free space and, if using a reverse proxy, its request-size and upload-timeout settings. The prior media selection remains saved. |
 | ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in Setup → ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
+| A finished deployment is missing from history | Enable **Show hidden** and check the search/status filters. Select **Restore** to return the record to the default list. Hiding retains the VM, credentials and logs. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
+
+Version **0.6.0** adds persistent, reversible history visibility and displays every selected VM's independent configuration together. **Setup** appears first in navigation. Accounts, credentials, logs, media and resource ownership remain intact. The upgrade adds a database column; older versions may read the records but cannot create deployments against the migrated schema. Back up the complete data volume before upgrading and restore the matching pre-upgrade backup if rolling back. Inspect ESXi state before resuming work because restoring GDeploy's backup does not undo VM changes. Hiding a failed record does not resolve the failure or change the running VM. The cloud-init readiness check and deployment specification format are unchanged.
 
 Version **0.5.0** adds expanded deployment diagnostics, data-filesystem usage, **Clear saved selection** and protected deletion of unused saved ISO copies, and fixes private installation-media work files that retain read-only permissions. Upgrading keeps accounts, encryption configuration, trust approvals, media selections and history. It does not enlarge or replace the data volume. A deleted ISO copy is not restored by rolling the app back; restore it from backup or import/upload it again if needed. Existing generic errors remain generic because their discarded output cannot be recovered.
 

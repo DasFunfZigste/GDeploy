@@ -34,11 +34,14 @@ def test_recovery_keeps_secrets_and_does_not_repeat_running_jobs(config, spec):
     assert db.get(ids[0], private=True)["secrets"]["password"] == "persisted-secret"
 
 
-def test_cleanup_failure_never_queues_replacement(config, spec, monkeypatch):
+@pytest.mark.parametrize("hidden", [False, True])
+def test_cleanup_failure_never_queues_replacement(config, spec, monkeypatch, hidden):
     db = Database(config.data_dir, config.secret_key)
     id_ = str(uuid.uuid4())
     db.create(id_, spec, {"esxi": {"host": "esxi", "username": "root", "password": "secret"}})
     db.update(id_, status="failed")
+    if hidden:
+        db.set_visibility(id_, True)
 
     class FakeESXi:
         def __init__(self, **kwargs):
@@ -54,6 +57,8 @@ def test_cleanup_failure_never_queues_replacement(config, spec, monkeypatch):
             return [{"vm_id": "vm-1", "name": "lab-elasticsearch"}]
 
         def destroy_vm(self, vm_id, owner_id):
+            assert db.get(owner_id)["hidden_at"] is None
+            assert db.list()[0]["id"] == owner_id
             raise RuntimeError("Ownership mismatch")
 
     service = DeploymentService(db, config, FakeESXi)
@@ -98,12 +103,15 @@ def test_workspace_failure_is_recorded_without_killing_worker(config, spec):
     assert "directory" in db.get(id_)["error"].lower()
 
 
-def test_retained_address_is_rejected_even_with_new_name(config, spec, monkeypatch):
+@pytest.mark.parametrize("hidden", [False, True])
+def test_retained_address_is_rejected_even_with_new_name(config, spec, monkeypatch, hidden):
     db = Database(config.data_dir, config.secret_key)
     id_ = str(uuid.uuid4())
     db.create(id_, spec, {})
     vm = dict(spec["vms"][0], vm_id="vm-12", ip="10.0.0.20", address="10.0.0.20/24")
     db.update(id_, status="completed", vms=[vm])
+    if hidden:
+        db.set_visibility(id_, True)
 
     class FakeESXi:
         def __init__(self, **kwargs):

@@ -11,11 +11,12 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from . import __version__
 from .certificate_trust import CertificateTrust, CertificateTrustError, certificate_endpoint
 from .config import Config, hash_password, verify_password
-from .db import Database, MediaStateError
+from .db import Database, DeploymentVisibilityError, MediaStateError
 from .media import MediaError, MediaManager
 from .models import (
     AccountSetup,
@@ -33,6 +34,11 @@ from .vmware import VMwareError
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "gdeploy_session"
+
+
+class DeploymentVisibility(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hidden: StrictBool
 
 
 def create_app(config: Config | None = None, start_worker=True, service_factory=DeploymentService):
@@ -314,8 +320,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         return {"ok": True}
 
     @app.get("/api/deployments")
-    def deployments(request: Request, current=Depends(authenticated)):
-        return request.app.state.db.list()
+    def deployments(request: Request, include_hidden: bool = False, current=Depends(authenticated)):
+        return request.app.state.db.list(include_hidden=include_hidden)
 
     @app.get("/api/deployments/{deployment_id}")
     def detail(deployment_id: UUID, request: Request, current=Depends(authenticated)):
@@ -324,6 +330,22 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             raise HTTPException(404, "Deployment not found.")
         item["events"] = request.app.state.db.events(str(deployment_id))
         return item
+
+    @app.patch("/api/deployments/{deployment_id}/visibility")
+    def deployment_visibility(
+        deployment_id: UUID, payload: DeploymentVisibility, request: Request, current=Depends(authenticated)
+    ):
+        service = request.app.state.service
+        db = request.app.state.db
+        with service.action_lock:
+            try:
+                item = db.set_visibility(str(deployment_id), payload.hidden)
+            except DeploymentVisibilityError as exc:
+                raise HTTPException(409, str(exc)) from None
+            if item is None:
+                raise HTTPException(404, "Deployment not found.")
+            item["events"] = db.events(str(deployment_id))
+            return item
 
     @app.post("/api/preflight")
     def preflight(payload: DeploymentSpec, request: Request, current=Depends(authenticated)):

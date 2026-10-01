@@ -15,6 +15,17 @@ Use an isolated datastore/network with disposable VMs. This checklist verifies t
 
 Record your exact ESXi build, Ubuntu ISO checksum, Splunk version, Elastic version and any host-specific findings before expanding use.
 
+## Deployment history and individual VM configuration
+
+1. Confirm **Setup** appears above **Deployments** in the navigation on desktop and mobile. Check both links can be reached with a keyboard and that the Setup media and connection tabs still open correctly.
+2. Select Elasticsearch and Kibana in a new deployment. Confirm **Configure VMs** shows both role sections together, with separate VM names, CPU, RAM, disk, datastore, port group and DHCP/static settings. Enter distinct names and valid resource values; use different datastores or port groups where available. Configure one VM with DHCP and one with a reserved static IPv4 address. Navigate back/forward, run preflight, and verify each VM's review values match its own form. Confirm the resulting ESXi VMs receive those respective names and resources.
+3. Add OS only and Splunk, edit each VM, and verify the four sections remain usable without horizontal page overflow on a narrow screen. Remove/reselect a role and check retained drafts for still-selected roles. Verify duplicate VM names and per-role minimum resource violations identify the affected VM and prevent deployment. Confirm Kibana still requires Elasticsearch and editing any VM invalidates an earlier preflight result.
+4. Hide a disposable completed record from its history row and a failed record from its detail page. Confirm they disappear from the default list, appear with a **Hidden** badge when **Show hidden** is enabled, and can be restored from both views. Test search/status filters with hidden records included. Open a direct link to a hidden record and confirm logs and authorized credential reveal still work.
+5. Record the deployment status, VM IDs, disks and static-address reservations before hiding. Confirm these are unchanged afterwards, no ESXi cleanup or provisioning task is started, and the original failure remains in the record. A failed record for a healthy guest must be hideable without offering deletion as the only way to remove it from normal history. Verify hiding cannot be used to bypass name, address or capacity checks for retained VMs.
+6. Recreate GDeploy using the same data volume and confirm hidden records stay hidden, restored records stay visible, and existing accounts, ESXi trust, media and credentials remain available. Verify queued/running/cleaning jobs cannot be hidden, including stale browser/API requests. Confirm visibility updates require authentication, completed account setup and CSRF protection.
+
+Hiding is a presentation control. It does not verify guest readiness, resume a failed job, change its final status or clean its installation media. Record full guest/provisioning acceptance separately.
+
 ## Setup and OS installation media
 
 1. Open **Setup → OS installation media** and test all three sources: **ESXi datastore**, browser upload, and GDeploy server media. For the ESXi source, complete the datastore checks below. For each source, supply the publisher's verified SHA-256 checksum. A wrong checksum must leave the previous selection unchanged.

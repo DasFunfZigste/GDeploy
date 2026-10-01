@@ -42,7 +42,7 @@ Keep your existing `.env` and data volume. A fresh installation starts with `adm
 
 ## Included
 
-- A guided form for applications, VM names, vCPUs, RAM, disks, datastore, port group, DHCP or static IPv4.
+- A guided form with a visible configuration section for every selected VM, each with its own name, vCPUs, RAM, disk, datastore, port group, DHCP or static IPv4.
 - A **Setup** section with **ESXi connection** and **OS installation media** tabs. Choose an ISO from an ESXi datastore, upload it through the browser, or select it from the GDeploy server's media directory.
 - An optional **OS only** VM alongside the application roles.
 - Media checksum, inventory, name, capacity and network-input checks before provisioning.
@@ -50,6 +50,7 @@ Keep your existing `.env` and data volume. A fresh installation starts with `adm
 - Unattended Ubuntu installation using a remastered, bootable ISO and NoCloud autoinstall configuration.
 - Unique generated guest/application credentials, encrypted storage and an explicit **Credentials** view in every deployment.
 - Stage progress, persisted events and expandable, copyable deployment logs with sanitized error details. Interrupted work is identified on restart.
+- Reversible history hiding for finished jobs, with **Show hidden** and **Restore**. VMs, logs and credentials remain available.
 - Data-filesystem capacity and saved ISO usage in Setup, with protected deletion of unused uploaded or ESXi-imported copies.
 - Failed-deployment **delete & redeploy**, with typed confirmation and strict resource ownership checks.
 - Web-app authentication, required replacement of default sign-in credentials, expiring sessions, CSRF protection and sign-in throttling.
@@ -62,7 +63,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.5.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.6.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -72,7 +73,7 @@ See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/REL
 2. Open **Setup**, select the **ESXi connection** tab, and enter your ESXi hostname or IP. If its certificate is not already trusted, retrieve it, compare its SHA-256 fingerprint against a trusted ESXi source, and select **Trust certificate**. Then save your ESXi username/password and test the connection to load inventory.
 3. Select the **OS installation media** tab at the top of Setup. Choose **ESXi datastore** to browse your saved host's datastores and folders for an existing ISO, upload the supported live-server ISO from your computer, or select a `.iso` file from the GDeploy server's `media/` directory. Enter its publisher's verified **SHA-256 checksum**, then save the selection. ESXi ISOs are copied to GDeploy for verification and unattended-install preparation; the original datastore file is kept unchanged. Browser uploads and ESXi copies persist in `/data/media`; server files use the read-only `/media` mount. No environment edit or container restart is needed. Copying and hashing a large ISO can take several minutes.
 4. For Splunk, place your licensed **Splunk Enterprise Linux x86_64 .tgz** at `media/splunk.tgz`, verify its publisher checksum, and set `GDEPLOY_SPLUNK_SHA256` in the optional `.env` to that value. Preserve existing settings and apply this environment change with `docker compose up -d --force-recreate --wait`. GDeploy does not download Splunk or supply a license. Server-mounted media must be readable by container UID 10001: use directory mode 0755 and file mode 0644, or equivalent ACLs. Keep secrets out of `media/`.
-5. Select **New deployment**, choose application roles, and configure each separate VM. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
+5. Select **New deployment**, give the deployment a label and choose application roles. In **Configure VMs**, fill in the separate section for each role: its VM name, CPU, RAM, disk, datastore, port group and network settings. Selecting Elasticsearch and Kibana displays two VM sections; the deployment label does not replace either VM name. Run preflight, review the results, and deploy. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
 
 ESXi imports and browser uploads support ISOs up to **16 GiB**. The GDeploy host needs room for the retained local copy plus temporary remastering space. Datastore browsing requires `Datastore.Browse` and permission to download the selected file, using the saved ESXi account and certificate trust.
 
@@ -85,7 +86,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.5.0** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
+Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.6.0** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
 
 If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
 
@@ -123,6 +124,10 @@ As an optional alternative for a private CA, make a PEM bundle containing the no
 - First SSH contact uses trust on first use over your managed guest network. The observed key is persisted and required for later connections. This is not a substitute for a trusted provisioning network.
 
 ## Failure recovery
+
+To remove a finished record from the default **Deployment history**, select **Hide** in its row or **Hide from history** on its detail page. Check **Show hidden** to include hidden records, then select **Restore** to show one normally again. Direct links to hidden deployments still open their details. Queued, running and cleaning work cannot be hidden.
+
+Hiding preserves the VMs, original job status, logs, credentials and resource reservations. It does not complete failed checks, resume provisioning or remove attached installation media. If a VM is healthy but its deployment record failed a readiness check, you can keep that VM and hide the record. Inspect the guest and logs before deciding whether any unfinished work needs attention.
 
 When a stage fails, select **View deployment logs** in its error banner, or **View logs** in the **Deployment logs** card. Expand and copy the sanitized diagnostics to identify the failing step; older entries can show only the detail recorded at the time. Check the ESXi console before selecting **Delete & redeploy**. Type the deployment name to confirm permanent deletion of that deployment's VMs and virtual disks, including any data already written. A fresh deployment uses the saved VM choices, the current OS ISO selection and new credentials.
 

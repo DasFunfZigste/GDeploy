@@ -19,6 +19,10 @@ class MediaStateError(ValueError):
     """A media mutation conflicted with a selection or deployment."""
 
 
+class DeploymentVisibilityError(ValueError):
+    """A deployment cannot be hidden while it may still change resources."""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -39,7 +43,7 @@ class Database:
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
                     stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     spec TEXT NOT NULL, vms TEXT NOT NULL, resources TEXT NOT NULL,
-                    secrets TEXT NOT NULL, error TEXT, parent_id TEXT
+                    secrets TEXT NOT NULL, error TEXT, parent_id TEXT, hidden_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, deployment_id TEXT NOT NULL,
@@ -56,6 +60,12 @@ class Database:
                     must_change_credentials INTEGER NOT NULL CHECK(must_change_credentials IN (0,1))
                 );
             """)
+            # Existing volumes retain every deployment and its encrypted data.
+            # Serialize the schema check with another process starting up.
+            conn.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(deployments)")}
+            if "hidden_at" not in columns:
+                conn.execute("ALTER TABLE deployments ADD COLUMN hidden_at TEXT")
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -306,7 +316,9 @@ class Database:
             # concurrent administrator may have removed a previously selected ISO.
             self._require_registered_media(c, secret_data.get("os_media"))
             c.execute(
-                "INSERT INTO deployments VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO deployments
+                   (id,name,status,stage,created_at,updated_at,spec,vms,resources,secrets,error,parent_id)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     deployment_id,
                     spec["name"],
@@ -342,10 +354,41 @@ class Database:
             row = c.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
         return self._decode(row, private)
 
-    def list(self):
+    def list(self, include_hidden=False):
         with self.connect() as c:
-            rows = c.execute("SELECT * FROM deployments ORDER BY created_at DESC LIMIT 500").fetchall()
+            rows = c.execute(
+                "SELECT * FROM deployments "
+                + ("" if include_hidden else "WHERE hidden_at IS NULL ")
+                + "ORDER BY created_at DESC LIMIT 500"
+            ).fetchall()
         return [self._decode(row) for row in rows]
+
+    def set_visibility(self, deployment_id, hidden):
+        """Change history visibility only; retain credentials, ownership and resources."""
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+            if row is None:
+                return None
+            if hidden and row["status"] not in {"completed", "failed", "interrupted", "cleanup_failed", "reverted"}:
+                raise DeploymentVisibilityError("Only finished or stopped deployments can be hidden. Wait for this deployment to stop.")
+            if (row["hidden_at"] is not None) != hidden:
+                stamp = now()
+                c.execute(
+                    "UPDATE deployments SET hidden_at=?,updated_at=? WHERE id=?",
+                    (stamp if hidden else None, stamp, deployment_id),
+                )
+                message = (
+                    "Deployment hidden from history; VMs, installation media, credentials and logs retained."
+                    if hidden else "Deployment restored to history."
+                )
+                c.execute(
+                    "INSERT INTO events(deployment_id,at,level,message) VALUES(?,?,?,?)",
+                    (deployment_id, stamp, "audit", message),
+                )
+                c.execute("INSERT INTO audit VALUES(?,?)", (stamp, f"{deployment_id}: {message}"))
+                row = c.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+            return self._decode(row)
 
     def retained(self):
         """All live/reserved resources, independent of the history display limit."""
@@ -361,6 +404,9 @@ class Database:
             k: self.seal(v) if k == "secrets" else json.dumps(v) if k in {"vms", "resources"} else v
             for k, v in values.items()
         }
+        if values.get("status") in {"queued", "running", "cleaning"}:
+            # Starting recovery through a hidden record must make active work visible.
+            encoded["hidden_at"] = None
         encoded["updated_at"] = now()
         with self.connect() as c:
             c.execute(
@@ -390,7 +436,7 @@ class Database:
             row = c.execute("SELECT id FROM deployments WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
             if row:
                 c.execute(
-                    "UPDATE deployments SET status='running',stage='preflight',updated_at=? WHERE id=?", (now(), row[0])
+                    "UPDATE deployments SET status='running',stage='preflight',hidden_at=NULL,updated_at=? WHERE id=?", (now(), row[0])
                 )
                 return row[0]
         return None

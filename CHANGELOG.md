@@ -4,6 +4,23 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-01
+
+### Added
+
+- **Hide** finished deployment records from the default history without deleting their VMs. Use **Show hidden** to find them and **Restore** to bring them back. Hidden records keep their original status, logs, credentials, VM ownership and resource reservations. Queued, running and cleaning work cannot be hidden.
+
+### Changed
+
+- Place **Setup** above **Deployments** in the main navigation so initial ESXi and OS ISO configuration appears first.
+- Show a separate, visible VM configuration section for every selected role. Elasticsearch and Kibana each have their own VM name, CPU, RAM, disk, datastore, port group and DHCP/static settings. All selected VM forms remain visible together, with navigation links for longer deployments.
+
+### Installation and compatibility
+
+- Update a source installation with `git pull --ff-only` and `docker compose up -d --build --wait`, then refresh the browser and check **v0.6.0** in the footer. Preserve the existing data volume, `.env`, account, encryption key, certificate approvals and media.
+- History visibility is persistent and reversible. Hiding a failed record does not mark it completed, retry provisioning, detach installation media or delete any VM. A working VM can remain intact while its failed record is hidden; use **Delete & redeploy** only when intentionally replacing its VMs and disks.
+- The upgrade adds a history-visibility column to the database. Back up the complete data volume before upgrading; rollback requires the matching pre-upgrade backup because older releases cannot create deployments against the migrated schema. The per-VM deployment format, Ubuntu installer support and default `0.0.0.0:8000` binding are unchanged. This release does not change the cloud-init readiness check.
+
 ## [0.5.0] - 2026-09-30
 
 ### Added

@@ -56,6 +56,8 @@ def test_every_business_endpoint_is_blocked_before_setup(default_client, spec):
         ("GET", "/api/inventory", None),
         ("GET", "/api/deployments", None),
         ("GET", f"/api/deployments/{identifier}", None),
+        ("GET", "/api/deployments?include_hidden=true", None),
+        ("PATCH", f"/api/deployments/{identifier}/visibility", {"hidden": True}),
         ("POST", "/api/preflight", spec),
         ("POST", "/api/deployments", spec),
         ("POST", f"/api/deployments/{identifier}/credentials", None),

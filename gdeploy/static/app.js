@@ -6,7 +6,7 @@
   const state = {
     session: null, settings: null, inventory: null, deployments: [], detail: null,
     route: 'deployments', detailId: null, routeEpoch: 0, pollBusy: false,
-    search: '', filter: 'all', wizard: null, secrets: null, secretTimer: null,
+    search: '', filter: 'all', includeHidden: false, historyRevision: 0, visibilityBusy: new Set(), wizard: null, secrets: null, secretTimer: null,
     secretDeadline: 0, secretRequest: 0, toastTimer: null,
     setupBusy: false, mediaUpload: null, setupTab: null, openLogs: new Set(),
   };
@@ -21,6 +21,7 @@
   const statusNames = {queued: 'Queued', running: 'In progress', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', cleaning: 'Cleaning up', cleanup_failed: 'Cleanup failed', reverted: 'Reverted'};
   const failureStatuses = new Set(['failed', 'interrupted', 'cleanup_failed']);
   const busyStatuses = new Set(['queued', 'running', 'cleaning']);
+  const hideableStatuses = new Set(['completed', 'failed', 'interrupted', 'cleanup_failed', 'reverted']);
   const icons = {
     plus: [['path', {d: 'M12 5v14M5 12h14'}]],
     arrow: [['path', {d: 'M5 12h14M13 6l6 6-6 6'}]],
@@ -168,6 +169,9 @@
     state.setupTab = null;
     state.inventory = null;
     state.deployments = [];
+    state.includeHidden = false;
+    state.historyRevision++;
+    state.visibilityBusy.clear();
     state.detail = null;
     state.detailId = null;
     state.openLogs.clear();
@@ -270,7 +274,7 @@
       state.route = 'deployments';
       markNav('deployments');
       $('#breadcrumb').textContent = 'Deployments';
-      const results = await Promise.allSettled([api('/api/deployments'), api('/api/settings')]);
+      const results = await Promise.allSettled([api(deploymentListPath()), api('/api/settings')]);
       if (epoch !== state.routeEpoch) return;
       if (results[1].status === 'fulfilled') state.settings = results[1].value;
       if (results[0].status === 'fulfilled') {
@@ -286,17 +290,69 @@
   function heading(title, description, action) {
     return el('div', {class: 'page-heading'}, el('div', {}, el('h1', {}, title), el('p', {}, description)), action);
   }
+  function deploymentListPath() { return `/api/deployments${state.includeHidden ? '?include_hidden=true' : ''}`; }
+  function visibilityButton(data, compact = false) {
+    const hidden = Boolean(data.hidden_at);
+    const control = button(hidden ? compact ? 'Restore' : 'Restore to history' : compact ? 'Hide' : 'Hide from history', `button-small ${compact ? 'button-ghost' : 'button-full'}`, () => setDeploymentVisibility(data, !hidden, control));
+    control.id = `history-visibility-${data.id}`;
+    control.disabled = state.visibilityBusy.has(data.id) || (!hidden && !hideableStatuses.has(data.status));
+    control.setAttribute('aria-label', hidden ? `Restore ${data.name} to history` : `Hide ${data.name} from history`);
+    control.title = control.disabled ? 'Active deployments cannot be hidden.' : hidden ? 'Show this deployment in the default history view.' : 'Hide this record without changing its VMs, credentials, or logs.';
+    return control;
+  }
+  async function setDeploymentVisibility(data, hidden, control) {
+    if (state.visibilityBusy.has(data.id)) return;
+    const epoch = state.routeEpoch;
+    const session = state.session;
+    let updated = null;
+    state.visibilityBusy.add(data.id); state.historyRevision++;
+    setBusy(control, hidden ? 'Hiding…' : 'Restoring…'); globalError('');
+    try {
+      updated = await api(`/api/deployments/${encodeURIComponent(data.id)}/visibility`, {method: 'PATCH', body: {hidden}});
+      state.visibilityBusy.delete(data.id); state.historyRevision++;
+      if (state.session !== session) return;
+      if (state.routeEpoch === epoch) {
+        if (state.route === 'detail' && state.detailId === data.id) { state.detail = updated; renderDetail(updated); }
+        if (state.route === 'deployments') {
+          const listEntry = {...updated};
+          delete listEntry.events;
+          state.deployments = state.deployments.map(row => row.id === data.id ? listEntry : row).filter(row => state.includeHidden || !row.hidden_at);
+          renderOverview();
+        }
+        (document.getElementById(`history-visibility-${data.id}`) || $('#history-show-hidden'))?.focus({preventScroll: true});
+      }
+      notify(hidden ? 'Deployment hidden. VMs, credentials, and logs are unchanged.' : 'Deployment restored to history.');
+    } catch (error) { if (state.routeEpoch === epoch) globalError(error.message); }
+    finally {
+      state.visibilityBusy.delete(data.id);
+      if (state.session === session) {
+        const currentControl = document.getElementById(`history-visibility-${data.id}`);
+        if (currentControl) {
+          const currentData = updated || (state.detail?.id === data.id ? state.detail : state.deployments.find(row => row.id === data.id)) || data;
+          const focused = document.activeElement === currentControl;
+          const replacement = visibilityButton(currentData, currentControl.classList.contains('button-ghost'));
+          currentControl.replaceWith(replacement);
+          if (focused) replacement.focus({preventScroll: true});
+        }
+      }
+    }
+  }
   function renderOverview() {
     const rows = state.deployments;
     const active = rows.filter(row => busyStatuses.has(row.status)).length;
     const completed = rows.filter(row => row.status === 'completed').length;
     const failures = rows.filter(row => failureStatuses.has(row.status)).length;
     const metric = (title, value, foot, symbol, extra = '') => el('div', {class: `metric ${extra}`}, el('div', {class: 'metric-top'}, title, icon(symbol)), el('div', {class: 'metric-value'}, value), el('div', {class: 'metric-foot'}, foot));
-    const metrics = el('div', {class: 'metrics'}, metric('Total deployments', rows.length, 'All deployment runs', 'grid'), metric('Ready to use', completed, 'Successfully provisioned', 'checkCircle', 'success'), metric('In progress', active, 'Queued, running, or cleaning', 'activity'), metric('Needs attention', failures, 'Review errors and recover', 'alert', failures ? 'warning' : ''));
+    const metrics = el('div', {class: 'metrics'}, metric('Total deployments', rows.length, state.includeHidden ? 'Including hidden runs' : 'Visible deployment runs', 'grid'), metric('Ready to use', completed, 'Successfully provisioned', 'checkCircle', 'success'), metric('In progress', active, 'Queued, running, or cleaning', 'activity'), metric('Needs attention', failures, 'Review errors and logs', 'alert', failures ? 'warning' : ''));
     const search = el('input', {class: 'search-field', type: 'search', placeholder: 'Search deployments…', 'aria-label': 'Search deployments', value: state.search, onInput: event => { state.search = event.target.value; renderDeploymentRows(); }});
     const filter = el('select', {class: 'filter-select', 'aria-label': 'Filter by deployment status', onChange: event => { state.filter = event.target.value; renderDeploymentRows(); }}, el('option', {value: 'all'}, 'All statuses'), el('option', {value: 'active'}, 'In progress'), el('option', {value: 'completed'}, 'Completed'), el('option', {value: 'attention'}, 'Needs attention'), el('option', {value: 'reverted'}, 'Reverted'));
     filter.value = state.filter;
-    const history = el('section', {class: 'surface', 'aria-labelledby': 'history-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'history-title'}, 'Deployment history', el('span', {class: 'count-badge'}, rows.length)), el('p', {}, 'Every deployment, from first boot to ready.')), rows.length ? el('div', {class: 'surface-header-actions'}, search, filter) : null), el('div', {id: 'deployment-rows'}));
+    const showHidden = el('label', {class: 'check-label history-hidden-filter'}, el('input', {id: 'history-show-hidden', type: 'checkbox', checked: state.includeHidden, onChange: async event => {
+      state.includeHidden = event.target.checked; state.historyRevision++;
+      await route();
+      if (state.route === 'deployments') $('#history-show-hidden')?.focus({preventScroll: true});
+    }}), 'Show hidden');
+    const history = el('section', {class: 'surface', 'aria-labelledby': 'history-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'history-title'}, 'Deployment history', el('span', {class: 'count-badge'}, rows.length)), el('p', {}, 'Hide finished runs without changing their VMs. Restore them at any time.')), showHidden), el('div', {class: 'history-controls'}, search, filter), el('div', {id: 'deployment-rows'}));
     const setupBanner = !state.settings?.configured || !state.settings?.iso_configured ? el('div', {class: 'connection-banner'}, icon('server'), el('div', {}, el('strong', {}, 'Finish your GDeploy setup'), el('p', {}, 'Connect an ESXi host and select an OS ISO before creating a deployment.')), el('a', {href: state.settings?.configured ? '#settings/media' : '#settings/connection', class: 'button button-small'}, 'Open Setup', icon('arrow'))) : null;
     page.replaceChildren(...[heading('Deployments', 'Build your environment. We’ll take care of the setup.', button('New deployment', 'button-primary', openWizard, 'plus')), metrics, setupBanner, history].filter(Boolean));
     renderDeploymentRows();
@@ -305,7 +361,7 @@
     const container = $('#deployment-rows');
     if (!container) return;
     if (!state.deployments.length) {
-      container.replaceChildren(el('div', {class: 'empty-state'}, el('div', {class: 'empty-icon'}, icon('server')), el('h3', {}, 'Your next environment starts here'), el('p', {}, 'Choose your software and VM resources. GDeploy provisions your machines and gets everything talking.'), button('Create your first deployment', 'button-primary', openWizard, 'plus'), el('div', {class: 'empty-flow'}, el('span', {}, el('b', {}, '1'), 'Choose software'), el('span', {}, el('b', {}, '2'), 'Configure VMs'), el('span', {}, el('b', {}, '3'), 'Deploy'))));
+      container.replaceChildren(el('div', {class: 'empty-state'}, el('div', {class: 'empty-icon'}, icon('server')), el('h3', {}, 'No deployments in this view'), el('p', {}, state.includeHidden ? 'Create a deployment to start building your environment.' : 'Create a deployment, or select Show hidden to find and restore hidden records.'), button('Create a deployment', 'button-primary', openWizard, 'plus')));
       return;
     }
     const query = state.search.trim().toLowerCase();
@@ -314,9 +370,9 @@
     const body = el('tbody');
     for (const row of rows) {
       const vmRows = row.vms || [];
-      body.append(el('tr', {}, el('td', {}, el('a', {class: 'deployment-name', href: `#deployment/${encodeURIComponent(row.id)}`}, row.name), el('div', {class: 'subline'}, vmRows.map(vm => (roles[vm.role] || {short: vm.role}).short).join(' · ') || 'OS deployment')), el('td', {}, statusBadge(row.status)), el('td', {}, `${vmRows.length} ${vmRows.length === 1 ? 'VM' : 'VMs'}`, el('div', {class: 'subline'}, `${vmRows.reduce((n, vm) => n + Number(vm.cpu || 0), 0)} vCPU · ${vmRows.reduce((n, vm) => n + Number(vm.ram_gb || 0), 0)} GB RAM`)), el('td', {}, el('time', {datetime: row.created_at || ''}, date(row.created_at, true))), el('td', {}, el('a', {class: 'table-arrow', href: `#deployment/${encodeURIComponent(row.id)}`, 'aria-label': `View ${row.name}`}, icon('arrow')))));
+      body.append(el('tr', {}, el('td', {}, el('a', {class: 'deployment-name', href: `#deployment/${encodeURIComponent(row.id)}`}, row.name), row.hidden_at ? el('span', {class: 'history-hidden-badge'}, 'Hidden') : null, el('div', {class: 'subline'}, vmRows.map(vm => (roles[vm.role] || {short: vm.role}).short).join(' · ') || 'OS deployment')), el('td', {}, statusBadge(row.status)), el('td', {}, `${vmRows.length} ${vmRows.length === 1 ? 'VM' : 'VMs'}`, el('div', {class: 'subline'}, `${vmRows.reduce((n, vm) => n + Number(vm.cpu || 0), 0)} vCPU · ${vmRows.reduce((n, vm) => n + Number(vm.ram_gb || 0), 0)} GB RAM`)), el('td', {}, el('time', {datetime: row.created_at || ''}, date(row.created_at, true))), el('td', {}, el('div', {class: 'history-row-actions'}, visibilityButton(row, true), el('a', {class: 'table-arrow', href: `#deployment/${encodeURIComponent(row.id)}`, 'aria-label': `View ${row.name}`}, icon('arrow'))))));
     }
-    container.replaceChildren(el('div', {class: 'table-scroll'}, el('table', {}, el('thead', {}, el('tr', {}, ...['Deployment', 'Status', 'Resources', 'Created', ''].map(text => el('th', {scope: 'col'}, text)))), body)));
+    container.replaceChildren(el('div', {class: 'table-scroll'}, el('table', {}, el('thead', {}, el('tr', {}, ...['Deployment', 'Status', 'Resources', 'Created', 'Actions'].map(text => el('th', {scope: 'col'}, text)))), body)));
   }
   function formatBytes(value) {
     const bytes = Number(value);
@@ -883,6 +939,7 @@
     const logScrollTop = previousLogBody?.scrollTop || 0;
     const logsAtEnd = previousLogBody && previousLogBody.scrollHeight - previousLogBody.clientHeight - logScrollTop < 12;
     const focusedLogControl = $('#deployment-logs')?.contains(document.activeElement) ? document.activeElement.id : null;
+    const focusedHistoryControl = document.activeElement?.id === `history-visibility-${data.id}` ? document.activeElement.id : null;
     const vms = data.vms || [];
     const back = el('a', {class: 'back-link', href: '#deployments'}, icon('back'), 'All deployments');
     const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), statusBadge(data.status)), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'} · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
@@ -927,13 +984,16 @@
     const logs = el('section', {class: 'surface', id: 'deployment-logs', 'aria-labelledby': 'deployment-logs-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'deployment-logs-title'}, 'Deployment logs'), el('p', {}, `${data.events?.length || 0} recorded events${busyStatuses.has(data.status) ? ' · Updates automatically' : ''}`)), logToggle), logContents);
     setLogsOpen(state.openLogs.has(data.id));
     const failure = data.error ? el('div', {class: 'alert alert-error deployment-error', role: 'alert'}, el('strong', {}, 'Deployment needs attention'), el('p', {}, data.error), button('View deployment logs', 'button-small', () => setLogsOpen(true, true), 'terminal')) : null;
-    const left = el('div', {class: 'detail-main'}, failure, vmSurface, logs);
+    const hiddenNotice = data.hidden_at ? el('div', {class: 'visibility-notice', role: 'status'}, icon('info'), el('div', {}, el('strong', {}, 'Hidden from deployment history'), el('p', {}, 'The recorded status, VMs, credentials, and logs are preserved. Restore this record using History visibility.'))) : null;
+    const left = el('div', {class: 'detail-main'}, hiddenNotice, failure, vmSurface, logs);
     const credentials = renderCredentials();
     const aside = el('aside', {class: 'detail-aside'}, renderProgress(data), credentials);
-    if (failureStatuses.has(data.status)) aside.append(el('section', {class: 'surface recovery-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Recover this deployment')), el('div', {class: 'recovery-body'}, el('p', {}, 'Delete the VMs and installation media owned by this failed deployment, then start again with the same VM configuration and the current OS ISO selection in Setup. All data on those VM disks will be deleted.'), button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger button-full', () => openRedeploy(data), 'refresh'))));
+    if (data.hidden_at || hideableStatuses.has(data.status)) aside.append(el('section', {class: 'surface history-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'History visibility')), el('div', {class: 'recovery-body'}, el('p', {}, data.hidden_at ? 'This record is hidden from the default history view. Its deployment status is unchanged.' : 'Keep the VMs and hide this record from the default history view. Find it again with Show hidden. Credentials and logs stay available.'), visibilityButton(data))));
+    if (failureStatuses.has(data.status)) aside.append(el('section', {class: 'surface recovery-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Start over')), el('div', {class: 'recovery-body'}, el('p', {}, 'If the VM is working, you can keep it and hide this record instead. Starting over permanently deletes the VMs, all data on their disks, and installation media owned by this deployment.'), el('p', {}, 'A replacement uses the same VM configuration and the current OS ISO selection in Setup.'), button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger button-full', () => openRedeploy(data), 'refresh'))));
     page.replaceChildren(back, title, el('div', {class: 'detail-layout'}, left, aside));
     if (state.openLogs.has(data.id)) logBody.scrollTop = logsAtEnd ? logBody.scrollHeight : logScrollTop;
     if (focusedLogControl) document.getElementById(focusedLogControl)?.focus({preventScroll: true});
+    if (focusedHistoryControl) document.getElementById(focusedHistoryControl)?.focus({preventScroll: true});
   }
   function renderProgress(data) {
     const index = stageOrder.indexOf(data.stage);
@@ -1025,11 +1085,11 @@
   }
   async function refreshDetail(manual = false) {
     if (!state.session || setupRequired()) return;
-    const id = state.detailId; const epoch = state.routeEpoch;
-    if (!id) return;
+    const id = state.detailId; const epoch = state.routeEpoch; const revision = state.historyRevision;
+    if (!id || state.visibilityBusy.has(id)) return;
     try {
       const data = await api(`/api/deployments/${encodeURIComponent(id)}`);
-      if (id !== state.detailId || epoch !== state.routeEpoch) return;
+      if (id !== state.detailId || epoch !== state.routeEpoch || revision !== state.historyRevision || state.visibilityBusy.has(id)) return;
       const selection = window.getSelection();
       const selectingLogs = selection && !selection.isCollapsed && $('#deployment-logs')?.contains(selection.anchorNode);
       if (JSON.stringify(data) !== JSON.stringify(state.detail) && !selectingLogs) { state.detail = data; renderDetail(data); }
@@ -1067,7 +1127,7 @@
     if (!state.settings?.configured || !state.settings?.iso_configured) { location.hash = state.settings?.configured ? 'settings/media' : 'settings/connection'; notify('Complete Setup with an ESXi connection and an OS ISO to begin a deployment.'); return; }
     hideCredentials();
     const dialog = $('#wizard-dialog');
-    state.wizard = {step: 0, name: '', selected: new Set(['elasticsearch', 'kibana']), vms: {}, activeRole: 'elasticsearch', accepted: false, preflight: null, busy: true, error: ''};
+    state.wizard = {step: 0, name: '', selected: new Set(['elasticsearch', 'kibana']), vms: {}, accepted: false, preflight: null, busy: true, error: ''};
     dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), loading('Loading ESXi datastores and networks…')));
     dialog.showModal();
     const wizard = state.wizard;
@@ -1098,9 +1158,13 @@
     for (const role of selectedRoles()) {
       if (!wizard.vms[role]) wizard.vms[role] = {role, name: defaultVMName(wizard.name, role), cpu: roles[role].cpu, ram_gb: roles[role].ram, disk_gb: roles[role].disk, datastore: state.inventory?.datastores?.[0]?.name || '', network: state.inventory?.networks?.[0]?.name || '', ip_mode: 'dhcp', address: '', gateway: '', dnsText: ''};
     }
-    if (!wizard.selected.has(wizard.activeRole)) wizard.activeRole = selectedRoles()[0];
   }
-  function invalidatePreflight() { if (state.wizard) { state.wizard.preflight = null; state.wizard.error = ''; } }
+  function invalidatePreflight() {
+    if (!state.wizard) return;
+    state.wizard.preflight = null; state.wizard.error = ''; state.wizard.vmError = null;
+    for (const alert of $('#wizard-dialog').querySelectorAll('.vm-validation-error')) alert.remove();
+    for (const input of $('#wizard-dialog').querySelectorAll('[aria-invalid]')) { input.removeAttribute('aria-invalid'); input.removeAttribute('aria-describedby'); }
+  }
   function renderWizard() {
     const wizard = state.wizard; if (!wizard) return;
     const focusedId = $('#wizard-dialog').contains(document.activeElement) ? document.activeElement.id : '';
@@ -1109,7 +1173,7 @@
     ['Choose software', 'Configure VMs', 'Review & deploy'].forEach((label, index) => sidebar.append(el('div', {class: `wizard-step ${index === wizard.step ? 'active' : index < wizard.step ? 'done' : ''}`, ...(index === wizard.step ? {'aria-current': 'step'} : {})}, el('b', {}, index < wizard.step ? '✓' : index + 1), label)));
     sidebar.append(el('p', {class: 'wizard-aside-note'}, 'The OS ISO selected in Setup is used for each VM. Every selected role gets its own dedicated machine.'));
     const content = el('div', {class: 'wizard-content', id: 'wizard-content'});
-    if (wizard.error) content.append(el('div', {class: 'alert alert-error', role: 'alert'}, wizard.error));
+    if (wizard.error && !wizard.vmError) content.append(el('div', {class: 'alert alert-error', role: 'alert'}, wizard.error));
     if (wizard.step === 0) renderBlueprint(content);
     if (wizard.step === 1) renderResources(content);
     if (wizard.step === 2) renderReview(content);
@@ -1149,24 +1213,28 @@
   }
   function renderResources(content) {
     const wizard = state.wizard;
-    content.append(el('h3', {}, 'Make room for your workloads'), el('p', {class: 'muted'}, 'Configure resources, storage placement, and networking for each VM. Defaults are a starting point for a lab environment.'));
-    const tabs = el('div', {class: 'vm-tabs', role: 'tablist', 'aria-label': 'Virtual machines'});
-    for (const role of selectedRoles()) tabs.append(el('button', {type: 'button', role: 'tab', class: `vm-tab ${wizard.activeRole === role ? 'active' : ''}`, 'aria-selected': wizard.activeRole === role ? 'true' : 'false', 'aria-controls': 'vm-resource-form', id: `tab-${role}`, tabindex: wizard.activeRole === role ? '0' : '-1', onKeydown: event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const list = selectedRoles(); const index = list.indexOf(role); wizard.activeRole = event.key === 'Home' ? list[0] : event.key === 'End' ? list[list.length - 1] : list[(index + (event.key === 'ArrowRight' ? 1 : -1) + list.length) % list.length]; renderWizard(); document.getElementById(`tab-${wizard.activeRole}`)?.focus(); }, onClick: () => { wizard.activeRole = role; renderWizard(); }}, icon(roles[role].icon), roles[role].short));
-    content.append(tabs);
-    const vm = wizard.vms[wizard.activeRole]; if (!vm) return;
-    const form = el('div', {class: 'vm-resource-form', id: 'vm-resource-form', role: 'tabpanel', 'aria-labelledby': `tab-${vm.role}`});
-    const input = (key, attrs = {}) => el('input', {...attrs, value: vm[key], onInput: event => { vm[key] = ['cpu', 'ram_gb', 'disk_gb'].includes(key) ? Number(event.target.value) : event.target.value; invalidatePreflight(); }});
-    form.append(el('div', {class: 'vm-form-header'}, roleIcon(vm.role), el('div', {}, el('h4', {}, roleName(vm.role)), el('p', {}, 'Operating system from your selected OS ISO'))), field('Virtual machine name', input('name', {type: 'text', required: true, maxlength: 63, pattern: '[a-z](?:(?:[a-z0-9]|-)*[a-z0-9])?', autocomplete: 'off', spellcheck: 'false'}), 'A unique hostname starting with a letter; lowercase letters, numbers, and hyphens only.'), el('div', {class: 'field-grid three'}, field('CPU cores', input('cpu', {type: 'number', min: 1, max: 128, step: 1, required: true}), 'vCPU'), field('Memory', input('ram_gb', {type: 'number', min: ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role], max: 2048, step: 1, required: true}), 'GB RAM'), field('Disk size', input('disk_gb', {type: 'number', min: 25, max: 65536, step: 1, required: true}), 'GB · thin provisioned')));
-    const datastore = el('select', {required: true, onChange: event => { vm.datastore = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a datastore'), (state.inventory?.datastores || []).map(store => el('option', {value: store.name}, `${store.name} · ${Math.floor(Number(store.free_gb))} GB free`))); datastore.value = vm.datastore;
-    const network = el('select', {required: true, onChange: event => { vm.network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a port group'), (state.inventory?.networks || []).map(net => el('option', {value: net.name}, net.name))); network.value = vm.network;
-    form.append(el('div', {class: 'field-grid'}, field('Datastore', datastore, 'Storage destination on the ESXi host.'), field('Network / port group', network, 'Must be reachable from GDeploy.')), el('hr', {class: 'form-divider'}), el('div', {class: 'field-section-label'}, 'IP address configuration'));
-    const choices = el('div', {class: 'network-choices'});
-    for (const [mode, label] of [['dhcp', 'Automatic (DHCP)'], ['static', 'Static IP']]) choices.append(el('label', {}, el('input', {id: `network-${mode}`, type: 'radio', name: 'ip-mode', value: mode, checked: vm.ip_mode === mode, onChange: () => { vm.ip_mode = mode; invalidatePreflight(); renderWizard(); }}), label));
-    form.append(choices);
-    if (vm.ip_mode === 'static') form.append(el('div', {class: 'static-fields'}, el('div', {class: 'field-grid'}, field('IPv4 address / prefix', input('address', {type: 'text', required: true, placeholder: '192.168.1.20/24', autocomplete: 'off', spellcheck: 'false'}), 'Include the subnet prefix, for example /24.'), field('Default gateway', input('gateway', {type: 'text', required: true, placeholder: '192.168.1.1', autocomplete: 'off', spellcheck: 'false'}))), field('DNS servers', input('dnsText', {type: 'text', required: true, placeholder: '192.168.1.1, 1.1.1.1', autocomplete: 'off', spellcheck: 'false'}), 'Separate multiple IPv4 addresses with commas.')));
-    else form.append(el('p', {class: 'network-note'}, 'A DHCP server on this network must provide an address, gateway, and DNS. GDeploy discovers the guest address through VMware Tools.'));
-    content.append(form);
-    if (selectedRoles().length > 1) content.append(el('div', {class: 'wizard-callout'}, icon('server'), el('span', {}, 'Use the tabs above to review every VM. Each machine can use its own datastore, network, and IP configuration.')));
+    const selected = selectedRoles();
+    content.append(el('h3', {}, `Configure ${selected.length} ${selected.length === 1 ? 'virtual machine' : 'separate virtual machines'}`), el('p', {class: 'muted'}, 'Every section below creates a dedicated VM. Give each machine its own name, resources, storage destination, and network settings.'));
+    if (selected.length > 1) content.append(el('nav', {class: 'vm-jump-links', 'aria-label': 'VM configuration sections'}, selected.map(role => button(`${roles[role].short} VM`, 'button-small', () => {
+      document.getElementById(`vm-${role}-name`)?.focus({preventScroll: true});
+      document.getElementById(`vm-resource-${role}`)?.scrollIntoView({block: 'start'});
+    }, roles[role].icon))));
+    for (const [index, role] of selected.entries()) {
+      const vm = wizard.vms[role];
+      const form = el('section', {class: 'vm-resource-form', id: `vm-resource-${role}`, 'data-vm-role': role, 'aria-labelledby': `vm-heading-${role}`});
+      const invalidAttrs = key => wizard.vmError?.role === role && wizard.vmError.key === key ? {'aria-invalid': 'true', 'aria-describedby': `vm-error-${role}`} : {};
+      const input = (key, attrs = {}) => el('input', {id: `vm-${role}-${key}`, ...attrs, ...invalidAttrs(key), value: vm[key], onInput: event => { vm[key] = ['cpu', 'ram_gb', 'disk_gb'].includes(key) ? Number(event.target.value) : event.target.value; invalidatePreflight(); }});
+      form.append(...[el('div', {class: 'vm-form-header'}, roleIcon(role), el('div', {}, el('h4', {id: `vm-heading-${role}`}, `${roleName(role)} VM`), el('p', {}, 'Operating system from your selected OS ISO')), el('span', {class: 'vm-form-number'}, `VM ${index + 1} of ${selected.length}`)), wizard.vmError?.role === role ? el('div', {id: `vm-error-${role}`, class: 'alert alert-error vm-validation-error', role: 'alert', tabindex: '-1'}, wizard.vmError.error) : null, field('Virtual machine name', input('name', {type: 'text', required: true, maxlength: 63, pattern: '[a-z](?:(?:[a-z0-9]|-)*[a-z0-9])?', autocomplete: 'off', spellcheck: 'false'}), 'A unique hostname starting with a letter; lowercase letters, numbers, and hyphens only.'), el('div', {class: 'field-grid three'}, field('CPU cores', input('cpu', {type: 'number', min: 1, max: 128, step: 1, required: true}), 'vCPU'), field('Memory', input('ram_gb', {type: 'number', min: ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[role], max: 2048, step: 1, required: true}), 'GB RAM'), field('Disk size', input('disk_gb', {type: 'number', min: 25, max: 65536, step: 1, required: true}), 'GB · thin provisioned'))].filter(Boolean));
+      const datastore = el('select', {id: `vm-${role}-datastore`, ...invalidAttrs('datastore'), required: true, onChange: event => { vm.datastore = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a datastore'), (state.inventory?.datastores || []).map(store => el('option', {value: store.name}, `${store.name} · ${Math.floor(Number(store.free_gb))} GB free`))); datastore.value = vm.datastore;
+      const network = el('select', {id: `vm-${role}-network`, ...invalidAttrs('network'), required: true, onChange: event => { vm.network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a port group'), (state.inventory?.networks || []).map(net => el('option', {value: net.name}, net.name))); network.value = vm.network;
+      form.append(el('div', {class: 'field-grid'}, field('Datastore', datastore, 'Storage destination on the ESXi host.'), field('Network / port group', network, 'Must be reachable from GDeploy.')), el('hr', {class: 'form-divider'}), el('div', {class: 'field-section-label'}, 'IP address configuration'));
+      const staticFields = el('div', {class: 'static-fields', hidden: vm.ip_mode !== 'static'}, el('div', {class: 'field-grid'}, field('IPv4 address / prefix', input('address', {type: 'text', required: true, placeholder: '192.168.1.20/24', autocomplete: 'off', spellcheck: 'false'}), 'Include the subnet prefix, for example /24.'), field('Default gateway', input('gateway', {type: 'text', required: true, placeholder: '192.168.1.1', autocomplete: 'off', spellcheck: 'false'}))), field('DNS servers', input('dnsText', {type: 'text', required: true, placeholder: '192.168.1.1, 1.1.1.1', autocomplete: 'off', spellcheck: 'false'}), 'Separate multiple IPv4 addresses with commas.'));
+      const dhcpNote = el('p', {class: 'network-note', hidden: vm.ip_mode !== 'dhcp'}, 'A DHCP server on this network must provide an address, gateway, and DNS. GDeploy discovers the guest address through VMware Tools.');
+      const choices = el('div', {class: 'network-choices', role: 'radiogroup', 'aria-label': `${roleName(role)} IP address configuration`});
+      for (const [mode, label] of [['dhcp', 'Automatic (DHCP)'], ['static', 'Static IP']]) choices.append(el('label', {}, el('input', {id: `vm-${role}-network-${mode}`, type: 'radio', name: `ip-mode-${role}`, value: mode, checked: vm.ip_mode === mode, onChange: () => { vm.ip_mode = mode; invalidatePreflight(); staticFields.hidden = mode !== 'static'; dhcpNote.hidden = mode !== 'dhcp'; }}), label));
+      form.append(choices, staticFields, dhcpNote);
+      content.append(form);
+    }
   }
   function getSpec() {
     const wizard = state.wizard;
@@ -1198,27 +1266,27 @@
   function validateVMs() {
     const spec = getSpec(); const names = new Set();
     for (const vm of spec.vms) {
-      let error = '';
-      if (!validHostname(vm.name)) error = 'Use a VM name of 1–63 lowercase letters, numbers, or hyphens, beginning with a letter and ending with a letter or number.';
-      else if (names.has(vm.name)) error = 'Every virtual machine needs a unique name.';
-      else if (!Number.isInteger(vm.cpu) || vm.cpu < 1 || vm.cpu > 128) error = 'CPU cores must be a whole number from 1 to 128.';
-      else if (!Number.isInteger(vm.ram_gb) || vm.ram_gb < ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role] || vm.ram_gb > 2048) error = `Memory must be a whole number from ${({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role]} to 2048 GB for this role.`;
-      else if (!Number.isInteger(vm.disk_gb) || vm.disk_gb < 25 || vm.disk_gb > 65536) error = 'Disk size must be a whole number from 25 to 65536 GB.';
-      else if (!vm.datastore || !vm.network) error = 'Choose a datastore and network for this VM.';
+      let invalid = null;
+      if (!validHostname(vm.name)) invalid = ['name', 'Use a VM name of 1–63 lowercase letters, numbers, or hyphens, beginning with a letter and ending with a letter or number.'];
+      else if (names.has(vm.name)) invalid = ['name', 'Every virtual machine needs a unique name.'];
+      else if (!Number.isInteger(vm.cpu) || vm.cpu < 1 || vm.cpu > 128) invalid = ['cpu', 'CPU cores must be a whole number from 1 to 128.'];
+      else if (!Number.isInteger(vm.ram_gb) || vm.ram_gb < ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role] || vm.ram_gb > 2048) invalid = ['ram_gb', `Memory must be a whole number from ${({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role]} to 2048 GB for this role.`];
+      else if (!Number.isInteger(vm.disk_gb) || vm.disk_gb < 25 || vm.disk_gb > 65536) invalid = ['disk_gb', 'Disk size must be a whole number from 25 to 65536 GB.'];
+      else if (!vm.datastore || !vm.network) invalid = [!vm.datastore ? 'datastore' : 'network', 'Choose a datastore and network for this VM.'];
       else if (vm.ip_mode === 'static') {
         const [address, prefix, extra] = vm.address.split('/');
-        if (!validIPv4(address) || extra !== undefined || !/^\d{1,2}$/.test(prefix || '') || Number(prefix) < 1 || Number(prefix) > 30) error = 'Enter an IPv4 address with a subnet prefix from /1 to /30, for example 192.168.1.20/24.';
-        else if (!validIPv4(vm.gateway)) error = 'Enter a valid IPv4 default gateway.';
-        else if (!vm.dns.length || vm.dns.length > 4 || vm.dns.some(dns => !validIPv4(dns))) error = 'Enter one to four valid IPv4 DNS servers, separated by commas.';
+        if (!validIPv4(address) || extra !== undefined || !/^\d{1,2}$/.test(prefix || '') || Number(prefix) < 1 || Number(prefix) > 30) invalid = ['address', 'Enter an IPv4 address with a subnet prefix from /1 to /30, for example 192.168.1.20/24.'];
+        else if (!validIPv4(vm.gateway)) invalid = ['gateway', 'Enter a valid IPv4 default gateway.'];
+        else if (!vm.dns.length || vm.dns.length > 4 || vm.dns.some(dns => !validIPv4(dns))) invalid = ['dnsText', 'Enter one to four valid IPv4 DNS servers, separated by commas.'];
       }
       names.add(vm.name);
-      if (error) return {role: vm.role, error: `${roleName(vm.role)}: ${error}`};
+      if (invalid) return {role: vm.role, key: invalid[0], error: `${roleName(vm.role)}: ${invalid[1]}`};
     }
     return null;
   }
   async function wizardNext() {
     const wizard = state.wizard; if (!wizard || wizard.busy) return;
-    wizard.error = '';
+    wizard.error = ''; wizard.vmError = null;
     if (wizard.step === 0) {
       wizard.name = wizard.name.trim();
       if (!validHostname(wizard.name)) wizard.error = 'Choose a deployment name of 1–63 lowercase letters, numbers, or hyphens, beginning with a letter and ending with a letter or number.';
@@ -1228,9 +1296,15 @@
     }
     if (wizard.step === 1) {
       const invalid = validateVMs();
-      if (invalid) { wizard.error = invalid.error; wizard.activeRole = invalid.role; }
+      if (invalid) { wizard.error = invalid.error; wizard.vmError = invalid; }
       else wizard.step = 2;
-      renderWizard(); return;
+      renderWizard();
+      if (invalid) {
+        const alert = document.getElementById(`vm-error-${invalid.role}`);
+        alert?.focus({preventScroll: true}); alert?.scrollIntoView({block: 'center'});
+      }
+      else $('#wizard-content')?.scrollTo({top: 0});
+      return;
     }
     if (wizard.selected.has('splunk') && !wizard.accepted) { wizard.error = 'Accept the license terms for the supplied Splunk package before running preflight.'; renderWizard(); return; }
     const deploy = Boolean(wizard.preflight?.ok);
@@ -1258,13 +1332,16 @@
     try {
       if (state.route === 'detail') await refreshDetail();
       else if (state.route === 'deployments') {
-        const rows = await api('/api/deployments');
-        if (epoch === state.routeEpoch && JSON.stringify(rows) !== JSON.stringify(state.deployments)) {
+        const revision = state.historyRevision;
+        const rows = await api(deploymentListPath());
+        if (epoch === state.routeEpoch && revision === state.historyRevision && !state.visibilityBusy.size && JSON.stringify(rows) !== JSON.stringify(state.deployments)) {
           const activeElement = document.activeElement;
           const editing = activeElement?.classList.contains('search-field');
+          const focusedId = page.contains(activeElement) ? activeElement?.id : '';
           const selection = editing ? activeElement.selectionStart : null;
           state.deployments = rows; renderOverview();
-          if (editing) { const input = $('.search-field'); input?.focus(); if (selection !== null) input?.setSelectionRange(selection, selection); }
+          if (editing) { const input = $('.search-field'); input?.focus({preventScroll: true}); if (selection !== null) input?.setSelectionRange(selection, selection); }
+          else if (focusedId) (document.getElementById(focusedId) || (focusedId.startsWith('history-visibility-') ? $('#history-show-hidden') : null))?.focus({preventScroll: true});
         }
       }
     } catch (error) { if (epoch === state.routeEpoch) globalError(error.message); }
