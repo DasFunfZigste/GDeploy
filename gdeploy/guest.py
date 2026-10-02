@@ -21,7 +21,9 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -42,6 +44,79 @@ class GuestConnectionError(GuestError):
 
 class GuestHostKeyError(GuestError):
     """A fatal mismatch with a previously observed SSH host identity."""
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    stdout: str
+    stderr: str
+    exit_code: int
+
+
+# Read only completion evidence, never installer configuration or user-data:
+# those files can contain credentials. Run with sudo to verify app-install access.
+_READINESS_PROBE = r'''
+import json
+import os
+from pathlib import Path
+import subprocess
+
+def output(args):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError("OS readiness probe command failed: " + args[0])
+    return result.stdout.strip()
+
+root = output(["findmnt", "-n", "-o", "SOURCE,FSTYPE", "/"]).split()
+os_id = ""
+for line in Path("/etc/os-release").read_text().splitlines():
+    if line.startswith("ID="):
+        os_id = line[3:].strip('"')
+services = {}
+for name in ("ssh.service", "open-vm-tools.service"):
+    properties = output(["systemctl", "show", name, "-p",
+                         "LoadState,ActiveState,SubState,Result"])
+    services[name] = dict(line.split("=", 1) for line in properties.splitlines() if "=" in line)
+print(json.dumps({
+    "os_id": os_id,
+    "sudo": os.geteuid() == 0,
+    "root_source": root[0] if len(root) == 2 else "",
+    "root_fstype": root[1] if len(root) == 2 else "",
+    "boot_finished": Path("/var/lib/cloud/instance/boot-finished").is_file(),
+    "disabled_marker": Path("/etc/cloud/cloud-init.disabled").is_file(),
+    "installer_log": Path("/var/log/installer/curtin-install.log").is_file(),
+    "services": services,
+}))
+'''
+
+
+def _installed_system_pending(evidence: dict, *, disabled: bool) -> str | None:
+    """Reject unsafe evidence; return a reason to wait for normal boot progress."""
+    if evidence.get("sudo") is not True:
+        raise GuestError("OS readiness check could not verify sudo access for the GDeploy account.")
+    if (
+        evidence.get("os_id") != "ubuntu"
+        or not str(evidence.get("root_source", "")).startswith("/dev/")
+        or evidence.get("root_fstype") not in ("ext4", "xfs", "btrfs")
+    ):
+        raise GuestError("OS readiness check did not find an installed Ubuntu disk root; check the VM console.")
+    if disabled and (evidence.get("disabled_marker") is not True or evidence.get("installer_log") is not True):
+        raise GuestError("Cloud-init is disabled without verified Ubuntu installer completion evidence.")
+    services = evidence.get("services")
+    if not isinstance(services, dict):
+        raise GuestError("OS readiness probe did not report service states.")
+    pending = []
+    for name in ("ssh.service", "open-vm-tools.service"):
+        state = services.get(name)
+        if not isinstance(state, dict) or state.get("LoadState") != "loaded":
+            raise GuestError(f"OS readiness check could not find {name}.")
+        if state.get("ActiveState") == "failed" or state.get("Result") != "success":
+            raise GuestError(f"OS readiness check found a failed {name}; inspect its guest journal.")
+        if state.get("ActiveState") != "active" or state.get("SubState") != "running":
+            pending.append(name + " is not running")
+    if evidence.get("boot_finished") is not True:
+        pending.append("cloud-init boot-finished marker is not present")
+    return "; ".join(pending) or None
 
 
 def generate_ssh_key() -> tuple[str, str]:
@@ -663,44 +738,99 @@ class GuestSession:
         return text
 
     def _exec(self, command: str, *, timeout: int = 1800, sudo: bool = False) -> str:
+        result = self._exec_result(command, timeout=timeout, sudo=sudo, combine_stderr=True)
+        if result.exit_code != 0:
+            safe = self._sanitize(result.stdout).strip()[-3000:]
+            raise GuestError(f"Guest command failed (exit {result.exit_code}). {safe}")
+        return result.stdout
+
+    def _exec_result(
+        self, command: str, *, timeout: int = 1800, sudo: bool = False, combine_stderr: bool = False,
+    ) -> CommandResult:
+        """Drain both SSH streams with bounded memory and an absolute deadline."""
         if self.client is None:
             raise GuestError("SSH session is not connected.")
         if sudo:
             command = "sudo -k -S -p '' -- /bin/bash -c " + shlex.quote(command)
         channel = None
+        watchdog = None
+        expired = threading.Event()
+        deadline = time.monotonic() + timeout
+        timeout_error = "Guest command exceeded its time limit; check the guest console and service logs."
+
+        def expire() -> None:
+            expired.set()
+            # This session owns its transport. Closing it also releases rekey
+            # and socket-write waits which a channel-only close cannot stop.
+            transport.close()
+            channel.close()
+
         try:
             transport = self.client.get_transport()
-            channel = transport.open_session(timeout=15)
-            channel.set_combine_stderr(True)
+            if transport is None:
+                raise GuestConnectionError("SSH transport is no longer connected.")
+            channel = transport.open_session(timeout=min(15, max(0.1, deadline - time.monotonic())))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GuestError(timeout_error)
+            # Paramiko's exec acknowledgement wait ignores Channel.settimeout.
+            # Closing at the deadline also interrupts stalled exec/send calls.
+            channel.settimeout(remaining)
+            watchdog = threading.Timer(remaining, expire)
+            watchdog.daemon = True
+            watchdog.start()
+            channel.set_combine_stderr(combine_stderr)
             channel.exec_command(command)
             if sudo:
                 channel.sendall((self.password + "\n").encode())
             channel.shutdown_write()
-            deadline = time.monotonic() + timeout
-            tail = bytearray()
+            stdout, stderr = bytearray(), bytearray()
             while True:
-                while channel.recv_ready():
-                    tail.extend(channel.recv(32768))
-                    del tail[:-131072]
-                if channel.exit_status_ready() and not channel.recv_ready():
+                if expired.is_set() or time.monotonic() >= deadline:
+                    raise GuestError(timeout_error)
+                if channel.recv_ready():
+                    stdout.extend(channel.recv(32768))
+                    del stdout[:-131072]
+                if not combine_stderr and channel.recv_stderr_ready():
+                    stderr.extend(channel.recv_stderr(32768))
+                    del stderr[:-131072]
+                if (channel.exit_status_ready() and not channel.recv_ready()
+                        and (combine_stderr or not channel.recv_stderr_ready())):
                     status = channel.recv_exit_status()
-                    output = tail.decode("utf-8", "replace")
-                    if status != 0:
-                        safe = self._sanitize(output).strip()[-3000:]
-                        raise GuestError(f"Guest command failed (exit {status}). {safe}")
-                    return output
-                if time.monotonic() >= deadline:
-                    raise GuestError("Guest command exceeded its time limit; check the guest console and service logs.")
-                time.sleep(0.1)
-        except (OSError, paramiko.SSHException) as exc:
-            raise GuestError("SSH connection was lost during guest provisioning.") from exc
+                    if status == -1:
+                        raise GuestConnectionError("SSH connection closed before the guest returned an exit status.")
+                    return CommandResult(stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"), status)
+                if not channel.recv_ready() and (combine_stderr or not channel.recv_stderr_ready()):
+                    time.sleep(0.1)
+        except (OSError, EOFError, paramiko.SSHException) as exc:
+            if expired.is_set() or time.monotonic() >= deadline:
+                raise GuestError(timeout_error) from exc
+            raise GuestConnectionError("SSH connection was lost during guest provisioning.") from exc
         finally:
-            if channel is not None:
-                channel.close()
+            try:
+                if channel is not None:
+                    channel.close()
+            except (OSError, EOFError, paramiko.SSHException):
+                # Preserve the result/error already obtained from the command.
+                pass
+            finally:
+                if watchdog is not None:
+                    watchdog.cancel()
 
-    def wait_ready(self, timeout: int = 1800) -> None:
-        """Connect if needed, then require successful cloud-init completion."""
+    def wait_ready(self, timeout: int = 1800, *, log: Callable[[str, str], None] = lambda message, level: None) -> None:
+        """Verify cloud-init and installed-system evidence within one boot deadline."""
         deadline = time.monotonic() + timeout
+
+        def emit(message: str, level: str = "info") -> None:
+            for line in _iso_tool_log(self._sanitize(message), self._secrets):
+                log(line, level)
+
+        def emit_stream(label: str, contents: str, level: str = "warning") -> None:
+            # Redact the original lines before prefixing: anchored credential
+            # filters must still see fields such as "password: ..." at column 0.
+            for line in _iso_tool_log(self._sanitize(contents), self._secrets):
+                log(f"{label}: {line}", level)
+
         while self.client is None:
             try:
                 self._connect()
@@ -708,13 +838,105 @@ class GuestSession:
                 if time.monotonic() + 5 >= deadline:
                     raise
                 time.sleep(5)
-        output = self._exec("cloud-init status --wait --format json", timeout=max(1, int(deadline - time.monotonic())))
-        try:
-            status = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise GuestError("Could not verify Ubuntu cloud-init completion.") from exc
-        if status.get("status") != "done" or status.get("errors"):
-            raise GuestError("Ubuntu cloud-init did not finish successfully; inspect the guest installation logs.")
+        previous = None
+        previous_evidence = None
+        last_pending = "cloud-init has not reported completion"
+        while time.monotonic() < deadline:
+            # --wait can emit progress on stdout. Poll clean JSON instead, and
+            # query as root because current cloud-init reads protected config.
+            result = self._exec_result(
+                "cloud-init status --format json", timeout=min(60, max(1, int(deadline - time.monotonic()))), sudo=True,
+            )
+            observation = (result.stdout, result.stderr, result.exit_code)
+            changed = observation != previous
+            if changed:
+                emit(f"Cloud-init status command exited {result.exit_code}.")
+                if result.stderr.strip():
+                    emit_stream("Cloud-init stderr", result.stderr)
+                previous = observation
+            try:
+                status = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                if result.exit_code != 0:
+                    raise GuestError(f"Cloud-init status command failed (exit {result.exit_code}); expand deployment logs and check guest sudo access and cloud-init availability.") from None
+                emit(f"Cloud-init stdout was not valid JSON ({len(result.stdout)} characters); raw output omitted.", "error")
+                raise GuestError("Cloud-init returned invalid JSON; expand deployment logs for the command exit and diagnostics.") from None
+            if not isinstance(status, dict) or not isinstance(status.get("errors"), list):
+                raise GuestError("Cloud-init returned an unsupported status response; inspect its status on the guest.")
+            state = status.get("status")
+            boot = status.get("boot_status_code")
+            if not isinstance(state, str):
+                raise GuestError("Cloud-init returned an unsupported status response; inspect its status on the guest.")
+            if changed:
+                emit(f"Cloud-init status={state}; extended_status={status.get('extended_status')}; boot_status_code={boot}.")
+            # A successful exit alone is insufficient: inspect every stage too.
+            stages = {"overall": status, **{name: status.get(name, {}) for name in ("init-local", "init", "modules-config", "modules-final")}}
+            has_errors = False
+            for name, stage in stages.items():
+                if not isinstance(stage, dict):
+                    raise GuestError("Cloud-init returned an unsupported stage response; inspect its status on the guest.")
+                if stage.get("errors") or stage.get("recoverable_errors"):
+                    has_errors = True
+                    # Report where errors occurred without dumping user-data
+                    # or arbitrary configuration embedded in exception strings.
+                    emit(f"Cloud-init {name}: errors_present={bool(stage.get('errors'))}; "
+                         f"recoverable_errors_present={bool(stage.get('recoverable_errors'))}.", "error")
+            if has_errors:
+                raise GuestError("Cloud-init reported errors or recoverable errors; inspect sudo cloud-init status --long and the guest journal.")
+            if result.exit_code != 0:
+                raise GuestError(f"Cloud-init status command failed (exit {result.exit_code}); expand deployment logs for diagnostics.")
+            if state in {"done", "disabled"}:
+                if state == "done" and (status.get("extended_status") not in (None, "done") or status.get("stage") is not None):
+                    raise GuestError("Cloud-init returned a conflicting completion state; inspect sudo cloud-init status --long.")
+                if state == "disabled" and (
+                    boot != "disabled-by-marker-file" or status.get("extended_status") != "disabled"
+                    or status.get("stage") is not None
+                ):
+                    raise GuestError("Cloud-init is disabled for an unverified reason; inspect sudo cloud-init status --long.")
+                if time.monotonic() >= deadline:
+                    break
+                probe = self._exec_result(
+                    "python3 -c " + shlex.quote(_READINESS_PROBE),
+                    timeout=min(60, max(1, int(deadline - time.monotonic()))), sudo=True,
+                )
+                if probe.stderr.strip():
+                    emit_stream("OS readiness probe stderr", probe.stderr)
+                if probe.exit_code != 0:
+                    raise GuestError(f"OS readiness probe failed (exit {probe.exit_code}); check sudo access and expand deployment logs.")
+                try:
+                    evidence = json.loads(probe.stdout)
+                except json.JSONDecodeError:
+                    raise GuestError("OS readiness probe returned invalid JSON; check guest python3 and sudo access.") from None
+                if not isinstance(evidence, dict):
+                    raise GuestError("OS readiness probe returned an unsupported response.")
+                if evidence != previous_evidence:
+                    emit(
+                        f"OS readiness: root={evidence.get('root_source')} ({evidence.get('root_fstype')}); "
+                        f"sudo={evidence.get('sudo')}; boot_finished={evidence.get('boot_finished')}; "
+                        f"disabled_marker={evidence.get('disabled_marker')}; installer_log={evidence.get('installer_log')}."
+                    )
+                    services = evidence.get("services")
+                    for name, state_info in (services.items() if isinstance(services, dict) else []):
+                        if name in {"ssh.service", "open-vm-tools.service"} and isinstance(state_info, dict):
+                            emit(f"OS readiness {name}: load={state_info.get('LoadState')}; active={state_info.get('ActiveState')}; "
+                                 f"substate={state_info.get('SubState')}; result={state_info.get('Result')}.")
+                    previous_evidence = evidence
+                if time.monotonic() >= deadline:
+                    break
+                pending = _installed_system_pending(evidence, disabled=state == "disabled")
+                if pending is None:
+                    reason = "Ubuntu installer disabled cloud-init after completion" if state == "disabled" else "cloud-init completed"
+                    emit(f"OS readiness verified: {reason}; installed disk, sudo, SSH and VMware Tools checks passed.")
+                    return
+            elif state in {"running", "not started"}:
+                pending = "cloud-init is " + state
+            else:
+                raise GuestError("Cloud-init did not report a supported successful or pending state; inspect its guest status.")
+            if pending != last_pending:
+                emit("Waiting for OS readiness: " + pending + ".")
+                last_pending = pending
+            time.sleep(min(5, max(0, deadline - time.monotonic())))
+        raise GuestError(f"Timed out verifying OS readiness: {last_pending}. Expand deployment logs and check the guest console.")
 
     def _run_script(self, script: str, payload: dict, package: Path | None = None) -> dict:
         if self.client is None:

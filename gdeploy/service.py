@@ -338,13 +338,22 @@ class DeploymentService:
                         current = self.db.get(deployment_id, private=True)
                         current["secrets"]["vm_credentials"][vm["name"]] = credential
                         self.db.update(deployment_id, secrets=current["secrets"])
-                        guest.wait_ready(timeout=max(30, int(deadline - time.monotonic())))
+                        guest.wait_ready(
+                            timeout=max(1, int(deadline - time.monotonic())),
+                            log=lambda text, level: self.db.event(
+                                deployment_id, safe_error(f"{vm['name']}: {text}", current["secrets"]), level,
+                            ),
+                        )
                         return
-                except GuestConnectionError:
+                except GuestConnectionError as exc:
                     # Installation can expose an IP before SSH is ready. Host-key
                     # mismatches and cloud-init failures propagate immediately.
-                    pass
-            self.stop_event.wait(10)
+                    self.db.event(
+                        deployment_id, safe_error(
+                            f"{vm['name']}: {exc} Retrying within the OS installation timeout.", {"credential": credential},
+                        ),
+                    )
+            self.stop_event.wait(min(10, max(0, deadline - time.monotonic())))
         raise DeploymentError(
             f"Timed out waiting for the operating system on {vm['name']}. Check its ESXi console, DHCP/static network, OS package mirror access, and TCP 22 reachability from GDeploy."
         )

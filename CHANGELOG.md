@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-02
+
+### Fixed
+
+- Parse cloud-init's JSON stdout separately from stderr. Permission warnings on stderr could previously make a valid status response fail with **Could not verify Ubuntu cloud-init completion**.
+- Recognize Ubuntu's clean **disabled-by-marker-file** state after installation. Acceptance also requires completed first-boot evidence, installer artifacts, an installed root filesystem, working sudo, and active SSH and VMware Tools services. A disabled status alone is insufficient, and reported cloud-init errors still stop the deployment.
+- Retry transient first-boot readiness states within the existing OS-installation timeout. Record sanitized status and readiness diagnostics in **Deployment logs** so a failure identifies the check that needs attention.
+
+### Installation and compatibility
+
+- Update with `git pull --ff-only` and `docker compose up -d --build --wait`, refresh the browser, and check **v0.7.1**. Preserve the existing data volume, `.env`, credentials, certificate approvals, SSH public keys and saved media.
+- Keep your verified Ubuntu Server 24.04 LTS amd64 live-server ISO, including `ubuntu-24.04.5-live-server-amd64.iso`; this repair does not require replacing or re-uploading the ISO. The patch changes readiness verification, with no database or installation-media format change.
+- Existing failed records are not resumed or marked completed automatically. Keep a healthy VM intact and use **Hide from history** if desired. Hiding does not finish pending software installation or detach/remove deployment media; **Delete & redeploy** remains a deliberate, destructive replacement action.
+
 ## [0.7.0] - 2026-10-01
 
 ### Added

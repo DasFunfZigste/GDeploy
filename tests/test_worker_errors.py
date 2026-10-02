@@ -34,7 +34,7 @@ def test_terminal_guest_errors_are_not_retried(config, spec, monkeypatch, error)
         def __exit__(self, *args):
             pass
 
-        def wait_ready(self, timeout):
+        def wait_ready(self, timeout, *, log):
             raise error
 
     monkeypatch.setattr(module, "GuestSession", FailedGuest)

@@ -336,6 +336,9 @@ class FakeChannel:
     def set_combine_stderr(self, value):
         pass
 
+    def settimeout(self, value):
+        pass
+
     def exec_command(self, command):
         self.command = command
 
@@ -385,9 +388,11 @@ def test_cloud_init_errors_prevent_application_install(monkeypatch):
     session = guest.GuestSession("192.168.10.25", "gdeploy", "private", "os-secret")
     session.client = Mock()
     monkeypatch.setattr(
-        session, "_exec", lambda *args, **kwargs: json.dumps({"status": "error", "errors": ["failed package"]})
+        session, "_exec_result", lambda *args, **kwargs: guest.CommandResult(
+            json.dumps({"status": "error", "errors": ["failed package"]}), "", 1,
+        )
     )
-    with pytest.raises(guest.GuestError, match="did not finish") as caught:
+    with pytest.raises(guest.GuestError, match="reported errors") as caught:
         session.wait_ready()
     assert not isinstance(caught.value, guest.GuestConnectionError)
 

@@ -199,7 +199,7 @@ def test_job_ownership_persistence_success_and_cleanup(config, spec, monkeypatch
         def __exit__(self, *args):
             pass
 
-        def wait_ready(self, timeout):
+        def wait_ready(self, timeout, *, log):
             calls.append("ready")
 
         def install(self, role, secrets, **kwargs):

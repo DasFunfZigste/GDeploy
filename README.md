@@ -63,7 +63,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.7.0` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.7.1` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -86,7 +86,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.7.0** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
+Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO selection, uploaded/imported media and history. Refresh the browser and check **v0.7.1** in the app footer. Open **Setup**, then **OS installation media**; you can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`.
 
 If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
 
@@ -130,6 +130,10 @@ As an optional alternative for a private CA, make a PEM bundle containing the no
 To remove a finished record from the default **Deployment history**, select **Hide** in its row or **Hide from history** on its detail page. Check **Show hidden** to include hidden records, then select **Restore** to show one normally again. Direct links to hidden deployments still open their details. Queued, running and cleaning work cannot be hidden.
 
 Hiding preserves the VMs, original job status, logs, credentials and resource reservations. It does not complete failed checks, resume provisioning or remove attached installation media. If a VM is healthy but its deployment record failed a readiness check, you can keep that VM and hide the record. Inspect the guest and logs before deciding whether any unfinished work needs attention.
+
+Version **0.7.1** repairs two cloud-init readiness failures: stderr warnings no longer corrupt JSON status parsing, and Ubuntu's clean `disabled-by-marker-file` state can pass when independent first-boot, installer, root-filesystem, sudo, SSH and VMware Tools checks confirm readiness. Reported cloud-init errors still block progress. Transient first-boot states receive bounded retries, with sanitized details in **Deployment logs**. The fix uses the same verified OS ISO; no replacement upload is needed for `ubuntu-24.04.5-live-server-amd64.iso`.
+
+Updating does not resume an already failed deployment or change its recorded status. Preserve a working VM and review any unfinished software installation or media cleanup separately. The [readiness troubleshooting guide](docs/INSTALL.md#check-ubuntu-readiness-after-a-deployment-error) explains what follows the OS check and how to inspect an existing guest.
 
 When a stage fails, select **View deployment logs** in its error banner, or **View logs** in the **Deployment logs** card. Expand and copy the sanitized diagnostics to identify the failing step; older entries can show only the detail recorded at the time. Check the ESXi console before selecting **Delete & redeploy**. Type the deployment name to confirm permanent deletion of that deployment's VMs and virtual disks, including any data already written. A fresh deployment uses the saved VM choices, the current OS ISO selection and new credentials.
 

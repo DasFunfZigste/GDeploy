@@ -3,7 +3,7 @@
 Use an isolated datastore/network with disposable VMs. This checklist verifies the parts that unit tests cannot exercise without ESXi and installation media.
 
 1. Supply and verify Ubuntu 24.04 amd64 live-server media. Confirm the ESXi account/license supports API writes and complete the certificate-trust checks below.
-2. Deploy an **OS only** VM using DHCP. Observe EFI falling back from the empty disk to the installation CD. Confirm there are no keyboard prompts, Ubuntu reboots to disk, VMware Tools reports its IP, cloud-init finishes and the deployment's ISO is detached/removed.
+2. Deploy an **OS only** VM using DHCP. Observe EFI falling back from the empty disk to the installation CD. Confirm there are no keyboard prompts, Ubuntu reboots to disk, VMware Tools reports its IP, the readiness checks below pass and the deployment's ISO is detached/removed.
 3. Reveal credentials, sign in through SSH as `gdeploy`, verify sudo works, and check the recorded SSH host key. Restart GDeploy and confirm history and credentials remain available.
 4. Repeat using a reserved static IPv4 address. Confirm address/prefix, default route and DNS in the guest.
 5. Deploy Elasticsearch and Kibana as separate VMs. Confirm the same package version on both, Elasticsearch HTTPS authentication, Kibana HTTPS login and available status. Verify Kibana uses its service account token and CA validation. Restart both guests and confirm the connection recovers.
@@ -14,6 +14,16 @@ Use an isolated datastore/network with disposable VMs. This checklist verifies t
 10. Verify unauthenticated API requests are rejected, credential reveals are audited, and passwords do not appear in ordinary history, logs, browser storage or Git.
 
 Record your exact ESXi build, Ubuntu ISO checksum, Splunk version, Elastic version and any host-specific findings before expanding use.
+
+## Ubuntu readiness and cloud-init diagnostics
+
+1. Use verified Ubuntu Server 24.04 amd64 live-server media, including the reported `ubuntu-24.04.5-live-server-amd64.iso` when available. Record its actual publisher checksum. Confirm ordinary error-free `done` status still reaches OS readiness and that stderr warnings do not corrupt a valid JSON stdout response.
+2. On a guest where the installer leaves cloud-init `disabled-by-marker-file`, confirm GDeploy requires clean cloud-init diagnostics, first-boot completion evidence, installer artifacts, an installed root filesystem, successful sudo, and active `ssh` and `open-vm-tools` services before proceeding. Verify the temporary installation ISO is then detached/removed and the selected application's installation begins, or the OS-only job completes.
+3. Use disposable guests to check missing completion/installer evidence, a live-installer root filesystem, unavailable sudo, inactive required services, and actual cloud-init errors. None should be reported ready merely because SSH responds or cloud-init is disabled. Check that transient startup states can recover within the configured timeout and persistently unready guests stop with a useful error.
+4. Open **Deployment logs** after a controlled readiness failure. Confirm the recorded status and failed checks explain the stop, stdout/stderr diagnostics remain bounded, and passwords, SSH key material and other deployment secrets are absent.
+5. Upgrade an installation with an older failed readiness record and a healthy VM. Confirm the record is preserved without automatic resumption, VM recreation or status changes. Hiding it must leave the VM, credentials and logs intact; it must not claim to finish pending software or media cleanup.
+
+Local mocked-command tests do not replace these guest checks. Record actual host/ISO acceptance separately, and keep healthy existing VMs intact while testing with disposable deployments.
 
 ## Deployment history and individual VM configuration
 
