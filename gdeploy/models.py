@@ -80,7 +80,14 @@ class MediaSelection(StrictModel):
 
 class SplunkPackageSelection(StrictModel):
     package_id: str = Field(min_length=1, max_length=1024)
-    sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
+    sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
+    sha512: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{128}$")
+
+    @model_validator(mode="after")
+    def validate_publisher_checksum(self):
+        if (self.sha256 is None) == (self.sha512 is None):
+            raise ValueError("Provide one publisher checksum: SHA-512 or SHA-256.")
+        return self
 
 
 class ESXiMediaSelection(CertificateHost):

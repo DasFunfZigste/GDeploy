@@ -78,6 +78,39 @@ def test_native_server_filename_selection_persists_independently(manager, config
     assert checksum not in encrypted
 
 
+def test_sha512_server_selection_keeps_sha256_for_deployments(manager, config):
+    sha256 = write_package(config.splunk_package)
+    sha512 = hashlib.sha512(config.splunk_package.read_bytes()).hexdigest()
+    selected = manager.select(manager._server_id(config.splunk_package), sha512=sha512.upper())["selected"]
+    assert selected["sha512"] == sha512
+    assert selected["sha256"] == sha256
+    assert manager.validate_snapshot(selected) == config.splunk_package
+    assert manager.catalog()["items"][0]["sha512"] == sha512
+    reopened = SplunkPackageManager(Database(config.data_dir, config.secret_key), config)
+    assert reopened.selected() == selected
+    # Keeping metadata unchanged must not bypass the SHA-256 check used by jobs.
+    before = config.splunk_package.stat()
+    config.splunk_package.write_bytes(b"x" * before.st_size)
+    os.utime(config.splunk_package, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with pytest.raises(PackageError, match="SHA-256 does not match"):
+        reopened.validate_snapshot(selected)
+
+
+@pytest.mark.parametrize("checksums", [
+    {}, {"sha512": ""}, {"sha512": "a" * 127}, {"sha512": "z" * 128},
+    {"sha256": "a" * 64, "sha512": "b" * 128}, {"sha512": "a" * 128},
+])
+def test_invalid_publisher_sha512_never_changes_selection_or_leaves_uploads(manager, checksums):
+    before = upload(manager)["selected"]
+    existing = set(manager.upload_dir.iterdir())
+    with pytest.raises(PackageError, match="publisher"):
+        asyncio.run(manager.upload(StreamRequest([package_bytes()]), "splunk.tgz", **checksums))
+    with pytest.raises(PackageError, match="publisher"):
+        manager.select(before["id"], **checksums)
+    assert manager.selected() == before
+    assert set(manager.upload_dir.iterdir()) == existing
+
+
 def test_env_fallback_and_saved_selection_are_independent(manager, config):
     checksum = write_package(config.splunk_package)
     manager = SplunkPackageManager(manager.db, replace(config, splunk_sha256=checksum))
@@ -165,8 +198,11 @@ def test_unchanged_metadata_does_not_bypass_digest_validation(manager):
         manager.validate_snapshot(selected)
 
 
-def test_digest_and_archive_inspection_use_same_open_file(manager, config, monkeypatch):
+@pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
+def test_digest_and_archive_inspection_use_same_open_file(manager, config, monkeypatch, algorithm):
     checksum = write_package(config.splunk_package)
+    if algorithm == "sha512":
+        checksum = hashlib.sha512(config.splunk_package.read_bytes()).hexdigest()
     from gdeploy.guest import _validate_splunk_archive
 
     def replace_path_then_validate(path, *, fileobj=None):
@@ -178,7 +214,7 @@ def test_digest_and_archive_inspection_use_same_open_file(manager, config, monke
 
     monkeypatch.setattr("gdeploy.packages._validate_splunk_archive", replace_path_then_validate)
     with pytest.raises(PackageError, match="changed during verification"):
-        manager.select(manager._server_id(config.splunk_package), checksum)
+        manager.select(manager._server_id(config.splunk_package), **{algorithm: checksum})
 
 
 def test_symlinks_and_unlisted_filesystem_paths_are_rejected(manager, config, tmp_path):
@@ -208,14 +244,20 @@ def test_filesystem_symlink_swap_after_selection_is_rejected(manager, tmp_path):
         manager.validate_snapshot(selected)
 
 
-def test_chunked_upload_retains_native_name_and_survives_restart(manager, config):
+@pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
+def test_chunked_upload_retains_native_name_and_survives_restart(manager, config, algorithm):
     body = package_bytes()
     checksum = hashlib.sha256(body).hexdigest()
-    result = asyncio.run(manager.upload(StreamRequest([body[:30], body[30:]]), "splunk-10.0.0-linux-x86_64.tgz", checksum))
+    publisher_checksum = hashlib.new(algorithm, body).hexdigest()
+    result = asyncio.run(manager.upload(
+        StreamRequest([body[:30], body[30:]]), "splunk-10.0.0-linux-x86_64.tgz", **{algorithm: publisher_checksum}
+    ))
     assert result["ready"] and result["has_saved_selection"]
     assert result["selected"]["name"] == "splunk-10.0.0-linux-x86_64.tgz"
     assert result["selected"]["source"] == "upload"
     assert result["items"][0]["sha256"] == checksum
+    assert result["selected"][algorithm] == publisher_checksum
+    assert result["items"][0][algorithm] == publisher_checksum
     path = manager.validate_snapshot(result["selected"])
     assert path.parent == config.data_dir / "packages"
     assert path.name != result["selected"]["name"]

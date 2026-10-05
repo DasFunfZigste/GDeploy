@@ -27,6 +27,7 @@ ENDPOINTS = [
     ("DELETE", "/api/settings/splunk-package"),
     ("DELETE", "/api/settings/splunk-package/upload_" + "0" * 32),
     ("POST", "/api/settings/splunk-package/upload?filename=splunk.tgz&sha256=" + "0" * 64),
+    ("POST", "/api/settings/splunk-package/upload?filename=splunk.tgz&sha512=" + "0" * 128),
 ]
 
 
@@ -53,32 +54,38 @@ def test_package_endpoints_require_changed_initial_credentials(signed_in, method
     assert response.json()["detail"]["code"] == "credentials_change_required"
 
 
-def test_server_picker_updates_readiness_without_touching_os_media(signed_in, config):
+@pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
+def test_server_picker_updates_readiness_without_touching_os_media(signed_in, config, algorithm):
     body = package_body()
     path = config.splunk_package.with_name("splunk-10.0.0-build-linux-amd64.tgz")
     path.write_bytes(body)
     catalog = signed_in.get("/api/settings/splunk-package").json()
     assert not signed_in.get("/api/settings").json()["splunk_configured"]
     response = signed_in.put("/api/settings/splunk-package", json={
-        "package_id": catalog["items"][0]["id"], "sha256": hashlib.sha256(body).hexdigest(),
+        "package_id": catalog["items"][0]["id"], algorithm: hashlib.new(algorithm, body).hexdigest().upper(),
     })
     assert response.status_code == 200
     assert response.json()["ready"]
     assert response.json()["selected"]["name"] == path.name
+    assert response.json()["selected"][algorithm] == hashlib.new(algorithm, body).hexdigest()
+    assert response.json()["selected"]["sha256"] == hashlib.sha256(body).hexdigest()
     assert signed_in.get("/api/settings").json()["splunk_configured"]
     assert signed_in.app.state.db.media_settings() is None
     assert not signed_in.get("/api/settings").json()["iso_configured"]
 
 
-def test_uploaded_package_is_ready_after_restart_and_can_be_managed(signed_in, config):
+@pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
+def test_uploaded_package_is_ready_after_restart_and_can_be_managed(signed_in, config, algorithm):
     body = package_body()
     response = signed_in.post("/api/settings/splunk-package/upload", params={
-        "filename": "splunk-10.0.0-build-linux-amd64.tgz", "sha256": hashlib.sha256(body).hexdigest(),
+        "filename": "splunk-10.0.0-build-linux-amd64.tgz", algorithm: hashlib.new(algorithm, body).hexdigest(),
     }, content=body, headers={"Content-Type": "application/octet-stream"})
     assert response.status_code == 200
     original = response.json()
     package_id = original["selected"]["id"]
     assert original["ready"]
+    assert original["selected"][algorithm] == hashlib.new(algorithm, body).hexdigest()
+    assert original["selected"]["sha256"] == hashlib.sha256(body).hexdigest()
     assert not original["items"][0]["can_delete"]
     with TestClient(create_app(config, start_worker=False)) as restarted:
         login = restarted.post("/api/login", json={"username": "admin", "password": "test-admin-passphrase"})
@@ -94,14 +101,30 @@ def test_uploaded_package_is_ready_after_restart_and_can_be_managed(signed_in, c
         assert removed.json()["items"] == []
 
 
-def test_wrong_checksum_returns_actionable_error_without_saving_upload(signed_in, config):
+@pytest.mark.parametrize("algorithm,length", [("sha256", 64), ("sha512", 128)])
+def test_wrong_checksum_returns_actionable_error_without_saving_upload(signed_in, config, algorithm, length):
     response = signed_in.post("/api/settings/splunk-package/upload", params={
-        "filename": "splunk.tgz", "sha256": "0" * 64,
+        "filename": "splunk.tgz", algorithm: "0" * length,
     }, content=package_body(), headers={"Content-Type": "application/octet-stream"})
     assert response.status_code == 400
     assert "publisher checksum" in response.json()["detail"]
     assert signed_in.app.state.db.splunk_package_settings() is None
     assert list((config.data_dir / "packages").iterdir()) == []
+
+
+@pytest.mark.parametrize("checksums", [
+    {}, {"sha512": ""}, {"sha512": "a" * 127}, {"sha512": "g" * 128},
+    {"sha256": "a" * 64, "sha512": "b" * 128},
+])
+def test_package_api_rejects_missing_malformed_and_ambiguous_checksums(signed_in, config, checksums):
+    response = signed_in.post(
+        "/api/settings/splunk-package/upload", params={"filename": "splunk.tgz", **checksums}, content=package_body(),
+    )
+    assert response.status_code == 400
+    response = signed_in.put("/api/settings/splunk-package", json={"package_id": "unused", **checksums})
+    assert response.status_code == 422
+    assert signed_in.app.state.db.splunk_package_settings() is None
+    assert not (config.data_dir / "packages").exists()
 
 
 def test_picker_never_accepts_filesystem_path(signed_in):

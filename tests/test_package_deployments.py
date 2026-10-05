@@ -128,16 +128,23 @@ def test_other_roles_do_not_require_a_splunk_package(package_job):
     assert all("Splunk" not in check["name"] for check in result["checks"])
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_queued_package_reaches_install_even_after_setup_changes(package_job, legacy):
+@pytest.mark.parametrize("mode", ["sha256", "sha512", "legacy"])
+def test_queued_package_reaches_install_even_after_setup_changes(package_job, mode):
     service, db, spec, config, calls = package_job
+    legacy = mode == "legacy"
     first = config.splunk_package if legacy else config.splunk_package.with_name("splunk-10.1-linux-amd64.tgz")
     first_checksum = config.splunk_sha256 if legacy else package_file(first)
-    if not legacy:
+    if mode == "sha512":
+        publisher_checksum = hashlib.sha512(first.read_bytes()).hexdigest()
+        service.packages.select(service.packages._server_id(first), sha512=publisher_checksum)
+    elif not legacy:
         choose(service, first, first_checksum)
     item = service.enqueue(spec)
     secret_data = db.get(item["id"], private=True)["secrets"]
     assert secret_data["splunk_package"]["path"] == str(first)
+    assert secret_data["splunk_package"]["sha256"] == first_checksum
+    if mode == "sha512":
+        assert secret_data["splunk_package"]["sha512"] == publisher_checksum
     if legacy:
         secret_data.pop("splunk_package")
         db.update(item["id"], secrets=secret_data)

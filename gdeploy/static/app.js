@@ -382,13 +382,13 @@
     const index = bytes > 0 ? Math.min(3, Math.floor(Math.log(bytes) / Math.log(1024))) : 0;
     return `${new Intl.NumberFormat(undefined, {maximumFractionDigits: index ? 1 : 0}).format(bytes / (1024 ** index))} ${units[index]}`;
   }
-  function uploadMedia(file, sha256, onProgress, endpoint = '/api/settings/media/upload') {
+  function uploadMedia(file, digest, onProgress, endpoint = '/api/settings/media/upload', algorithm = 'sha256') {
     return new Promise((resolve, reject) => {
       if (!state.session || setupRequired()) { reject(new Error('Sign in with your configured administrator account before uploading media.')); return; }
       const requestSession = state.session;
       const xhr = new XMLHttpRequest();
       const finish = () => { if (state.mediaUpload === xhr) state.mediaUpload = null; };
-      xhr.open('POST', `${endpoint}?filename=${encodeURIComponent(file.name)}&sha256=${encodeURIComponent(sha256)}`);
+      xhr.open('POST', `${endpoint}?filename=${encodeURIComponent(file.name)}&${algorithm}=${encodeURIComponent(digest)}`);
       xhr.withCredentials = true;
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       xhr.setRequestHeader('Accept', 'application/json');
@@ -701,6 +701,7 @@
     const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
     const endpoint = '/api/settings/splunk-package';
     const sourceLabel = item => item.source === 'upload' ? 'Uploaded' : 'GDeploy server';
+    const savedChecksum = item => item?.sha512 || item?.sha256 || '';
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
     const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
     const badge = el('span', {class: 'status'}, 'Loading…');
@@ -711,10 +712,10 @@
     const serverSelect = el('select', {id: 'splunk-package-server', name: 'package_id', required: true, 'aria-describedby': 'splunk-package-server-help'});
     const fileInput = el('input', {id: 'splunk-package-file', name: 'package_file', type: 'file', accept: '.tgz', 'aria-describedby': 'splunk-package-file-help'});
     const fileHelp = el('small', {id: 'splunk-package-file-help'}, 'Upload the Linux x86_64 .tgz package from your computer.');
-    const checksum = el('input', {id: 'splunk-package-sha256', name: 'sha256', type: 'text', required: true, minlength: 64, maxlength: 64, pattern: '[a-fA-F0-9]{64}', placeholder: 'Paste the publisher’s 64-character SHA-256 checksum', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', class: 'mono', 'aria-describedby': 'splunk-package-sha256-help'});
+    const checksum = el('input', {id: 'splunk-package-sha256', name: 'checksum', type: 'text', required: true, minlength: 64, maxlength: 128, pattern: '[a-fA-F0-9]{64}([a-fA-F0-9]{64})?', placeholder: 'Paste the 128-character SHA-512 or 64-character SHA-256 checksum', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', class: 'mono', 'aria-describedby': 'splunk-package-sha256-help'});
     const currentItem = () => catalog?.items?.find(item => item.id === serverSelect.value);
     const sourceInput = value => el('input', {type: 'radio', name: 'splunk-package-source', value, checked: mode === value, onChange: () => {
-      mode = value; checksum.value = value === 'server' ? currentItem()?.sha256 || '' : '';
+      mode = value; checksum.value = value === 'server' ? savedChecksum(currentItem()) : '';
       inlineError(errorBox, ''); successBox.hidden = true; syncControls();
     }});
     const uploadRadio = sourceInput('upload'), serverRadio = sourceInput('server');
@@ -743,12 +744,12 @@
       const previousId = serverSelect.value;
       serverSelect.replaceChildren(el('option', {value: ''}, next.items.length ? 'Choose a Splunk package' : 'No .tgz packages found'), ...next.items.filter(item => item.available !== false).map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${sourceLabel(item)}`)));
       serverSelect.value = next.selected?.id || (next.items.some(item => item.id === previousId && item.available !== false) ? previousId : '');
-      if (mode === 'server') checksum.value = currentItem()?.sha256 || '';
+      if (mode === 'server') checksum.value = savedChecksum(currentItem());
       fileHelp.textContent = `Upload a .tgz file up to ${formatBytes(next.max_upload_bytes)}. Uploads are kept with GDeploy’s persistent data.`;
       badge.className = next.ready ? 'status status-completed' : 'status';
       badge.textContent = next.ready ? 'Ready for preflight' : 'Package required for Splunk';
       if (next.selected) {
-        selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('span', {class: 'eyebrow'}, 'SAVED SPLUNK PACKAGE'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${sourceLabel(next.selected)}`))), el('details', {class: 'media-integrity'}, el('summary', {}, 'Saved SHA-256 checksum'), el('code', {class: 'certificate-fingerprint'}, next.selected.sha256 || 'Not configured')));
+        selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('span', {class: 'eyebrow'}, 'SAVED SPLUNK PACKAGE'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${sourceLabel(next.selected)}`))), el('details', {class: 'media-integrity'}, el('summary', {}, `Saved ${next.selected.sha512 ? 'SHA-512' : 'SHA-256'} checksum`), el('code', {class: 'certificate-fingerprint'}, savedChecksum(next.selected) || 'Not configured')));
         if (!next.ready) selectedSummary.append(el('p', {class: 'media-help'}, 'The selected package is unavailable or needs attention. Choose and verify a package below before deploying Splunk.'));
       } else selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('strong', {}, 'Add the Splunk installer'), el('p', {}, 'Required only when your deployment includes Splunk.'))));
       if (next.has_saved_selection) selectedSummary.append(el('div', {class: 'media-clear-selection'}, clearSelection, el('p', {class: 'media-help'}, 'Clearing the selection keeps the file. Queued and running deployments keep their package; a server-configured package may become the default.')));
@@ -827,24 +828,25 @@
       setBusy(submit, uploading ? 'Uploading package…' : 'Verifying package…'); syncControls();
       try {
         const digest = checksum.value.trim().toLowerCase();
+        const algorithm = digest.length === 128 ? 'sha512' : 'sha256';
         const next = uploading ? await uploadMedia(file, digest, (loaded, total) => {
           if (!currentView()) return;
           if (loaded >= total) { progress.removeAttribute('value'); cancel.disabled = true; progressText.textContent = 'Upload complete. Verifying checksum and Splunk package…'; setBusy(submit, 'Verifying package…'); }
           else { progress.value = Math.round(loaded / total * 100); progressText.textContent = `${formatBytes(loaded)} of ${formatBytes(total)} uploaded`; }
-        }, `${endpoint}/upload`) : await api(endpoint, {method: 'PUT', body: {package_id: serverSelect.value, sha256: digest}});
+        }, `${endpoint}/upload`, algorithm) : await api(endpoint, {method: 'PUT', body: {package_id: serverSelect.value, [algorithm]: digest}});
         if (!currentView()) return;
         mode = 'server'; fileInput.value = ''; renderCatalog(next);
         successBox.textContent = `${next.selected?.name || 'Splunk package'} verified and saved. New Splunk deployments will use this package.`; successBox.hidden = false;
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
       finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
     }}, el('div', {class: 'form-body'},
-      el('div', {class: 'package-download-guide'}, el('p', {}, 'Download the ', el('strong', {}, 'Splunk Enterprise Linux x86_64 .tgz'), ' installer and its SHA-256 checksum from ', el('a', {href: 'https://www.splunk.com/en_us/download/splunk-enterprise.html', target: '_blank', rel: 'noopener noreferrer'}, 'Splunk’s download page', icon('link')), '. Use a package covered by your Splunk license or trial.'), el('p', {class: 'media-help'}, 'GDeploy does not bundle or automatically download Splunk. Upload the package below or select one on the GDeploy server. License acceptance is required when you deploy.')),
+      el('div', {class: 'package-download-guide'}, el('p', {}, 'Download the ', el('strong', {}, 'Splunk Enterprise Linux x86_64 .tgz'), ' installer and its SHA-512 checksum from ', el('a', {href: 'https://www.splunk.com/en_us/download/splunk-enterprise.html', target: '_blank', rel: 'noopener noreferrer'}, 'Splunk’s download page', icon('link')), '. Use a package covered by your Splunk license or trial.'), el('p', {class: 'media-help'}, 'GDeploy does not bundle or automatically download Splunk. Upload the package below or select one on the GDeploy server. License acceptance is required when you deploy.')),
       selectedSummary, errorBox, successBox,
       el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose a package source'), el('label', {}, uploadRadio, 'Upload a package'), el('label', {}, serverRadio, 'GDeploy server')),
-      uploadFields, serverFields, field('Publisher SHA-256 checksum', checksum, el('span', {id: 'splunk-package-sha256-help'}, 'Copy the checksum for this exact file from Splunk’s download page. GDeploy checks the archive, architecture, and checksum before saving.')), progressBox),
+      uploadFields, serverFields, field('Publisher checksum (SHA-512 or SHA-256)', checksum, el('span', {id: 'splunk-package-sha256-help'}, 'Paste the 128-character hash from Splunk’s .sha512 checksum download for this exact installer. A 64-character SHA-256 checksum is also accepted. GDeploy verifies it before saving.')), progressBox),
       el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), submit));
     const panel = el('section', {class: 'surface', id: 'splunk-package-panel', 'aria-labelledby': 'splunk-package-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'splunk-package-title'}, 'Splunk Enterprise'), el('p', {}, 'Add and manage the installer used for Splunk deployments.')), badge, refresh), form, el('section', {class: 'media-storage'}, el('div', {class: 'media-storage-body'}, packageList)));
-    serverSelect.addEventListener('change', () => { checksum.value = currentItem()?.sha256 || ''; successBox.hidden = true; syncControls(); });
+    serverSelect.addEventListener('change', () => { checksum.value = savedChecksum(currentItem()); successBox.hidden = true; syncControls(); });
     fileInput.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
     checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
     return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};

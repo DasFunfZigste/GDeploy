@@ -20,7 +20,6 @@ MAX_UPLOAD_BYTES = 4 * 1024**3
 FREE_SPACE_RESERVE = 64 * 1024**2
 CHUNK_BYTES = 1024**2
 PROFILE = "splunk-enterprise-linux-x86_64"
-CHECKSUM = re.compile(r"[0-9a-f]{64}\Z")
 logger = logging.getLogger(__name__)
 
 
@@ -30,11 +29,20 @@ class PackageError(Exception):
         self.status_code = status_code
 
 
-def _checksum(value):
+def _checksum(value, algorithm="sha256"):
     value = value.strip().lower() if isinstance(value, str) else ""
-    if not CHECKSUM.fullmatch(value):
-        raise PackageError("Enter Splunk's complete publisher SHA-256 checksum (64 hexadecimal characters).")
+    length = 128 if algorithm == "sha512" else 64
+    if not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
+        label = "SHA-512" if algorithm == "sha512" else "SHA-256"
+        raise PackageError(f"Enter Splunk's complete publisher {label} checksum ({length} hexadecimal characters).")
     return value
+
+
+def _publisher_checksum(sha256, sha512):
+    if (sha256 is None) == (sha512 is None):
+        raise PackageError("Provide one publisher checksum: SHA-512 (128 hexadecimal characters) or SHA-256 (64).")
+    algorithm = "sha512" if sha512 is not None else "sha256"
+    return algorithm, _checksum(sha512 if sha512 is not None else sha256, algorithm)
 
 
 def _filename(value):
@@ -90,7 +98,7 @@ class SplunkPackageManager:
     def _server_id(path):
         return "server_" + hashlib.sha256(str(path).encode()).hexdigest()
 
-    def _snapshot(self, path, *, name=None, source="server", sha256="", package_id=None):
+    def _snapshot(self, path, *, name=None, source="server", sha256="", sha512="", package_id=None):
         info = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or path.is_symlink():
             raise PackageError("The selected Splunk package must be a regular file, not a symbolic link.")
@@ -98,6 +106,7 @@ class SplunkPackageManager:
             "id": package_id or self._server_id(path),
             "path": str(path), "name": name or path.name, "source": source,
             "sha256": sha256, "profile": PROFILE,
+            **({"sha512": sha512} if sha512 else {}),
             "size_bytes": info.st_size, "mtime_ns": info.st_mtime_ns,
         }
 
@@ -129,7 +138,7 @@ class SplunkPackageManager:
         return path
 
     @staticmethod
-    def _verify_package(path, expected):
+    def _verify_package(path, expected, *, algorithm="sha256"):
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(descriptor, "rb") as handle:
@@ -138,12 +147,19 @@ class SplunkPackageManager:
                     raise PackageError("The selected Splunk package must be a regular file.")
                 if before.st_size <= 0 or before.st_size > MAX_UPLOAD_BYTES:
                     raise PackageError("Choose a nonempty Splunk package no larger than 4 GiB.", 413)
-                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+                # Compute the publisher hash and the deployment SHA-256 from the
+                # same bytes without loading multi-gigabyte archives into memory.
+                hashers = {name: hashlib.new(name) for name in {"sha256", algorithm}}
+                while chunk := handle.read(CHUNK_BYTES):
+                    for hasher in hashers.values():
+                        hasher.update(chunk)
+                digests = {name: hasher.hexdigest() for name, hasher in hashers.items()}
                 after = os.fstat(handle.fileno())
                 if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                     raise PackageError("The Splunk package changed during verification. Select it again.")
-                if not hmac.compare_digest(digest, expected):
-                    raise PackageError("Splunk package SHA-256 does not match the publisher checksum. Download it again or check the checksum.")
+                if not hmac.compare_digest(digests[algorithm], expected):
+                    label = "SHA-512" if algorithm == "sha512" else "SHA-256"
+                    raise PackageError(f"Splunk package {label} does not match the publisher checksum. Download it again or check the checksum.")
                 handle.seek(0)
                 _validate_splunk_archive(path, fileobj=handle)
                 validated = os.fstat(handle.fileno())
@@ -154,6 +170,7 @@ class SplunkPackageManager:
                 after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
             ):
                 raise PackageError("The Splunk package changed during verification. Select it again.")
+            return digests
         except GuestError as exc:
             raise PackageError(str(exc)) from exc
         except EOFError as exc:
@@ -224,6 +241,7 @@ class SplunkPackageManager:
             items.append({
                 **{key: item[key] for key in ("id", "name", "size_bytes", "source")},
                 "sha256": selected.get("sha256", "") if chosen else item["sha256"],
+                "sha512": selected.get("sha512", "") if chosen else item.get("sha512", ""),
                 "selected": chosen, "available": available,
                 "can_delete": reason is None, "delete_reason": reason,
             })
@@ -232,15 +250,15 @@ class SplunkPackageManager:
             "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": PROFILE, "has_saved_selection": saved is not None,
         }
 
-    def select(self, package_id, sha256):
-        checksum = _checksum(sha256)
+    def select(self, package_id, sha256=None, *, sha512=None):
+        algorithm, checksum = _publisher_checksum(sha256, sha512)
         candidate = next((item for item in self._files() if item["id"] == package_id), None)
         if candidate is None:
             raise PackageError("That Splunk package is no longer available. Refresh and select it again.", 404)
-        candidate["sha256"] = checksum
-        path = self.validate_snapshot(candidate)
+        path = self._path(candidate)
+        digests = self._verify_package(path, checksum, algorithm=algorithm)
         candidate = self._snapshot(
-            path, name=candidate["name"], source=candidate["source"], sha256=checksum, package_id=candidate["id"]
+            path, name=candidate["name"], source=candidate["source"], package_id=candidate["id"], **digests
         )
         self.db.set_splunk_package_settings(candidate)
         return self.catalog()
@@ -284,9 +302,9 @@ class SplunkPackageManager:
         if shutil.disk_usage(self.upload_dir).free < (length or 0) + FREE_SPACE_RESERVE:
             raise PackageError("Not enough disk space for this Splunk package. Free space in the GDeploy data volume.", 507)
 
-    async def upload(self, request, filename, sha256):
+    async def upload(self, request, filename, sha256=None, *, sha512=None):
         filename = _filename(filename)
-        checksum = _checksum(sha256)
+        algorithm, checksum = _publisher_checksum(sha256, sha512)
         raw_length = request.headers.get("content-length")
         try:
             length = int(raw_length) if raw_length is not None else None
@@ -312,7 +330,7 @@ class SplunkPackageManager:
         def finish(handle):
             handle.flush()
             os.fsync(handle.fileno())
-            self._verify_package(partial, checksum)
+            return self._verify_package(partial, checksum, algorithm=algorithm)
 
         try:
             descriptor = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -328,13 +346,13 @@ class SplunkPackageManager:
                         await run_in_threadpool(write_chunk, handle, chunk[offset:offset + CHUNK_BYTES])
                 if length is not None and count != length:
                     raise PackageError("The upload was incomplete. Try uploading the Splunk package again.")
-                await run_in_threadpool(finish, handle)
+                digests = await run_in_threadpool(finish, handle)
             # Linking exclusively prevents UUID collisions from replacing existing packages.
             os.link(partial, final, follow_symlinks=False)
             owns_final = True
             partial.unlink()
             owns_partial = False
-            snapshot = self._snapshot(final, name=filename, source="upload", sha256=checksum, package_id="upload_" + token)
+            snapshot = self._snapshot(final, name=filename, source="upload", package_id="upload_" + token, **digests)
             self.db.set_splunk_package_settings(snapshot, uploaded=True)
             committed = True
             return self.catalog()

@@ -254,15 +254,18 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.put("/api/settings/splunk-package")
     def select_splunk_package(payload: SplunkPackageSelection, request: Request, current=Depends(authenticated)):
-        return request.app.state.packages.select(payload.package_id, payload.sha256)
+        return request.app.state.packages.select(payload.package_id, payload.sha256, sha512=payload.sha512)
 
     @app.delete("/api/settings/splunk-package")
     def clear_splunk_package(request: Request, current=Depends(authenticated)):
         return request.app.state.packages.clear_selection()
 
     @app.post("/api/settings/splunk-package/upload")
-    async def upload_splunk_package(request: Request, filename: str, sha256: str, current=Depends(authenticated)):
-        return await request.app.state.packages.upload(request, filename, sha256)
+    async def upload_splunk_package(
+        request: Request, filename: str, sha256: str | None = None, sha512: str | None = None,
+        current=Depends(authenticated),
+    ):
+        return await request.app.state.packages.upload(request, filename, sha256, sha512=sha512)
 
     @app.delete("/api/settings/splunk-package/{package_id}")
     def delete_splunk_package(package_id: str, request: Request, current=Depends(authenticated)):

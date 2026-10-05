@@ -127,7 +127,7 @@ class DeploymentService:
             package = self.packages.selected() if splunk_package is None else splunk_package
             try:
                 if not package:
-                    raise PackageError("Upload or select a Splunk Enterprise Linux x86_64 .tgz and verify its publisher SHA-256.")
+                    raise PackageError("Upload or select a Splunk Enterprise Linux x86_64 .tgz and verify its publisher SHA-512 or SHA-256 checksum.")
                 self.packages.validate_snapshot(package)
                 check("Splunk Linux x86_64 package", True, f"{package['name']} is available; SHA-256 and archive checks passed.")
             except (PackageError, OSError) as exc:

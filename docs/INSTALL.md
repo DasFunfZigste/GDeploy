@@ -1,6 +1,6 @@
 # Install GDeploy
 
-This guide installs **GDeploy 0.8.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.8.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
+This guide installs **GDeploy 0.8.1** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.8.1` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -29,7 +29,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO/package, uploaded packages, uploaded/imported ISO copies and deployment history. Refresh the browser and check **v0.8.0** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
+Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO/package, uploaded packages, uploaded/imported ISO copies and deployment history. Refresh the browser and check **v0.8.1** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
 
 ## Optional: restrict the bind address or change the port
 
@@ -163,7 +163,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.8.0
+GDEPLOY_VERSION=0.8.1
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -189,17 +189,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.8.0
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.8.1
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.8.0`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.8.1`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.8.0
+GDEPLOY_VERSION=0.8.1
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -220,7 +220,7 @@ On the Ubuntu server, working in `~/gdeploy`:
 
 1. Obtain the supported **Ubuntu Server 24.04 LTS amd64 live-server ISO** from [Ubuntu's official release directory](https://releases.ubuntu.com/24.04/), or use your existing copy on an ESXi datastore. Verify the publisher checksum using Ubuntu's [verification instructions](https://ubuntu.com/tutorials/how-to-verify-ubuntu). Keep the verified SHA-256 value for Setup.
 2. Choose an existing ESXi ISO through Setup's datastore browser, upload it from your computer after sign-in, or copy it into the GDeploy server's **`media/`** directory for the server picker. An `.iso` filename such as `os.iso` is suitable; no specific name is required for the picker.
-3. To deploy Splunk, obtain your licensed **Splunk Enterprise Linux x86_64 `.tgz`** from [Splunk](https://www.splunk.com/en_us/download/splunk-enterprise.html) and its verified publisher SHA-256. Upload it through **Setup → Software packages** after sign-in, or copy it to **`media/`** for the server picker. Keep its vendor filename if desired; renaming it to `splunk.tgz` is unnecessary. GDeploy does not download the package for you or provide a license.
+3. To deploy Splunk, obtain your licensed **Splunk Enterprise Linux x86_64 `.tgz`** from [Splunk](https://www.splunk.com/en_us/download/splunk-enterprise.html) and its publisher SHA-512 checksum. Splunk publishes that value at the package's official download URL with `.sha512` appended; see [Configure the Splunk package](#configure-the-splunk-package) for the steps. An existing verified publisher SHA-256 is also supported. Upload the package through **Setup → Software packages** after sign-in, or copy it to **`media/`** for the server picker. Keep its vendor filename if desired; renaming it to `splunk.tgz` is unnecessary. GDeploy does not download the package for you or provide a license.
 
 For example, replace these source paths with the files you downloaded:
 
@@ -256,7 +256,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.8.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.8.1 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -377,14 +377,16 @@ If available space is still insufficient, arrange more capacity on the filesyste
 Open **Setup → Software packages**, or `http://SERVER_LAN_IP:8000/#settings/packages`. Under **Splunk Enterprise**:
 
 1. Choose **Upload a package** to select the licensed Linux x86_64 `.tgz` on your computer, or **GDeploy server** to select an existing `.tgz` from the read-only server media directory. Vendor filenames are supported.
-2. Enter the publisher's verified **SHA-256 checksum**. A hash calculated from an unverified download alone does not establish its source.
+2. Paste the publisher's checksum into **Publisher checksum (SHA-512 or SHA-256)**. Use Splunk's **SHA-512** value (128 hexadecimal characters) or an existing verified **SHA-256** value (64 hexadecimal characters). GDeploy recognizes the algorithm from the length.
 3. Select **Upload & use package** or **Use selected package**. GDeploy verifies the bytes and checks the archive's paths and expected Splunk Enterprise x86_64 binaries before saving. A rejected checksum or archive keeps the previous selection. The package must be compatible with the supported Ubuntu guest; archive validation does not replace testing that particular Splunk version.
+
+To get Splunk's publisher checksum, copy the exact direct download URL for your chosen `.tgz` from Splunk's official download page. Open that URL in a browser with **`.sha512` appended**: a URL ending in `.tgz` becomes `.tgz.sha512`. Copy only the **128 hexadecimal characters** from the checksum file into GDeploy, without the filename or the rest of the line. These are [Splunk's documented checksum instructions](https://help.splunk.com/en/splunk-enterprise/administer/install-and-upgrade/10.4/secure-your-splunk-enterprise-installation/install-splunk-enterprise-securely). You do not need to calculate a checksum yourself: GDeploy hashes the uploaded or selected package and compares it with the publisher's value. A hash calculated from an unverified download alone would not verify its source.
 
 Uploads accept packages up to **4 GiB**, need free space on GDeploy's data filesystem and persist under `/data/packages`. No `.env` edit, container restart or package rename is needed. Include uploaded packages in complete data-volume backups; back up server-mounted packages separately. GDeploy does not bundle or automatically download Splunk, supply a license, or bypass the license acceptance required in each Splunk deployment. Elasticsearch and Kibana continue to use the Elastic package repository.
 
 If preflight reports a missing Splunk package, select **Configure Splunk package** in the deployment wizard, finish this Setup step, then select **Return to deployment**. The open browser retains your deployment draft, including each VM's resource and network choices. Rerun preflight before deploying. The draft is not a saved deployment profile; keep the browser page open while fixing the configuration.
 
-Each new Splunk job captures its package path and checksum when queued. Later Setup changes apply to future jobs, and the selected file must remain available and unchanged until the original job finishes. After transfer, the guest verifies the package against that checksum before package-manager or extraction work. New **Delete & redeploy** jobs use the current package selection. Jobs created before v0.8.0 keep their original environment-configured package behavior rather than adopting a new UI default.
+After validating the publisher's checksum, GDeploy computes an internal SHA-256 for the package. Each new Splunk job captures its package path and that SHA-256 when queued. Later Setup changes apply to future jobs, and the selected file must remain available and unchanged until the original job finishes. After transfer, the guest verifies the package against the queued SHA-256 before package-manager or extraction work. New **Delete & redeploy** jobs use the current package selection. Jobs created before v0.8.0 keep their original environment-configured package behavior rather than adopting a new UI default.
 
 To manage uploaded packages, use **Clear saved selection** or choose another package before deleting an unused upload, then confirm **Delete package**. Clearing removes only the saved default; it does not delete a file. Uploads referenced by queued, running or cleaning jobs remain protected even after clearing. Deletion removes only the eligible uploaded copy; it cannot delete server-mounted files, change a VM or uninstall Splunk already running on a VM. Restore a deleted copy from backup or upload it again if needed.
 
@@ -395,7 +397,7 @@ GDEPLOY_SPLUNK_PACKAGE=/media/splunk.tgz
 GDEPLOY_SPLUNK_SHA256=YOUR_PUBLISHER_VERIFIED_SHA256
 ```
 
-The compatible default path is `/media/splunk.tgz`; an explicit environment path can select another filename. The server picker browses the directory containing that configured path, normally `/media`. Supply a real verified 64-character SHA-256. If maintaining these legacy settings, preserve existing `.env`/`docker.env` contents and recreate the container to apply environment changes. A saved Setup choice takes precedence; **Clear saved selection** restores the fallback. Without a valid saved choice or fallback, preflight blocks Splunk deployment.
+The compatible default path is `/media/splunk.tgz`; an explicit environment path can select another filename. The server picker browses the directory containing that configured path, normally `/media`. The legacy `GDEPLOY_SPLUNK_SHA256` variable still requires a verified 64-character SHA-256; use **Setup → Software packages** for Splunk's publisher SHA-512. If maintaining these legacy settings, preserve existing `.env`/`docker.env` contents and recreate the container to apply environment changes. A saved Setup choice takes precedence; **Clear saved selection** restores the fallback. Without a valid saved choice or fallback, preflight blocks Splunk deployment.
 
 ### Deploy your VMs
 
@@ -474,7 +476,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the source-update commands near the start of this guide, keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from history** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.8.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.8.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
@@ -500,7 +502,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.8.0
+  ghcr.io/dasfunfzigste/gdeploy:0.8.1
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -518,7 +520,7 @@ For a manually configured installation, refresh `docker.env` from its existing c
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.8.0 \
+  ghcr.io/dasfunfzigste/gdeploy:0.8.1 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 
@@ -551,8 +553,8 @@ Common startup issues:
 | ESXi datastore source is absent or cannot load | Check the app footer shows v0.4.0 or later, save and test the ESXi connection, and confirm certificate trust, `Datastore.Browse` and file download access. Refresh the listing after changing hosts. |
 | ESXi ISO import fails | Check the selected file still exists, its publisher checksum matches, its size is at most 16 GiB, and the GDeploy data volume has room for the copy. Review the displayed TLS, permission or transfer error before retrying. The original datastore file and previous saved selection remain intact. |
 | Media verification or preflight fails | Check the selected ISO in Setup, its publisher checksum, available disk space and UID 10001's read access to server files. Keep media used by queued/running jobs present and unchanged. |
-| Splunk preflight reports a missing package such as `/media/splunk.tgz` | Open **Setup → Software packages** or follow **Configure Splunk package** from preflight. Upload or select your licensed Linux x86_64 `.tgz` with its publisher SHA-256; vendor filenames are supported. Use **Return to deployment** and rerun preflight. UI selection needs no environment edit or restart. |
-| Splunk package upload or verification fails | Check the package is at most 4 GiB, free space is sufficient, the publisher SHA-256 matches, and the archive is Splunk Enterprise for Linux x86_64. Review the displayed archive error; a `.tgz` extension alone does not establish compatibility. The previous selection is retained. |
+| Splunk preflight reports a missing package such as `/media/splunk.tgz` | Open **Setup → Software packages** or follow **Configure Splunk package** from preflight. Upload or select your licensed Linux x86_64 `.tgz` with its publisher SHA-512 or verified SHA-256; vendor filenames are supported. Use **Return to deployment** and rerun preflight. UI selection needs no environment edit or restart. |
+| Splunk package upload or verification fails | Check the package is at most 4 GiB, free space is sufficient, the publisher checksum matches, and the archive is Splunk Enterprise for Linux x86_64. Enter only the 128-character SHA-512 or 64-character SHA-256, without the filename from the checksum file. Use v0.8.1 or later for Splunk's `.sha512` value. Review the displayed archive error; a `.tgz` extension alone does not establish compatibility. The previous selection is retained. |
 | A saved Splunk package cannot be deleted | Clear its saved selection or choose another package. Queued, running or cleaning jobs retain deletion protection for their own package snapshots. Only unused app uploads can be deleted; mounted server files remain outside this control. |
 | Media preparation reports permission denied or only a generic ISO error | Update to v0.5.0 or later, then open the deployment's **View logs**. These releases fix read-only extracted GRUB/manifest working files and use `/data/artifacts` for subprocess temporary files. Check the new diagnostic for the failing path/tool, plus `/data` free space and permissions. An older generic error alone does not establish which condition failed. |
 | Cloud-init verification failed but the VM appears installed | Update to v0.7.1 or later and read the [readiness troubleshooting steps](#check-ubuntu-readiness-after-a-deployment-error). The fix separates stderr warnings from JSON and verifies clean installer-disabled states using independent guest checks. Keep a healthy existing VM; updating does not resume its failed job. |
@@ -562,6 +564,8 @@ Common startup issues:
 | ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in Setup → ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
 | A finished deployment is missing from history | Enable **Show hidden** and check the search/status filters. Select **Restore** to return the record to the default list. Hiding retains the VM, credentials and logs. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
+
+Version **0.8.1** accepts Splunk's publisher SHA-512 in Setup alongside SHA-256. Existing saved SHA-256 selections and queued snapshots remain valid; a previously verified package does not need to be uploaded again. GDeploy retains SHA-256 internally for queued snapshots and guest transfer verification. OS ISO checksums and the legacy `GDEPLOY_SPLUNK_SHA256` variable are unchanged. Preserve the data volume and configuration through the update; the v0.8.0 backup requirements below still apply.
 
 Version **0.8.0** adds persistent Splunk package selections, uploads under `/data/packages`, and package snapshots for new deployments. Back up these uploads with the complete data volume. Existing jobs without a snapshot continue using their environment package configuration. Earlier releases do not understand saved package selections or snapshots; finish queued work before rolling back and supply a verified package through that release's environment settings. Preserve your backup, encryption configuration and mounted media. Rolling back cannot restore a deleted upload or undo changes inside a VM.
 

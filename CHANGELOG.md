@@ -4,6 +4,19 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-05
+
+### Fixed
+
+- Accept Splunk's publisher **SHA-512** checksum in **Setup → Software packages**, for both uploaded and server-selected packages. The field accepts the 128-character SHA-512 supplied by Splunk or an existing verified 64-character SHA-256.
+- Explain how to retrieve Splunk's publisher checksum by appending `.sha512` to the official installer's download URL. GDeploy calculates and compares the package hash; users do not need to generate their own checksum.
+- Retain an internally computed SHA-256 for queued package snapshots and guest transfer verification after validating the publisher checksum.
+
+### Installation and compatibility
+
+- Update with `git pull --ff-only` and `docker compose up -d --build --wait`, refresh the browser, and check **v0.8.1**. Preserve the existing data volume, configuration, encryption key, credentials, SSH keys, ESXi trust and media.
+- Existing saved SHA-256 package selections and queued snapshots continue to work without re-uploading a verified package. OS ISO checksums and the legacy `GDEPLOY_SPLUNK_SHA256` environment variable remain SHA-256; use Setup for a publisher SHA-512. The v0.8.0 package-storage and backup requirements still apply.
+
 ## [0.8.0] - 2026-10-05
 
 ### Added

@@ -153,6 +153,7 @@ def verify_login_and_storage(url, credentials, write=False):
     media_checksum = hashlib.sha256(media_body).hexdigest()
     package_body = smoke_splunk_package()
     package_checksum = hashlib.sha256(package_body).hexdigest()
+    publisher_checksum = hashlib.sha512(package_body).hexdigest()
     if write:
         request(
             "/api/settings",
@@ -165,7 +166,7 @@ def verify_login_and_storage(url, credentials, write=False):
             media_body, "POST", session["csrf_token"],
         )
         request(
-            f"/api/settings/splunk-package/upload?filename=container-smoke-linux-amd64.tgz&sha256={package_checksum}",
+            f"/api/settings/splunk-package/upload?filename=container-smoke-linux-amd64.tgz&sha512={publisher_checksum}",
             package_body, "POST", session["csrf_token"],
         )
         saved_keys = request(
@@ -190,6 +191,7 @@ def verify_login_and_storage(url, credentials, write=False):
     assert package["ready"] and package["selected"]["source"] == "upload"
     assert package["selected"]["name"] == "container-smoke-linux-amd64.tgz"
     assert package["selected"]["sha256"] == package_checksum
+    assert package["selected"]["sha512"] == publisher_checksum
     assert package["items"][0]["can_delete"] is False
     request("/api/logout", {}, "POST", session["csrf_token"])
     return credentials
