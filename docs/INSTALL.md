@@ -1,6 +1,6 @@
 # Install GDeploy
 
-This guide installs **GDeploy 0.8.1** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.8.1` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
+This guide installs **GDeploy 0.9.0** on an Ubuntu Server **22.04 or 24.04 LTS, amd64/x86_64** host. Use the source quick start below, or download the prebuilt image `ghcr.io/dasfunfzigste/gdeploy:0.9.0` using the numbered walkthrough. Both methods require Docker Engine; Compose examples require **Docker Compose 2.24 or later**. GDeploy provisions guests on standalone **ESXi 8.0 Update 3**. The supported OS ISO is currently **Ubuntu Server 24.04 LTS amd64 live-server**; the generic media labels do not add support for other operating systems.
 
 Find each version, its changes, image digest and downloadable files on the [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases). The repository and its package are private, so sign in with a GitHub account that has access.
 
@@ -20,7 +20,7 @@ Open **`http://SERVER_LAN_IP:8000`** from another computer, replacing `SERVER_LA
 
 Sign in with **username `admin` and password `admin`** on a fresh installation, then complete the required account setup described below. If Docker is not installed yet, complete section 1 and return here. An SSH tunnel remains optional; section 5 shows how to use one.
 
-The UI can start before installation media is ready. Open **Setup**, configure your host in the **ESXi connection** tab, then select the **OS installation media** tab. Choose an ISO from an **ESXi datastore**, upload it from your computer, or select a `.iso` file in the GDeploy server's `media/` directory. Enter its publisher's verified SHA-256 checksum and save it. An ESXi ISO is copied to GDeploy for unattended-install preparation, leaving the original untouched. For Splunk, open **Software packages** to upload or select your licensed Linux x86_64 `.tgz` and verify its publisher checksum. Both workflows save through the UI without a `.env` edit or container restart. Sections 3 and 6 explain media/package preparation and Setup.
+The UI can start before installation media is ready. Open **Setup**, configure your host in the **ESXi connection** tab, then select the **OS installation media** tab. Choose an ISO from an **ESXi datastore**, upload it from your computer, or select a `.iso` file in the GDeploy server's `media/` directory. Enter its publisher's verified SHA-256 checksum and save it. An ESXi ISO is copied to GDeploy for unattended-install preparation, leaving the original untouched. Under **Software packages**, choose **Splunk** to configure its licensed Linux x86_64 `.tgz`, or **FleetManager** for its online repository/offline `.deb` setup, community string and product identity PEM. These workflows save through the UI without a `.env` edit or container restart. Sections 3 and 6 explain media/package preparation and Setup.
 
 To update and rebuild for testing later, run these commands in the same clone:
 
@@ -29,7 +29,7 @@ git pull --ff-only
 docker compose up -d --build --wait
 ```
 
-Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO/package, uploaded packages, uploaded/imported ISO copies and deployment history. Refresh the browser and check **v0.8.1** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
+Keep the existing `.env`, `media/` directory and data volume. Rebuilding preserves your account, ESXi connection and certificate approvals, selected ISO/package, uploaded packages, uploaded/imported ISO copies and deployment history. Refresh the browser and check **v0.9.0** in the app footer to confirm the update. Before upgrading with live deployments, complete the backup steps in section 8.
 
 ## Optional: restrict the bind address or change the port
 
@@ -163,7 +163,7 @@ Complete the browser sign-in with an account that can read `DasFunfZigste/GDeplo
 Download the selected release into a stable installation directory:
 
 ```sh
-GDEPLOY_VERSION=0.8.1
+GDEPLOY_VERSION=0.9.0
 mkdir -p "$HOME/gdeploy/downloads"
 cd "$HOME/gdeploy"
 
@@ -179,7 +179,7 @@ cd ..
 tar -xzf "downloads/gdeploy-${GDEPLOY_VERSION}-deploy.tar.gz"
 ```
 
-Continue only if the downloaded archive reports **OK**. `--ignore-missing` skips checksum entries for optional release assets you have not downloaded. The bundle includes `compose.yaml`, `scripts/configure.py`, documentation, `.env.example` and an empty `media/` directory. It does not contain passwords, Ubuntu or Splunk installation media, or an existing GDeploy database.
+Continue only if the downloaded archive reports **OK**. `--ignore-missing` skips checksum entries for optional release assets you have not downloaded. The bundle includes `compose.yaml`, `scripts/configure.py`, documentation, `.env.example` and an empty `media/` directory. It does not contain passwords, operating-system media, licensed application installers, product identity PEMs or an existing GDeploy database.
 
 Alternatively, use your signed-in browser to download the bundle and `SHA256SUMS` from the release's **Assets**, copy both files to the server's `~/gdeploy/downloads` directory, then run the checksum and extraction commands above. This avoids installing the GitHub CLI.
 
@@ -189,17 +189,17 @@ GitHub Container Registry authentication is separate from `gh auth login`. Creat
 
 ```sh
 docker login ghcr.io --username YOUR_GITHUB_USERNAME
-docker pull ghcr.io/dasfunfzigste/gdeploy:0.8.1
+docker pull ghcr.io/dasfunfzigste/gdeploy:0.9.0
 ```
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.8.1`. The release page also records the registry digest for that exact build.
+Replace `YOUR_GITHUB_USERNAME` with your GitHub username. Paste the token at Docker's password prompt; do not place it directly in a shell command. The included Compose file pins `ghcr.io/dasfunfzigste/gdeploy:0.9.0`. The release page also records the registry digest for that exact build.
 
 ### Alternative: load the image from a release asset
 
 If you prefer downloading the image from GitHub instead of authenticating to GHCR, download the image archive using the same repository access:
 
 ```sh
-GDEPLOY_VERSION=0.8.1
+GDEPLOY_VERSION=0.9.0
 cd "$HOME/gdeploy"
 gh release download "v${GDEPLOY_VERSION}" \
   --repo DasFunfZigste/GDeploy \
@@ -214,13 +214,14 @@ docker load --input "downloads/gdeploy-${GDEPLOY_VERSION}-linux-amd64.image.tar.
 
 This restores the same versioned image locally. Use `docker compose up -d --wait --pull never` in section 5; the bootstrap and `docker run` commands also use the loaded image. Loading the image avoids a registry pull, but VM installation still needs the Ubuntu and Elastic package networks described in section 6.
 
-## 3. Prepare an OS ISO and optional Splunk installer
+## 3. Prepare an OS ISO and optional application installers
 
 On the Ubuntu server, working in `~/gdeploy`:
 
 1. Obtain the supported **Ubuntu Server 24.04 LTS amd64 live-server ISO** from [Ubuntu's official release directory](https://releases.ubuntu.com/24.04/), or use your existing copy on an ESXi datastore. Verify the publisher checksum using Ubuntu's [verification instructions](https://ubuntu.com/tutorials/how-to-verify-ubuntu). Keep the verified SHA-256 value for Setup.
 2. Choose an existing ESXi ISO through Setup's datastore browser, upload it from your computer after sign-in, or copy it into the GDeploy server's **`media/`** directory for the server picker. An `.iso` filename such as `os.iso` is suitable; no specific name is required for the picker.
 3. To deploy Splunk, obtain your licensed **Splunk Enterprise Linux x86_64 `.tgz`** from [Splunk](https://www.splunk.com/en_us/download/splunk-enterprise.html) and its publisher SHA-512 checksum. Splunk publishes that value at the package's official download URL with `.sha512` appended; see [Configure the Splunk package](#configure-the-splunk-package) for the steps. An existing verified publisher SHA-256 is also supported. Upload the package through **Setup → Software packages** after sign-in, or copy it to **`media/`** for the server picker. Keep its vendor filename if desired; renaming it to `splunk.tgz` is unnecessary. GDeploy does not download the package for you or provide a license.
+4. To deploy **Corelight FleetManager**, obtain its product identity `.pem` from Corelight and choose a strong shared community string. Online installation also requires the customer repository token from [Corelight Cloud](https://my.corelight.cloud/) under **Downloads → Fleet Manager**. Offline installation requires the `corelight-fleet` amd64 `.deb` and any missing Ubuntu dependencies; upload these packages through Setup or place them in `media/`. Keep the private PEM out of the server media directory and select it through the dedicated license field. See [Configure FleetManager](#configure-fleetmanager) below.
 
 For example, replace these source paths with the files you downloaded:
 
@@ -241,7 +242,7 @@ chmod 0644 media/splunk-VERSION-linux-amd64.tgz
 
 Replace `splunk-VERSION-linux-amd64.tgz` with the downloaded package's actual filename. The app container runs as UID 10001 and needs read access to server-mounted media. Equivalent ACLs are also suitable. The server directory is mounted read-only at `/media`; ISO uploads and copies imported from ESXi are saved in `/data/media`, while Splunk uploads use `/data/packages`, within the persistent data volume. Keep passwords and private keys out of `media/`. Allow local space for retained ISOs/packages plus several GiB for temporary media preparation, and enough storage on ESXi for the selected VMs.
 
-Enter the publisher-verified checksum in the relevant Setup tab when selecting or uploading the file. Neither UI workflow needs environment settings. Existing Splunk environment configuration remains a fallback; see [Configure the Splunk package](#configure-the-splunk-package) below.
+Enter the publisher-verified checksum for the OS ISO and Splunk package in their Setup tabs. FleetManager accepts an optional expected SHA-256 for a single uploaded `.deb` and always computes integrity checksums; a calculated hash alone does not establish publisher provenance. None of these UI workflows needs environment settings. Existing Splunk environment configuration remains a fallback; see [Configure the Splunk package](#configure-the-splunk-package) below.
 
 ## 4. Choose automatic or manual credentials
 
@@ -256,7 +257,7 @@ cd "$HOME/gdeploy"
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.8.1 \
+  ghcr.io/dasfunfzigste/gdeploy:0.9.0 \
   python /app/scripts/configure.py --directory /setup
 ```
 
@@ -399,9 +400,34 @@ GDEPLOY_SPLUNK_SHA256=YOUR_PUBLISHER_VERIFIED_SHA256
 
 The compatible default path is `/media/splunk.tgz`; an explicit environment path can select another filename. The server picker browses the directory containing that configured path, normally `/media`. The legacy `GDEPLOY_SPLUNK_SHA256` variable still requires a verified 64-character SHA-256; use **Setup → Software packages** for Splunk's publisher SHA-512. If maintaining these legacy settings, preserve existing `.env`/`docker.env` contents and recreate the container to apply environment changes. A saved Setup choice takes precedence; **Clear saved selection** restores the fallback. Without a valid saved choice or fallback, preflight blocks Splunk deployment.
 
+### Configure FleetManager
+
+Open **Setup → Software packages → FleetManager**, or `http://SERVER_LAN_IP:8000/#settings/packages/fleetmanager`. This optional role creates a separate Corelight Fleet Manager VM. Its default resources are **2 vCPUs, 8 GiB RAM and an 80 GiB disk**; minimum inputs are 2 vCPUs, 8 GiB RAM and 60 GiB disk. The installer also checks for 30 GiB free at `/var` and 20 GiB free at `/tmp` inside the guest. These paths normally share the full root filesystem.
+
+For **Online repository**:
+
+1. Sign in to [Corelight Cloud](https://my.corelight.cloud/), open **Downloads → Fleet Manager**, and copy the customer authentication token.
+2. Select **Online repository** in GDeploy. Enter the token and a strong shared **community string** without single/double quotes. Choose the customer product identity `.pem` license from your computer.
+3. Select **Save FleetManager setup**. Confirm the online configuration is ready, then select FleetManager in a new deployment and configure its VM. The guest must reach Ubuntu package mirrors and `pkgrepos.corelight.cloud` over HTTPS. GDeploy configures the signed repository, installs `corelight-fleet` and retains the repository for later administration.
+
+For **Offline package**:
+
+1. Obtain a Ubuntu-compatible **`corelight-fleet` amd64 `.deb`** through your Corelight entitlement, plus any additional amd64/`all` dependency `.deb` files absent from a fresh Ubuntu 24.04 VM. The [FleetManager walkthrough](FLEETMANAGER.md#offline-installation) explains package preparation.
+2. Use the regular Ubuntu Server 24.04 LTS amd64 live-server ISO containing the base SSH, VMware Tools, Python and CA-certificate packages. Offline mode disables installer mirror selection and uses its offline fallback; minimal or incomplete media can fail before software installation.
+3. Select **Offline package** in GDeploy and supply the community string and product identity PEM. A repository token is unnecessary. Under **Offline packages**, use **Upload packages** for one or multiple `.deb` files, or place them in the host's `media/` directory and select **Refresh**. Uploads allow **4 GiB per file**. An optional expected SHA-256 applies to a single upload; otherwise GDeploy computes the integrity hash.
+4. Select the main **FleetManager .deb package** and any **Additional dependency packages**, then select **Save FleetManager setup**. Uploading alone does not save a package selection. Deploy the FleetManager role after its preflight checks pass.
+
+Offline FleetManager performs no repository downloads for its OS/package installation. Apt uses only supplied `.deb` files and installed dependencies; missing dependencies stop the deployment with a logged error. GDeploy, ESXi and the VM still need local connectivity, and other selected VM roles retain their own online installation requirements. Choose the complete matching dependency set before relying on an isolated deployment.
+
+The PEM license is limited to **64 KiB**. It must include the currently valid product identity certificate and matching unencrypted private key, with the matching leaf certificate first if a chain is included. GDeploy validates the file structure and pair; Fleet Manager validates the actual Corelight entitlement. Setup stores secrets encrypted and shows only saved-state flags plus license name, checksum and expiry. Blank secret fields/no replacement license retain saved values. The saved license is not exposed as an ordinary downloadable file.
+
+On the new VM, GDeploy writes `/etc/corelight-fleetd.conf` and the license `/etc/corelight-fleetd.pem`, enables `corelight-fleetd`, and checks HTTPS **443** and the sensor listener **1443**. Open the deployment's **Credentials** for the **`admin`** temporary password, saved community string and `https://VM_IP`; **change the administrator password at first sign-in**. Sensor enrollment, browser certificate configuration, existing-VM upgrades and ongoing guest backups remain administration tasks. See the [complete FleetManager walkthrough](FLEETMANAGER.md) for network, upgrade and troubleshooting details.
+
+FleetManager/dependency uploads persist in `/data/fleetmanager-packages`. Each queued job retains its configuration, license and package checksums; editing or clearing Setup does not change existing jobs or VMs. **Clear FleetManager setup** removes defaults while keeping uploads. Selected or queued/running/cleaning packages cannot be deleted; mounted files are managed on the Docker host. Back up the complete data volume and original encryption key, and separately back up mounted packages and vendor license records. Live licensed-package and ESXi acceptance has not been performed for this feature; use the [lab checklist](LAB_VALIDATION.md#fleetmanager-installation).
+
 ### Deploy your VMs
 
-1. Open **Setup**, listed above **Deployments** in the navigation, to finish ESXi and OS ISO configuration and choose a package under **Software packages** if deploying Splunk. Select **New deployment**, enter a deployment label and choose OS only, Splunk, Elasticsearch and/or Kibana. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk runs independently.
+1. Open **Setup**, listed above **Deployments** in the navigation, to finish ESXi and OS ISO configuration. Complete the relevant **Software packages** page if deploying Splunk or FleetManager. Select **New deployment**, enter a deployment label and choose OS only, Splunk, Elasticsearch, Kibana and/or FleetManager. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk and FleetManager run independently.
 2. In **Configure VMs**, fill in each role's visible section with its own VM name, CPU, RAM, disk size, datastore, port group and DHCP/static network settings. Elasticsearch and Kibana have separate sections and VM names. The deployment label groups the job; it is not a shared VM name. Use the section navigation to move between forms; all selected forms stay visible together. Review the separate values for every VM before continuing.
 3. Run preflight, address any reported issues, and start deployment.
 4. Open the deployment to follow its stages and errors. In **Deployment logs**, select **View logs** to expand recorded events and sanitized diagnostic details, and **Copy logs** to copy them. The failure banner's **View deployment logs** opens the same view. When ready, use the application links and **Reveal credentials** panel for the VM passwords and application sign-in details.
@@ -410,7 +436,7 @@ On an HTTP LAN address where automatic clipboard access is unavailable, **Copy l
 
 The OS username is **`gdeploy`** with a different generated password per VM. The web-app administrator password, guest OS passwords and application passwords are separate. The deployment's Credentials panel is the ongoing place to find guest and application details.
 
-The Docker host needs access to ESXi HTTPS **443** and guest SSH **22**. The guests need working DNS and outbound access to Ubuntu mirrors and the official Elastic package repository. Kibana needs access to Elasticsearch HTTPS **9200**; your browser needs access to Kibana **5601** or Splunk Web **8000**. GDeploy does not configure your firewall or switches. Prefer static IPs or DHCP reservations for application VMs because Kibana's configuration and Elasticsearch's certificate use Elasticsearch's assigned address.
+The Docker host needs access to ESXi HTTPS **443** and guest SSH **22**. Ordinary installations need working DNS and Ubuntu mirror access; Elastic roles also require the official Elastic package repository. Online FleetManager additionally needs `pkgrepos.corelight.cloud`; offline FleetManager uses its ISO and supplied packages without repository downloads. Kibana needs access to Elasticsearch HTTPS **9200**; your browser needs access to Kibana **5601**, Splunk Web **8000** or FleetManager **443**. Corelight sensor management interfaces need FleetManager **1443**. GDeploy does not configure your firewall or switches. Prefer static IPs or DHCP reservations for application VMs because Kibana's configuration and Elasticsearch's certificate use Elasticsearch's assigned address.
 
 The ESXi account and license must permit vSphere API provisioning, datastore uploads and creation/deletion of the deployment's resources. Existing datastore media additionally needs browse and download permission. Inventory access alone does not prove those permissions. Certificate verification uses your approved certificate for that exact endpoint, or normal CA and hostname verification when no certificate is approved.
 
@@ -476,7 +502,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the source-update commands near the start of this guide, keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from history** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.8.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.9.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## 7. Existing Docker: run without Compose
 
@@ -502,7 +528,7 @@ docker run -d --name gdeploy \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --stop-timeout 30 \
-  ghcr.io/dasfunfzigste/gdeploy:0.8.1
+  ghcr.io/dasfunfzigste/gdeploy:0.9.0
 
 docker ps --filter name=gdeploy
 docker logs --tail=100 gdeploy
@@ -520,7 +546,7 @@ For a manually configured installation, refresh `docker.env` from its existing c
 docker run --rm --pull never \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,source=$PWD,target=/setup" \
-  ghcr.io/dasfunfzigste/gdeploy:0.8.1 \
+  ghcr.io/dasfunfzigste/gdeploy:0.9.0 \
   python /app/scripts/configure.py --directory /setup --export-docker-env
 ```
 
@@ -556,6 +582,9 @@ Common startup issues:
 | Splunk preflight reports a missing package such as `/media/splunk.tgz` | Open **Setup → Software packages** or follow **Configure Splunk package** from preflight. Upload or select your licensed Linux x86_64 `.tgz` with its publisher SHA-512 or verified SHA-256; vendor filenames are supported. Use **Return to deployment** and rerun preflight. UI selection needs no environment edit or restart. |
 | Splunk package upload or verification fails | Check the package is at most 4 GiB, free space is sufficient, the publisher checksum matches, and the archive is Splunk Enterprise for Linux x86_64. Enter only the 128-character SHA-512 or 64-character SHA-256, without the filename from the checksum file. Use v0.8.1 or later for Splunk's `.sha512` value. Review the displayed archive error; a `.tgz` extension alone does not establish compatibility. The previous selection is retained. |
 | A saved Splunk package cannot be deleted | Clear its saved selection or choose another package. Queued, running or cleaning jobs retain deletion protection for their own package snapshots. Only unused app uploads can be deleted; mounted server files remain outside this control. |
+| FleetManager is not configured in preflight | Open **Setup → Software packages → FleetManager**. Save a community string and valid product identity PEM, plus a repository token for online mode or the main `corelight-fleet` amd64 `.deb` for offline mode. Use **Return to deployment** and rerun preflight. |
+| Offline FleetManager reports missing dependencies | Expand **View logs**, obtain the missing Ubuntu-compatible `.deb` dependencies from a trusted source and select them in Setup. Offline installation does not fetch repository packages. If the OS failed before SSH became available, check the regular live-server ISO contains the base packages. |
+| FleetManager license or service validation fails | Use the customer product identity PEM, with matching leaf certificate/private key and valid dates. Confirm the Corelight entitlement, free guest space under `/var` and `/tmp`, and the `corelight-fleetd` service. Syntax validation alone does not prove the vendor license. |
 | Media preparation reports permission denied or only a generic ISO error | Update to v0.5.0 or later, then open the deployment's **View logs**. These releases fix read-only extracted GRUB/manifest working files and use `/data/artifacts` for subprocess temporary files. Check the new diagnostic for the failing path/tool, plus `/data` free space and permissions. An older generic error alone does not establish which condition failed. |
 | Cloud-init verification failed but the VM appears installed | Update to v0.7.1 or later and read the [readiness troubleshooting steps](#check-ubuntu-readiness-after-a-deployment-error). The fix separates stderr warnings from JSON and verifies clean installer-disabled states using independent guest checks. Keep a healthy existing VM; updating does not resume its failed job. |
 | Data storage is full or appears smaller than the host disk | Check **Storage & saved ISOs** and run `docker compose exec gdeploy df -h /data /tmp`. The app sees the backing data filesystem, not all host disks. Delete eligible unused ISO copies or expand/migrate that backing storage; `/tmp` is a separate 256 MiB mount. |
@@ -564,6 +593,8 @@ Common startup issues:
 | ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in Setup → ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
 | A finished deployment is missing from history | Enable **Show hidden** and check the search/status filters. Select **Restore** to return the record to the default list. Hiding retains the VM, credentials and logs. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
+
+Version **0.9.0** adds the FleetManager VM role, encrypted configuration/license records and managed offline packages under `/data/fleetmanager-packages`. Include these in complete volume backups and preserve the encryption key; mounted packages and guest data require separate backups. Existing roles and their saved settings remain supported. Finish or resolve FleetManager jobs before rolling back, because older releases do not support the new role or its settings. Updating GDeploy does not upgrade Fleet Manager on an existing VM, and rollback cannot restore deleted files or undo guest changes.
 
 Version **0.8.1** accepts Splunk's publisher SHA-512 in Setup alongside SHA-256. Existing saved SHA-256 selections and queued snapshots remain valid; a previously verified package does not need to be uploaded again. GDeploy retains SHA-256 internally for queued snapshots and guest transfer verification. OS ISO checksums and the legacy `GDEPLOY_SPLUNK_SHA256` variable are unchanged. Preserve the data volume and configuration through the update; the v0.8.0 backup requirements below still apply.
 

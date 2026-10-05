@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .certificate_trust import certificate_endpoint
 from .guest import GuestConnectionError, GuestSession, build_seed_iso, generate_ssh_key
+from .fleetmanager import FleetManager, FleetManagerError
 from .media import MediaError, MediaManager
 from .packages import PackageError, SplunkPackageManager
 from .vmware import ESXiClient
@@ -46,6 +47,8 @@ def safe_error(error, secret_data=None):
                             "encryption_key",
                             "security_key",
                             "reporting_key",
+                            "community_string",
+                            "license_pem",
                         )
                     )
                     and isinstance(child, str)
@@ -70,6 +73,7 @@ class DeploymentService:
         self.db, self.config, self.client_factory = db, config, client_factory
         self.media = MediaManager(db, config)
         self.packages = SplunkPackageManager(db, config)
+        self.fleetmanager = FleetManager(db, config)
         self.action_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = None
@@ -106,7 +110,7 @@ class DeploymentService:
         except Exception as exc:
             raise DeploymentError(safe_error(exc, settings)) from None
 
-    def preflight(self, spec, settings=None, exclude_id=None, os_media=None, splunk_package=None):
+    def preflight(self, spec, settings=None, exclude_id=None, os_media=None, splunk_package=None, fleetmanager=None):
         settings = settings or self.db.settings()
         checks = []
 
@@ -133,6 +137,21 @@ class DeploymentService:
             except (PackageError, OSError) as exc:
                 check("Splunk Linux x86_64 package", False, f"Open Setup → Software packages. {exc}")
                 checks[-1]["action"] = {"label": "Configure Splunk package", "href": "#settings/packages"}
+        if any(vm["role"] == "fleetmanager" for vm in spec["vms"]):
+            fleet = self.fleetmanager.selected() if fleetmanager is None else fleetmanager
+            try:
+                self.fleetmanager.validate_snapshot(fleet or {})
+                message = (
+                    "Online repository token, community string and license are configured. "
+                    "The VM must reach Ubuntu and Corelight repositories during installation."
+                    if fleet["mode"] == "online" else
+                    "Offline FleetManager package, community string and license are configured. "
+                    "Required dependencies must be installed or supplied as additional .deb files."
+                )
+                check("FleetManager configuration", True, message)
+            except (FleetManagerError, OSError) as exc:
+                check("FleetManager configuration", False, f"Open Setup → Software packages → FleetManager. {exc}")
+                checks[-1]["action"] = {"label": "Configure FleetManager", "href": "#settings/packages/fleetmanager"}
         check(
             "ISO builder",
             shutil.which("xorriso"),
@@ -233,8 +252,10 @@ class DeploymentService:
         settings = settings or self.db.settings()
         os_media = self.media.selected()
         splunk_package = self.packages.selected() if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
+        fleetmanager = self.fleetmanager.selected() if any(vm["role"] == "fleetmanager" for vm in spec["vms"]) else None
         result = self.preflight(
             spec, settings, exclude_id=parent_id, os_media=os_media or {}, splunk_package=splunk_package or {},
+            fleetmanager=fleetmanager or {},
         )
         if not result["ok"]:
             raise DeploymentError(
@@ -256,6 +277,7 @@ class DeploymentService:
             "esxi": settings,
             "os_media": os_media,
             "splunk_package": splunk_package,
+            "fleetmanager": fleetmanager,
             "authorized_ssh_keys": self.db.ssh_public_keys(),
             "vm_credentials": vm_credentials,
             "software": {
@@ -349,6 +371,7 @@ class DeploymentService:
             # Never adopt a later Setup selection for an already queued job.
             # Jobs from before package selection retain their environment source.
             splunk_package = secret_data.get("splunk_package") if "splunk_package" in secret_data else self.packages.legacy()
+            fleetmanager = secret_data.get("fleetmanager")
             vms = deployment["vms"]
             resources = deployment["resources"]
             artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -356,6 +379,7 @@ class DeploymentService:
             result = self.preflight(
                 deployment["spec"], secret_data["esxi"], exclude_id=deployment_id, os_media=os_media or {},
                 splunk_package=splunk_package or {},
+                fleetmanager=fleetmanager or {},
             )
             if not result["ok"]:
                 raise DeploymentError(
@@ -382,6 +406,7 @@ class DeploymentService:
                         # added to Setup after that deployment was queued.
                         authorized_ssh_keys=secret_data.get("authorized_ssh_keys", []),
                         log=lambda text, level: self.db.event(deployment_id, safe_error(text, secret_data), level),
+                        **({"offline": True} if vm["role"] == "fleetmanager" and fleetmanager["mode"] == "offline" else {}),
                     )
                     remote = f"gdeploy/{deployment_id}/{vm['name']}.iso"
                     resources.append({"datastore": vm["datastore"], "path": remote})
@@ -410,12 +435,16 @@ class DeploymentService:
                     )
                 elastic = None
                 for vm in sorted(
-                    vms, key=lambda item: {"elasticsearch": 0, "kibana": 1, "splunk": 2, "ubuntu": 3}[item["role"]]
+                    vms, key=lambda item: {"elasticsearch": 0, "kibana": 1, "splunk": 2, "fleetmanager": 3, "ubuntu": 4}[item["role"]]
                 ):
                     credential = secret_data["vm_credentials"][vm["name"]]
                     # OS installation may take time: a mounted installer can be
                     # replaced since preflight. Recheck the snapshotted bytes.
                     package_path = self.packages.validate_snapshot(splunk_package or {}) if vm["role"] == "splunk" else None
+                    fleet_options = {}
+                    if vm["role"] == "fleetmanager":
+                        self.fleetmanager.validate_snapshot(fleetmanager or {})
+                        fleet_options["fleetmanager"] = fleetmanager
                     role_label = "operating system" if vm["role"] == "ubuntu" else vm["role"]
                     self.stage(deployment_id, "installing_software", f"Configuring {role_label} on {vm['name']}")
                     vm["status"] = "installing_software"
@@ -434,6 +463,7 @@ class DeploymentService:
                             splunk_package=package_path,
                             splunk_sha256=splunk_package["sha256"] if package_path is not None else None,
                             log=lambda text: self.db.event(deployment_id, safe_error(text, secret_data)),
+                            **fleet_options,
                         )
                     if installed.get("elastic"):
                         elastic = installed["elastic"]

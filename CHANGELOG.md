@@ -4,6 +4,25 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-05
+
+### Added
+
+- Deploy **Corelight FleetManager** on its own Ubuntu VM, with separate name, network and resource settings. Defaults are 2 vCPUs, 8 GiB RAM and an 80 GiB disk; minimum inputs are 2 vCPUs, 8 GiB RAM and 60 GiB disk. Guest checks verify free space at `/var` and `/tmp` before installation.
+- Add **Setup → Software packages → FleetManager** with **Online repository** and **Offline package** modes, a shared community string and customer product identity PEM license. Online mode uses the customer repository token and retains the signed apt repository for later administration.
+- Upload or select the offline `corelight-fleet` amd64 `.deb` and additional amd64/`all` dependency packages. Uploads are limited to 4 GiB each. Read actual Debian control metadata, compute SHA-256 and optionally verify an expected checksum. Transfer integrity checks precede guest package installation; calculated hashes do not establish publisher provenance.
+- Offline FleetManager uses the regular Ubuntu live-server source without installer mirror downloads and installs only supplied or already installed dependency packages. Missing packages stop the deployment with an actionable error; no online dependency fallback is used.
+- Encrypt FleetManager defaults, license PEM and per-job snapshots. Verify the PEM certificate/private-key pair and dates locally, then let Fleet Manager validate its product entitlement. Selected and active-job package references are protected from deletion; clearing Setup preserves uploaded files and existing jobs/VMs.
+- Configure and enable `corelight-fleetd`, verify its service and ports 443/1443, and show its generated temporary `admin` password in **Credentials**. Fleet Manager requires changing that password on first sign-in. Sensor enrollment remains an administrator task.
+- Include the online/offline FleetManager walkthrough in the release bundle and link it from the installation guide.
+
+### Installation and compatibility
+
+- Update with `git pull --ff-only` and `docker compose up -d --build --wait`, refresh the browser, and check **v0.9.0**. Keep the existing volume, encryption key, `.env`, credentials, ESXi trust, SSH keys and installation media. Include encrypted FleetManager settings and `/data/fleetmanager-packages` in complete backups; back up mounted packages separately.
+- FleetManager is optional. Existing Splunk, Elastic and OS-only deployments retain their previous behavior. A FleetManager job captures its mode, credentials, license and offline package set; changing Setup does not update existing guests. Updating GDeploy does not upgrade guest Fleet Manager installations.
+- Finish or resolve FleetManager jobs before rolling back to an older GDeploy release, which does not support that VM role or its settings. Retain a complete backup and existing encryption configuration; earlier schema rollback caveats still apply. Deleting packages or VMs cannot be undone by changing the app image.
+- Requires a valid Corelight entitlement, compatible vendor package and appropriate network access. Live vendor-package/license, sensor and ESXi acceptance has not been performed for this release; use the lab checklist before relying on it for workloads.
+
 ## [0.8.1] - 2026-10-05
 
 ### Fixed

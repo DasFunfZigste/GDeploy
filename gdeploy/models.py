@@ -97,8 +97,19 @@ class ESXiMediaSelection(CertificateHost):
     sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
 
 
+class FleetManagerSettings(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False, strict=True)
+    mode: Literal["online", "offline"]
+    community_string: str = Field(default="", max_length=4096)
+    repository_token: str = Field(default="", max_length=4096)
+    license_pem: str = Field(default="", max_length=65536)
+    license_name: str = Field(default="", max_length=200)
+    package_id: str | None = Field(default=None, max_length=1024)
+    dependency_ids: list[Annotated[str, Field(min_length=1, max_length=1024)]] = Field(default_factory=list, max_length=128)
+
+
 class VMSpec(StrictModel):
-    role: Literal["ubuntu", "splunk", "elasticsearch", "kibana"]
+    role: Literal["ubuntu", "splunk", "elasticsearch", "kibana", "fleetmanager"]
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$")
     cpu: int = Field(ge=1, le=128, strict=True)
     ram_gb: int = Field(ge=2, le=2048, strict=True)
@@ -112,9 +123,11 @@ class VMSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_network(self):
-        minimum = {"ubuntu": 2, "splunk": 4, "elasticsearch": 8, "kibana": 4}[self.role]
+        minimum = {"ubuntu": 2, "splunk": 4, "elasticsearch": 8, "kibana": 4, "fleetmanager": 8}[self.role]
         if self.ram_gb < minimum:
             raise ValueError(f"{self.role} requires at least {minimum} GiB RAM for this deployment profile.")
+        if self.role == "fleetmanager" and (self.cpu < 2 or self.disk_gb < 60):
+            raise ValueError("FleetManager requires at least 2 vCPUs and a 60 GiB disk; 80 GiB or more is recommended.")
         if self.ip_mode == "static":
             if not self.address or "/" not in self.address or not self.gateway or not self.dns:
                 raise ValueError("Static networking requires IPv4 address/prefix, gateway and DNS servers.")
@@ -150,7 +163,7 @@ class VMSpec(StrictModel):
 
 class DeploymentSpec(StrictModel):
     name: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
-    vms: list[VMSpec] = Field(min_length=1, max_length=4)
+    vms: list[VMSpec] = Field(min_length=1, max_length=5)
     splunk_license_accepted: bool = False
 
     @model_validator(mode="after")

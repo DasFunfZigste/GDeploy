@@ -171,7 +171,7 @@ def test_iso_failure_logs_step_exit_space_and_redacts_generated_secrets(tmp_path
     source.touch()
     data = guest._autoinstall_data(spec, "gdeploy", "password-unique", "ssh-rsa AAAA")
     password_hash = data["autoinstall"]["identity"]["password"]
-    monkeypatch.setattr(guest, "_autoinstall_data", lambda *args: data)
+    monkeypatch.setattr(guest, "_autoinstall_data", lambda *args, **kwargs: data)
     logs = []
 
     def fail(command, **kwargs):

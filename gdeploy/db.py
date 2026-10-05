@@ -47,6 +47,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS media_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS splunk_package_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS splunk_package_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS fleetmanager_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS fleetmanager_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS deployments (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
                     stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -329,6 +331,97 @@ class Database:
             connection.execute("INSERT INTO audit VALUES(?,?)", (now(), f"Uploaded Splunk package deleted: {value['name']}"))
             return True
 
+    def fleetmanager_settings(self):
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM fleetmanager_settings WHERE id=1").fetchone()
+        return self.unseal(row[0]) if row else None
+
+    def fleetmanager_files(self):
+        with self.connect() as connection:
+            rows = connection.execute("SELECT value FROM fleetmanager_files ORDER BY id").fetchall()
+        return [self.unseal(row[0]) for row in rows]
+
+    @staticmethod
+    def fleetmanager_packages(settings):
+        if not settings or settings.get("mode") != "offline":
+            return []
+        return ([settings["package"]] if settings.get("package") else []) + settings.get("dependencies", [])
+
+    def register_fleetmanager_package(self, value):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("INSERT INTO fleetmanager_files VALUES(?,?)", (value["id"], self.seal(value)))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Fleet Manager Debian package uploaded"))
+
+    def _require_registered_fleetmanager(self, connection, settings):
+        for value in self.fleetmanager_packages(settings):
+            saved = value
+            if value.get("source") == "upload":
+                row = connection.execute("SELECT value FROM fleetmanager_files WHERE id=?", (value.get("id"),)).fetchone()
+                saved = self.unseal(row[0]) if row else None
+            path = Path(value.get("path", ""))
+            if (
+                not saved
+                or any(saved.get(key) != value.get(key) for key in ("id", "path", "source", "sha256"))
+                or path.is_symlink() or path.parent.is_symlink() or not path.is_file()
+            ):
+                raise PackageStateError("A Fleet Manager package was removed or changed during this action. Refresh and select it again.")
+
+    def set_fleetmanager_settings(self, value):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_registered_fleetmanager(connection, value)
+            connection.execute("INSERT OR REPLACE INTO fleetmanager_settings VALUES(1,?)", (self.seal(value),))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Fleet Manager configuration updated"))
+
+    def clear_fleetmanager_settings(self):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("DELETE FROM fleetmanager_settings WHERE id=1").rowcount:
+                connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Fleet Manager configuration cleared"))
+
+    def _active_fleetmanager_packages(self, connection):
+        rows = connection.execute("SELECT secrets FROM deployments WHERE status IN ('queued','running','cleaning')").fetchall()
+        return [item for row in rows for item in self.fleetmanager_packages(self.unseal(row[0]).get("fleetmanager"))]
+
+    def fleetmanager_storage_state(self):
+        with self.connect() as connection:
+            connection.execute("BEGIN")
+            selected = connection.execute("SELECT value FROM fleetmanager_settings WHERE id=1").fetchone()
+            return {
+                "selected": self.unseal(selected[0]) if selected else None,
+                "references": self._active_fleetmanager_packages(connection),
+            }
+
+    @classmethod
+    def fleetmanager_delete_reason(cls, value, selected, references):
+        def matches(other):
+            return value["id"] == other.get("id") or value["path"] == other.get("path")
+
+        if any(matches(item) for item in cls.fleetmanager_packages(selected)):
+            return "Clear the saved Fleet Manager configuration or choose another package before deleting this one."
+        if any(matches(item) for item in references):
+            return "Used by a queued, running, or cleaning deployment."
+        return None
+
+    def delete_fleetmanager_package(self, package_id, remove_file):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT value FROM fleetmanager_files WHERE id=?", (package_id,)).fetchone()
+            if row is None:
+                return False
+            value = self.unseal(row[0])
+            selected = connection.execute("SELECT value FROM fleetmanager_settings WHERE id=1").fetchone()
+            reason = self.fleetmanager_delete_reason(
+                value, self.unseal(selected[0]) if selected else None, self._active_fleetmanager_packages(connection)
+            )
+            if reason:
+                raise PackageStateError(reason)
+            remove_file(value)
+            connection.execute("DELETE FROM fleetmanager_files WHERE id=?", (package_id,))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Uploaded Fleet Manager Debian package deleted"))
+            return True
+
     def remove_esxi_certificate(self, endpoint):
         with self.connect() as connection:
             connection.execute("DELETE FROM esxi_certificates WHERE endpoint=?", (endpoint,))
@@ -433,6 +526,7 @@ class Database:
             # concurrent administrator may have removed a previously selected ISO.
             self._require_registered_media(c, secret_data.get("os_media"))
             self._require_registered_splunk_package(c, secret_data.get("splunk_package"))
+            self._require_registered_fleetmanager(c, secret_data.get("fleetmanager"))
             c.execute(
                 """INSERT INTO deployments
                    (id,name,status,stage,created_at,updated_at,spec,vms,resources,secrets,error,parent_id)

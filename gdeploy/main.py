@@ -16,6 +16,7 @@ from . import __version__
 from .certificate_trust import CertificateTrust, CertificateTrustError, certificate_endpoint
 from .config import Config, hash_password, verify_password
 from .db import Database, DeploymentVisibilityError, MediaStateError
+from .fleetmanager import FleetManager, FleetManagerError
 from .media import MediaError, MediaManager
 from .models import (
     AccountSetup,
@@ -24,6 +25,7 @@ from .models import (
     ConnectionSettings,
     DeploymentSpec,
     ESXiMediaSelection,
+    FleetManagerSettings,
     Login,
     MediaSelection,
     RedeployRequest,
@@ -58,6 +60,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         app.state.media.recover_uploads()
         app.state.packages = SplunkPackageManager(app.state.db, app.state.config)
         app.state.packages.recover_uploads()
+        app.state.fleetmanager = FleetManager(app.state.db, app.state.config)
+        app.state.fleetmanager.recover_uploads()
         app.state.login_lock = threading.Lock()
         if start_worker:
             app.state.service.start()
@@ -152,6 +156,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     async def ssh_key_error(request, exc):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 
+    @app.exception_handler(FleetManagerError)
+    async def fleetmanager_error(request, exc):
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
     @app.get("/api/health")
     def health(request: Request):
         service = request.app.state.service
@@ -232,6 +240,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.get("/api/settings")
     def settings(request: Request, current=Depends(authenticated)):
         saved = request.app.state.db.settings() or {}
+        fleetmanager = request.app.state.fleetmanager.catalog(include_packages=False)
         return {
             "host": saved.get("host", ""),
             "username": saved.get("username", ""),
@@ -241,6 +250,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "iso_configured": request.app.state.media.catalog()["ready"],
             "ssh_key_count": len(request.app.state.db.ssh_public_keys()),
             "splunk_configured": request.app.state.packages.catalog()["ready"],
+            "fleetmanager_configured": fleetmanager["ready"],
+            "fleetmanager_mode": fleetmanager["mode"],
         }
 
     @app.get("/api/settings/ssh-keys")
@@ -251,6 +262,28 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.get("/api/settings/splunk-package")
     def splunk_package_settings(request: Request, current=Depends(authenticated)):
         return request.app.state.packages.catalog()
+
+    @app.get("/api/settings/fleetmanager")
+    def fleetmanager_settings(request: Request, current=Depends(authenticated)):
+        return request.app.state.fleetmanager.catalog()
+
+    @app.put("/api/settings/fleetmanager")
+    def save_fleetmanager_settings(payload: FleetManagerSettings, request: Request, current=Depends(authenticated)):
+        return request.app.state.fleetmanager.save(payload)
+
+    @app.delete("/api/settings/fleetmanager")
+    def clear_fleetmanager_settings(request: Request, current=Depends(authenticated)):
+        return request.app.state.fleetmanager.clear()
+
+    @app.post("/api/settings/fleetmanager/packages/upload")
+    async def upload_fleetmanager_package(
+        request: Request, filename: str, sha256: str | None = None, current=Depends(authenticated),
+    ):
+        return await request.app.state.fleetmanager.upload(request, filename, sha256)
+
+    @app.delete("/api/settings/fleetmanager/packages/{package_id}")
+    def delete_fleetmanager_package(package_id: str, request: Request, current=Depends(authenticated)):
+        return request.app.state.fleetmanager.delete(package_id)
 
     @app.put("/api/settings/splunk-package")
     def select_splunk_package(payload: SplunkPackageSelection, request: Request, current=Depends(authenticated)):

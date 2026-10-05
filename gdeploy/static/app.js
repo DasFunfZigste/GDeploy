@@ -8,13 +8,14 @@
     route: 'deployments', detailId: null, routeEpoch: 0, pollBusy: false,
     search: '', filter: 'all', includeHidden: false, historyRevision: 0, visibilityBusy: new Set(), wizard: null, secrets: null, secretTimer: null,
     secretDeadline: 0, secretRequest: 0, toastTimer: null,
-    setupBusy: false, mediaUpload: null, setupTab: null, openLogs: new Set(),
+    setupBusy: false, mediaUpload: null, setupTab: null, packageTab: 'splunk', openLogs: new Set(),
   };
   const roles = {
     ubuntu: {name: 'OS only', short: 'OS only', description: 'Install the operating system without additional software.', cpu: 2, ram: 4, disk: 40, icon: 'terminal'},
     elasticsearch: {name: 'Elasticsearch', short: 'Elasticsearch', description: 'Search and analytics, with TLS enabled.', cpu: 2, ram: 8, disk: 60, icon: 'layers'},
     kibana: {name: 'Kibana', short: 'Kibana', description: 'Visualize your data. Connected to Elasticsearch.', cpu: 2, ram: 4, disk: 40, icon: 'chart'},
     splunk: {name: 'Splunk Enterprise', short: 'Splunk', description: 'Search, monitor, and analyze machine data.', cpu: 4, ram: 8, disk: 60, icon: 'activity'},
+    fleetmanager: {name: 'FleetManager', short: 'FleetManager', description: 'Manage your Corelight sensors from a dedicated server.', cpu: 2, ram: 8, disk: 80, minCpu: 2, minRam: 8, minDisk: 60, icon: 'server'},
   };
   const stageOrder = ['queued', 'preflight', 'preparing', 'creating', 'installing_os', 'installing_software', 'verifying', 'completed'];
   const stageNames = {queued: 'Waiting in queue', preflight: 'Checking prerequisites', preparing: 'Preparing installation media', creating: 'Creating virtual machines', installing_os: 'Install operating system', installing_software: 'Installing software', verifying: 'Verifying services', completed: 'Ready to use', failed: 'Deployment failed', interrupted: 'Deployment interrupted', cleaning: 'Removing deployment resources', cleanup_failed: 'Cleanup needs attention', reverted: 'Resources removed'};
@@ -80,6 +81,7 @@
   const loading = label => el('div', {class: 'loading-block', role: 'status'}, spinner(), label);
   const roleIcon = role => el('span', {class: 'role-icon'}, icon((roles[role] || roles.ubuntu).icon));
   const roleName = role => (roles[role] || {name: role || 'Virtual machine'}).name;
+  const roleLimits = role => ({cpu: roles[role]?.minCpu || 1, ram: roles[role]?.minRam || ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[role] || 2, disk: roles[role]?.minDisk || 25});
   function statusBadge(status) {
     const known = Object.hasOwn(statusNames, status);
     return el('span', {class: `status ${known ? `status-${status}` : ''}`}, known ? statusNames[status] : (stageNames[status] || String(status || 'Pending').replaceAll('_', ' ')));
@@ -167,6 +169,7 @@
     state.wizard = null;
     state.settings = null;
     state.setupTab = null;
+    state.packageTab = 'splunk';
     state.inventory = null;
     state.deployments = [];
     state.includeHidden = false;
@@ -246,7 +249,7 @@
     state.detailId = null;
     page.replaceChildren(loading('Loading your workspace…'));
     const hash = location.hash.slice(1);
-    const setupRoute = /^(?:settings|setup)(?:\/(connection|media|ssh|packages))?$/.exec(hash);
+    const setupRoute = /^(?:settings|setup)(?:\/(connection|media|ssh|packages)(?:\/(splunk|fleetmanager))?)?$/.exec(hash);
     if (setupRoute) {
       state.route = 'settings';
       markNav('settings');
@@ -256,6 +259,7 @@
         if (epoch !== state.routeEpoch) return;
         state.settings = settings;
         state.setupTab = setupRoute[1] || (settings.configured && !settings.iso_configured ? 'media' : 'connection');
+        if (state.setupTab === 'packages') state.packageTab = setupRoute[2] || 'splunk';
         renderSettings();
       } catch (error) { if (epoch === state.routeEpoch) renderLoadError(error, route); }
     } else if (hash.startsWith('deployment/')) {
@@ -388,7 +392,7 @@
       const requestSession = state.session;
       const xhr = new XMLHttpRequest();
       const finish = () => { if (state.mediaUpload === xhr) state.mediaUpload = null; };
-      xhr.open('POST', `${endpoint}?filename=${encodeURIComponent(file.name)}&${algorithm}=${encodeURIComponent(digest)}`);
+      xhr.open('POST', `${endpoint}?filename=${encodeURIComponent(file.name)}${digest ? `&${algorithm}=${encodeURIComponent(digest)}` : ''}`);
       xhr.withCredentials = true;
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       xhr.setRequestHeader('Accept', 'application/json');
@@ -851,6 +855,163 @@
     checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
     return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
+  function createFleetManagerPanel(onChange, onBusy) {
+    const viewEpoch = state.routeEpoch, endpoint = '/api/settings/fleetmanager';
+    let catalog = null, mode = 'online', packageId = '', dependencyIds = new Set(), busy = '', externalBusy = false;
+    const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+    const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
+    const badge = el('span', {class: 'status'}, 'Loading…');
+    const savedSummary = el('div', {class: 'media-selected-summary', id: 'fleetmanager-summary'});
+    const community = el('input', {id: 'fleetmanager-community', type: 'password', maxlength: 4096, autocomplete: 'new-password', spellcheck: 'false'});
+    const communityHelp = el('small');
+    const token = el('input', {id: 'fleetmanager-token', type: 'password', maxlength: 4096, autocomplete: 'new-password', spellcheck: 'false'});
+    const tokenHelp = el('small');
+    const license = el('input', {id: 'fleetmanager-license', type: 'file', accept: '.pem', 'aria-describedby': 'fleetmanager-license-help'});
+    const licenseHelp = el('small', {id: 'fleetmanager-license-help'});
+    const sourceRadio = value => el('input', {type: 'radio', name: 'fleetmanager-mode', value, checked: mode === value, onChange: () => { mode = value; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); }});
+    const onlineRadio = sourceRadio('online'), offlineRadio = sourceRadio('offline');
+    const onlineFields = el('div', {class: 'media-source-fields'}, field('Repository access token', token, tokenHelp), el('p', {class: 'media-help'}, 'Find your token under Downloads → Fleet Manager in the ', el('a', {href: 'https://my.corelight.cloud/', target: '_blank', rel: 'noopener noreferrer'}, 'Corelight customer portal', icon('link')), '. The VM needs internet access to the vendor repository and Ubuntu package repositories. The vendor repository remains configured for future updates.'));
+    const packageSelect = el('select', {id: 'fleetmanager-package', 'aria-describedby': 'fleetmanager-package-help'});
+    const dependencyList = el('div', {class: 'fleet-dependencies', id: 'fleetmanager-dependencies'});
+    const offlineFields = el('div', {class: 'media-source-fields', hidden: true}, field('FleetManager .deb package', packageSelect, el('span', {id: 'fleetmanager-package-help'}, 'Choose a corelight-fleet package for amd64. Upload it below or place it in the server media folder and refresh.')), el('fieldset', {class: 'fleet-dependency-fieldset'}, el('legend', {}, 'Additional dependency packages'), el('p', {class: 'media-help'}, 'Optional .deb files for dependencies absent from the Ubuntu VM. Supply the full set required by your FleetManager version. Package installation does not fall back to internet repositories.'), dependencyList));
+    const uploadFiles = el('input', {id: 'fleetmanager-package-files', type: 'file', accept: '.deb', multiple: true});
+    const uploadHelp = el('small');
+    const checksum = el('input', {id: 'fleetmanager-package-sha256', type: 'text', maxlength: 64, pattern: '[a-fA-F0-9]{64}', placeholder: 'Optional 64-character SHA-256 checksum', class: 'mono', autocomplete: 'off', spellcheck: 'false'});
+    const packageList = el('div', {class: 'stored-media-list', id: 'fleetmanager-package-list'});
+    const progress = el('progress', {max: 100, value: 0, 'aria-label': 'FleetManager package upload progress'});
+    const progressText = el('span', {role: 'status', 'aria-live': 'polite'});
+    const cancel = button('Cancel upload', 'button-ghost button-small', () => state.mediaUpload?.abort());
+    const progressBox = el('div', {class: 'media-progress', hidden: true}, progress, el('div', {}, progressText, cancel));
+    const clear = button('Clear FleetManager setup', 'button-small button-ghost', () => confirmRemoval()); clear.id = 'fleetmanager-clear';
+    function syncControls() {
+      const locked = Boolean(busy || externalBusy || !catalog);
+      for (const radio of [onlineRadio, offlineRadio]) { radio.checked = radio.value === mode; radio.disabled = locked; }
+      onlineFields.hidden = mode !== 'online'; offlineFields.hidden = mode !== 'offline';
+      uploads.hidden = mode !== 'offline';
+      community.disabled = locked; community.required = !catalog?.community_string_configured;
+      token.disabled = locked || mode !== 'online'; token.required = mode === 'online' && !catalog?.repository_token_configured;
+      license.disabled = locked; license.required = !catalog?.license;
+      packageSelect.disabled = locked || mode !== 'offline'; packageSelect.required = mode === 'offline';
+      for (const input of dependencyList.querySelectorAll('input')) input.disabled = locked || mode !== 'offline';
+      uploadFiles.disabled = locked; checksum.disabled = locked || uploadFiles.files.length > 1;
+      upload.disabled = locked || !uploadFiles.files.length;
+      save.disabled = locked; refresh.disabled = Boolean(busy || externalBusy);
+      clear.disabled = locked || (!catalog?.community_string_configured && !catalog?.license && !catalog?.repository_token_configured);
+      for (const control of packageList.querySelectorAll('button[data-delete-id]')) control.disabled = locked || !catalog?.packages.find(item => item.id === control.dataset.deleteId)?.can_delete;
+      if (!busy) { save.replaceChildren(icon('check'), 'Save FleetManager setup'); upload.replaceChildren(icon('plus'), 'Upload packages'); }
+      panel.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+    function renderCatalog(next, resetDraft = false) {
+      catalog = next;
+      if (resetDraft) { mode = next.mode || 'online'; packageId = next.package_id || ''; dependencyIds = new Set(next.dependency_ids || []); }
+      badge.className = next.ready ? 'status status-completed' : 'status'; badge.textContent = next.ready ? 'Ready for preflight' : 'Setup required';
+      community.placeholder = next.community_string_configured ? 'Leave blank to keep the saved community string' : 'Community string for your sensor connections';
+      communityHelp.textContent = next.community_string_configured ? 'Community string saved. Enter a value only to replace it.' : 'Required for both installation methods. Use printable characters without quotation marks.';
+      token.placeholder = next.repository_token_configured ? 'Leave blank to keep the saved repository token' : 'Paste your Corelight repository access token';
+      tokenHelp.textContent = next.repository_token_configured ? 'Repository token saved. Enter a value only to replace it.' : 'Required for online installation. This token is stored securely and is not displayed again.';
+      licenseHelp.textContent = next.license ? `Saved: ${next.license.name}. Choose a .pem file only to replace it.` : `Required for both methods. Upload the Corelight .pem license file, up to ${formatBytes(next.max_license_bytes)}.`;
+      savedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('server'), el('div', {}, el('span', {class: 'eyebrow'}, 'FLEETMANAGER SETUP'), el('strong', {}, next.ready ? `${next.mode === 'offline' ? 'Offline package' : 'Online repository'} configured` : 'Configure FleetManager before deploying'), el('p', {}, `Community string: ${next.community_string_configured ? 'saved' : 'needed'} · License: ${next.license ? next.license.name : 'needed'}`))));
+      if (next.license?.not_after) savedSummary.append(el('p', {class: 'media-help'}, `License expires ${date(next.license.not_after, true)}.`));
+      if (next.errors?.length) savedSummary.append(el('ul', {class: 'fleet-readiness-errors'}, next.errors.map(message => el('li', {}, message))));
+      if (next.community_string_configured || next.license || next.repository_token_configured) savedSummary.append(clear);
+      const packages = next.packages || [];
+      const mainPackages = packages.filter(item => item.package === 'corelight-fleet' && item.architecture === 'amd64' && item.available !== false);
+      packageSelect.replaceChildren(el('option', {value: ''}, mainPackages.length ? 'Choose a FleetManager package' : 'Upload a corelight-fleet .deb package'), ...mainPackages.map(item => el('option', {value: item.id}, `${item.name} · ${item.version} · ${formatBytes(item.size_bytes)}`))); packageSelect.value = packageId;
+      const dependencies = packages.filter(item => item.package !== 'corelight-fleet' && ['amd64', 'all'].includes(item.architecture) && item.available !== false);
+      dependencyList.replaceChildren(...dependencies.map(item => el('label', {class: 'check-label fleet-dependency'}, el('input', {type: 'checkbox', checked: dependencyIds.has(item.id), value: item.id, onChange: event => { if (event.target.checked) dependencyIds.add(item.id); else dependencyIds.delete(item.id); successBox.hidden = true; }}), el('span', {}, el('strong', {}, item.name), el('small', {}, `${item.package} ${item.version} · ${item.architecture}`)))));
+      if (!dependencies.length) dependencyList.append(el('p', {class: 'media-help'}, 'No dependency packages uploaded. Add any required .deb files below.'));
+      uploadHelp.textContent = `Upload one or more .deb files, up to ${formatBytes(next.max_upload_bytes)} each. Files are stored with GDeploy’s persistent data. Select packages and save setup after uploading.`;
+      packageList.replaceChildren(el('h4', {}, 'Available .deb packages', el('span', {class: 'count-badge'}, packages.length)));
+      if (!packages.length) packageList.append(el('p', {class: 'media-help'}, 'No FleetManager or dependency packages available yet.'));
+      for (const item of packages) {
+        const reasonId = `fleet-delete-reason-${item.id}`;
+        const remove = button('Delete', 'button-small button-danger', () => confirmRemoval(item)); remove.dataset.deleteId = item.id;
+        remove.setAttribute('aria-label', `Delete ${item.name}`);
+        if (item.delete_reason) { remove.setAttribute('aria-describedby', reasonId); remove.title = item.delete_reason; }
+        packageList.append(el('article', {class: 'stored-media-item'}, el('div', {class: 'stored-media-info'}, el('div', {class: 'stored-media-name'}, icon('layers'), el('strong', {}, item.name)), el('p', {class: 'media-help'}, `${item.package} ${item.version} · ${item.architecture} · ${formatBytes(item.size_bytes)} · ${item.source === 'upload' ? 'Uploaded' : 'GDeploy server'}${item.available === false ? ' · File unavailable' : ''}`), el('details', {class: 'media-integrity'}, el('summary', {}, 'Stored SHA-256'), el('code', {class: 'certificate-fingerprint'}, item.sha256)), item.delete_reason ? el('p', {class: 'media-delete-reason', id: reasonId}, item.delete_reason) : null), remove));
+      }
+      onChange(next); syncControls();
+    }
+    async function load() {
+      if (!currentView() || busy || externalBusy) return;
+      busy = 'load'; inlineError(errorBox, ''); setBusy(refresh, 'Refreshing…'); syncControls();
+      try { const next = await api(endpoint); if (currentView()) renderCatalog(next, !catalog); }
+      catch (error) { if (currentView()) { inlineError(errorBox, error.message); badge.textContent = 'Couldn’t load setup'; } }
+      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh'); syncControls(); } }
+    }
+    function confirmRemoval(item = null) {
+      if (!currentView() || busy || externalBusy || (item && !item.can_delete)) return;
+      const dialog = $('#confirm-dialog'), error = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+      const dismiss = button('Cancel', '', () => dialog.close());
+      const remove = button(item ? 'Delete package' : 'Clear setup', 'button-danger', async () => {
+        if (!currentView()) { dialog.close(); return; }
+        if (busy || externalBusy) return;
+        busy = 'delete'; onBusy(true); dialog.dataset.busy = 'true'; dismiss.disabled = true; setBusy(remove, 'Removing…'); syncControls();
+        try {
+          const next = await api(item ? `${endpoint}/packages/${encodeURIComponent(item.id)}` : endpoint, {method: 'DELETE'});
+          if (!currentView()) return;
+          if (item) { if (packageId === item.id) packageId = ''; dependencyIds.delete(item.id); }
+          else { community.value = ''; token.value = ''; license.value = ''; }
+          renderCatalog(next, !item); dialog.close(); successBox.textContent = item ? `${item.name} deleted.` : 'FleetManager setup cleared. Uploaded packages and existing deployments are preserved.'; successBox.hidden = false;
+        } catch (failure) { if (currentView()) inlineError(error, failure.message); }
+        finally { delete dialog.dataset.busy; dismiss.disabled = false; remove.disabled = false; remove.replaceChildren(item ? 'Delete package' : 'Clear setup'); if (currentView()) { busy = ''; onBusy(false); syncControls(); } }
+      });
+      dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, item ? 'Delete saved package?' : 'Clear FleetManager setup?')), el('div', {class: 'confirm-body'}, el('p', {}, item ? `Permanently delete ${item.name} and free ${formatBytes(item.size_bytes)}? Selected packages and files used by queued or running deployments are protected.` : 'Remove the saved community string, repository token, license, and package selections for future deployments. Existing deployments and uploaded packages are preserved.'), error, el('div', {class: 'confirm-actions'}, dismiss, remove)));
+      dialog.showModal(); dismiss.focus();
+    }
+    const refresh = button('Refresh', 'button-small', load, 'refresh'); refresh.id = 'fleetmanager-refresh';
+    const save = button('Save FleetManager setup', 'button-primary', null, 'check'); save.type = 'submit';
+    const form = el('form', {onSubmit: async event => {
+      event.preventDefault();
+      if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return;
+      if (community.value && /["'\x00-\x1f\x7f]/.test(community.value)) { inlineError(errorBox, 'Use a community string without quotation marks or control characters.'); community.focus(); return; }
+      if (mode === 'online' && token.value && /[^\x21-\x7e]|:/.test(token.value)) { inlineError(errorBox, 'The repository access token must use ASCII characters without whitespace or colons.'); token.focus(); return; }
+      const file = license.files[0];
+      if (file && (!file.name.toLowerCase().endsWith('.pem') || !file.size || file.size > catalog.max_license_bytes)) { inlineError(errorBox, `Choose a nonempty .pem license file no larger than ${formatBytes(catalog.max_license_bytes)}.`); return; }
+      busy = 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true; setBusy(save, 'Saving…'); syncControls();
+      try {
+        const payload = {mode, package_id: packageId || null, dependency_ids: [...dependencyIds]};
+        if (community.value) payload.community_string = community.value;
+        if (mode === 'online' && token.value) payload.repository_token = token.value;
+        if (file) { payload.license_pem = await file.text(); payload.license_name = file.name; }
+        if (!currentView()) return;
+        const next = await api(endpoint, {method: 'PUT', body: payload});
+        if (!currentView()) return;
+        community.value = ''; token.value = ''; license.value = ''; renderCatalog(next, true);
+        successBox.textContent = 'FleetManager setup saved. New FleetManager deployments will use this configuration.'; successBox.hidden = false;
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally { if (currentView()) { busy = ''; onBusy(false); syncControls(); } }
+    }}, el('div', {class: 'form-body'}, savedSummary, errorBox, successBox,
+      el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Installation method'), el('label', {}, onlineRadio, 'Online repository'), el('label', {}, offlineRadio, 'Offline package')),
+      field('Community string', community, communityHelp), field('Corelight license (.pem)', license, licenseHelp), onlineFields, offlineFields),
+      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), save));
+    const upload = button('Upload packages', 'button-primary button-small', async () => {
+      if (!currentView() || busy || externalBusy || !catalog) return;
+      const files = [...uploadFiles.files];
+      if (!files.length || files.some(file => !file.name.toLowerCase().endsWith('.deb') || !file.size || file.size > catalog.max_upload_bytes)) { inlineError(errorBox, `Choose nonempty .deb files no larger than ${formatBytes(catalog.max_upload_bytes)} each.`); return; }
+      if (files.length === 1 && !checksum.reportValidity()) return;
+      const expected = files.length === 1 ? checksum.value.trim().toLowerCase() : '';
+      busy = 'upload'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true; progressBox.hidden = false; progress.value = 0; cancel.disabled = false; setBusy(upload, 'Uploading…'); syncControls();
+      try {
+        for (const [index, file] of files.entries()) {
+          const next = await uploadMedia(file, expected, (loaded, total) => { if (currentView()) { progress.value = Math.round((index + loaded / total) / files.length * 100); progressText.textContent = `${file.name}: ${formatBytes(loaded)} of ${formatBytes(total)}${loaded >= total ? ' · Validating package…' : ''}`; } }, `${endpoint}/packages/upload`);
+          if (!currentView()) return;
+          const item = next.packages.find(candidate => candidate.id === next.uploaded_package_id);
+          if (item?.package === 'corelight-fleet') packageId = item.id; else if (item) dependencyIds.add(item.id);
+          renderCatalog(next);
+        }
+        uploadFiles.value = ''; checksum.value = ''; successBox.textContent = 'Packages uploaded. Select Offline package and save FleetManager setup to use them for new deployments.'; successBox.hidden = false;
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
+    }, 'plus'); upload.id = 'fleetmanager-upload';
+    const uploads = el('section', {class: 'media-storage'}, el('div', {class: 'surface-header'}, el('div', {}, el('h3', {}, 'Offline packages'), el('p', {}, 'Upload FleetManager and any required dependency .deb files.'))), el('div', {class: 'media-storage-body'}, field('Package files (.deb)', uploadFiles, uploadHelp), field('Expected SHA-256 · optional', checksum, 'Only for a single file. If supplied by your package source, GDeploy checks this value. Otherwise it records a checksum for future integrity checks.'), el('div', {class: 'fleet-upload-actions'}, upload), progressBox, packageList));
+    const panel = el('section', {class: 'surface', id: 'fleetmanager-panel', 'aria-labelledby': 'fleetmanager-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'fleetmanager-title'}, 'FleetManager'), el('p', {}, 'Configure Corelight FleetManager installation and sensor access.')), badge, refresh), form, uploads);
+    packageSelect.addEventListener('change', () => { packageId = packageSelect.value; successBox.hidden = true; });
+    uploadFiles.addEventListener('change', () => { checksum.value = ''; syncControls(); });
+    for (const input of [community, token, license]) input.addEventListener('input', () => { successBox.hidden = true; inlineError(errorBox, ''); });
+    return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
+  }
   function createSSHAccessPanel(onSaved, onBusy, initialDraft) {
     const viewEpoch = state.routeEpoch;
     let savedKeys = [], loaded = false, busy = false, externalBusy = false;
@@ -977,6 +1138,8 @@
     let sshControls = null;
     let packagesBusy = false;
     let packagesControls = null;
+    let fleetBusy = false;
+    let fleetControls = null;
     const returnToWizard = state.wizard?.suspended ? button('Return to deployment', 'button-primary button-small', () => { location.hash = 'deployments/continue'; }, 'back') : null;
     let fingerprintConfirmed = false;
     let trustButton = null;
@@ -994,7 +1157,7 @@
       return value && !Number.isNaN(parsed.getTime()) ? new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}).format(parsed) : 'Not available';
     };
     function syncControls() {
-      const busy = Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy || packagesBusy);
+      const busy = Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy || packagesBusy || fleetBusy);
       const identityChanged = hostKey(host.value) !== hostKey(settings.host) || username.value.trim() !== (settings.username || '');
       const lockInputs = Boolean(connectionBusy || ['trust', 'remove'].includes(certificateBusy));
       host.disabled = lockInputs; username.disabled = lockInputs; password.disabled = lockInputs;
@@ -1006,9 +1169,10 @@
       if (removeButton) removeButton.disabled = busy;
       if (comparison) comparison.disabled = busy || !certificateUsable();
       certificatePanel.setAttribute('aria-busy', certificateBusy ? 'true' : 'false');
-      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || sshBusy || packagesBusy));
-      sshControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || packagesBusy));
-      packagesControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy));
+      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || sshBusy || packagesBusy || fleetBusy));
+      sshControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || packagesBusy || fleetBusy));
+      packagesControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy || fleetBusy));
+      fleetControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy || packagesBusy));
       if (returnToWizard) returnToWizard.disabled = busy;
     }
     function renderCertificate() {
@@ -1163,7 +1327,7 @@
         tab.button.tabIndex = selected ? 0 : -1;
         panels[name].hidden = !selected;
       }
-      if (updateHash) history.replaceState(history.state, '', `#settings/${key}`);
+      if (updateHash) history.replaceState(history.state, '', `#settings/${key}${key === 'packages' && state.packageTab !== 'splunk' ? `/${state.packageTab}` : ''}`);
       if (focus) tabs[key].button.focus();
     }
     function createSetupTab(key, number, title) {
@@ -1196,20 +1360,42 @@
       updateTab('media', saved.iso_configured, saved.iso_configured ? 'OS ISO selected · ready for preflight' : 'Select or upload an OS ISO');
       const sshCount = Number(saved.ssh_key_count || 0);
       updateTab('ssh', sshCount > 0, sshCount ? `${sshCount} public ${sshCount === 1 ? 'key' : 'keys'} saved · optional` : 'Optional · add your public keys');
-      updateTab('packages', saved.splunk_configured, saved.splunk_configured ? 'Splunk package selected' : 'Required for Splunk deployments');
-      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · when selected', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Open Software packages to upload or select the Splunk installer and verify its checksum.', 'layers')));
+      const configuredSoftware = Number(Boolean(saved.splunk_configured)) + Number(Boolean(saved.fleetmanager_configured));
+      updateTab('packages', configuredSoftware > 0, configuredSoftware ? `${configuredSoftware} software ${configuredSoftware === 1 ? 'configuration' : 'configurations'} ready` : 'Set up the software you plan to deploy');
+      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · when selected', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Open Software packages to upload or select the Splunk installer and verify its checksum.', 'layers'), item(saved.fleetmanager_configured, 'FleetManager · when selected', saved.fleetmanager_configured ? `${saved.fleetmanager_mode === 'offline' ? 'Offline package' : 'Online repository'}, community string, and license configured.` : 'Open Software packages → FleetManager to configure installation, community string, and license.', 'server')));
     }
     mediaControls = createMediaPanel(catalog => { if (state.settings) state.settings.iso_configured = catalog.ready; renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
     sshControls = createSSHAccessPanel(count => { if (state.settings) state.settings.ssh_key_count = count; renderReadiness(); }, value => { sshBusy = value; syncControls(); }, initialSSHdraft);
     packagesControls = createSplunkPackagePanel(catalog => { if (state.settings) state.settings.splunk_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { packagesBusy = value; syncControls(); });
+    fleetControls = createFleetManagerPanel(catalog => { if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; state.settings.fleetmanager_mode = catalog.mode; } invalidatePreflight(); renderReadiness(); }, value => { fleetBusy = value; syncControls(); });
     panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form);
     panels.media = el('div', {id: 'setup-panel-media', role: 'tabpanel', 'aria-labelledby': 'setup-tab-media', tabindex: '0'}, mediaControls.panel);
     panels.ssh = el('div', {id: 'setup-panel-ssh', role: 'tabpanel', 'aria-labelledby': 'setup-tab-ssh', tabindex: '0'}, sshControls.panel);
-    panels.packages = el('div', {id: 'setup-panel-packages', role: 'tabpanel', 'aria-labelledby': 'setup-tab-packages', tabindex: '0'}, packagesControls.panel);
+    const softwareTabs = el('div', {class: 'software-tabs', role: 'tablist', 'aria-label': 'Software configuration'});
+    const softwareButtons = {}, softwarePanels = {};
+    function selectSoftware(key, focus = false, updateHash = true) {
+      state.packageTab = key;
+      for (const [name, control] of Object.entries(softwareButtons)) {
+        const selected = name === key; control.setAttribute('aria-selected', String(selected)); control.tabIndex = selected ? 0 : -1;
+        softwarePanels[name].hidden = !selected;
+      }
+      if (updateHash) history.replaceState(history.state, '', `#settings/packages${key === 'splunk' ? '' : `/${key}`}`);
+      if (focus) softwareButtons[key].focus();
+    }
+    for (const [key, label, content] of [['splunk', 'Splunk Enterprise', packagesControls.panel], ['fleetmanager', 'FleetManager', fleetControls.panel]]) {
+      softwareButtons[key] = el('button', {type: 'button', id: `software-tab-${key}`, role: 'tab', 'aria-controls': `software-panel-${key}`, onClick: () => selectSoftware(key), onKeydown: event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault(); selectSoftware(event.key === 'Home' ? 'splunk' : event.key === 'End' ? 'fleetmanager' : key === 'splunk' ? 'fleetmanager' : 'splunk', true);
+      }}, label);
+      softwarePanels[key] = el('div', {id: `software-panel-${key}`, role: 'tabpanel', 'aria-labelledby': `software-tab-${key}`}, content);
+      softwareTabs.append(softwareButtons[key]);
+    }
+    panels.packages = el('div', {id: 'setup-panel-packages', role: 'tabpanel', 'aria-labelledby': 'setup-tab-packages', tabindex: '0'}, softwareTabs, softwarePanels.splunk, softwarePanels.fleetmanager);
+    selectSoftware(state.packageTab || 'splunk', false, false);
     const draftBanner = returnToWizard ? el('div', {class: 'connection-banner'}, icon('clock'), el('div', {}, el('strong', {}, 'Your deployment draft is saved in this tab'), el('p', {}, 'Finish setup, then return to your VM names, resources, and network settings. Preflight will run again before deployment.')), returnToWizard) : null;
     page.replaceChildren(...[heading('Setup', 'Configure your host, OS installation media, SSH access, and software packages.'), draftBanner, steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, panels.connection, panels.media, panels.ssh, panels.packages), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.')))].filter(Boolean));
     selectSetupTab(state.setupTab || (settings.configured && !settings.iso_configured ? 'media' : 'connection'), {updateHash: false});
-    renderReadiness(); renderCertificate(); syncControls(); mediaControls.load(); packagesControls.load(); sshControls.load();
+    renderReadiness(); renderCertificate(); syncControls(); mediaControls.load(); packagesControls.load(); fleetControls.load(); sshControls.load();
   }
   function field(label, input, hint) { return el('label', {class: 'field'}, el('span', {}, label), input, hint ? el('small', {}, hint) : null); }
   function renderDetail(data) {
@@ -1332,7 +1518,9 @@
           section.append(el('div', {class: 'secret-service'}, service.name || 'Service'));
           if (service.url) section.append(el('div', {class: 'service-links'}, serviceLink(service)));
           if (service.username) section.append(secretField('Service username', service.username));
-          if (service.password) section.append(secretField('Service password', service.password));
+          if (service.password) section.append(secretField(service.password_change_required ? 'Temporary admin password' : 'Service password', service.password));
+          if (service.password_change_required) section.append(el('p', {class: 'credentials-first-login'}, 'Change this temporary administrator password when you first sign in to FleetManager. GDeploy’s saved value will remain the original temporary password.'));
+          if (service.community_string) section.append(secretField('Community string', service.community_string));
         }
         if (vm.ssh_host_key) section.append(el('details', {class: 'host-key'}, el('summary', {}, 'SSH host key'), el('code', {}, vm.ssh_host_key)));
         body.append(section);
@@ -1431,7 +1619,7 @@
     if (state.route === 'deployments') renderOverview();
   }
   function wizardSetupLink(label, href = '#settings/packages') {
-    if (!/^#settings\/(connection|media|ssh|packages)$/.test(href)) return null;
+    if (!/^#settings\/(connection|media|ssh|packages(?:\/(?:splunk|fleetmanager))?)$/.test(href)) return null;
     return el('a', {href, class: 'button button-small wizard-setup-link', onClick: event => {
       event.preventDefault();
       if (!state.wizard || state.wizard.busy) return;
@@ -1500,11 +1688,13 @@
         if (role === 'elasticsearch' && !event.target.checked) wizard.selected.delete('kibana');
         invalidatePreflight(); renderWizard();
       }});
-      const packageStatus = role === 'splunk' ? el('small', {class: `role-package-status ${state.settings?.splunk_configured ? 'ready' : ''}`}, state.settings?.splunk_configured ? 'Installer package configured' : 'Installer package needed in Setup') : null;
+      const readiness = role === 'splunk' ? state.settings?.splunk_configured : role === 'fleetmanager' ? state.settings?.fleetmanager_configured : null;
+      const packageStatus = ['splunk', 'fleetmanager'].includes(role) ? el('small', {class: `role-package-status ${readiness ? 'ready' : ''}`}, readiness ? role === 'fleetmanager' ? `${state.settings.fleetmanager_mode === 'offline' ? 'Offline package' : 'Online repository'} configured` : 'Installer package configured' : role === 'fleetmanager' ? 'Installation setup needed' : 'Installer package needed in Setup') : null;
       grid.append(el('label', {class: 'role-option'}, checkbox, roleIcon(role), el('span', {class: 'role-option-text'}, el('strong', {}, config.name), el('small', {}, config.description), packageStatus)));
     }
-    content.append(el('div', {class: 'field-section-label'}, 'Software & roles', el('span', {}, `${wizard.selected.size} ${wizard.selected.size === 1 ? 'VM' : 'VMs'} selected`)), grid, el('div', {class: 'wizard-callout'}, icon('info'), el('span', {}, 'Selecting Kibana also selects Elasticsearch. GDeploy configures their connection, matching versions, and TLS. Splunk runs independently on its own VM.')));
+    content.append(el('div', {class: 'field-section-label'}, 'Software & roles', el('span', {}, `${wizard.selected.size} ${wizard.selected.size === 1 ? 'VM' : 'VMs'} selected`)), grid, el('div', {class: 'wizard-callout'}, icon('info'), el('span', {}, 'Selecting Kibana also selects Elasticsearch. GDeploy configures their connection, matching versions, and TLS. Splunk and FleetManager each run on their own VM.')));
     if (wizard.selected.has('splunk') && !state.settings?.splunk_configured) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'Add the Splunk Enterprise Linux x86_64 .tgz package and its publisher checksum in Setup. Your deployment draft will be kept while you do this.'), wizardSetupLink('Configure Splunk package')));
+    if (wizard.selected.has('fleetmanager') && !state.settings?.fleetmanager_configured) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'Configure FleetManager’s installation method, community string, and .pem license in Setup. Your deployment draft will be kept while you do this.'), wizardSetupLink('Configure FleetManager', '#settings/packages/fleetmanager')));
   }
   function renderResources(content) {
     const wizard = state.wizard;
@@ -1516,10 +1706,12 @@
     }, roles[role].icon))));
     for (const [index, role] of selected.entries()) {
       const vm = wizard.vms[role];
+      const limits = roleLimits(role);
       const form = el('section', {class: 'vm-resource-form', id: `vm-resource-${role}`, 'data-vm-role': role, 'aria-labelledby': `vm-heading-${role}`});
       const invalidAttrs = key => wizard.vmError?.role === role && wizard.vmError.key === key ? {'aria-invalid': 'true', 'aria-describedby': `vm-error-${role}`} : {};
       const input = (key, attrs = {}) => el('input', {id: `vm-${role}-${key}`, ...attrs, ...invalidAttrs(key), value: vm[key], onInput: event => { vm[key] = ['cpu', 'ram_gb', 'disk_gb'].includes(key) ? Number(event.target.value) : event.target.value; invalidatePreflight(); }});
-      form.append(...[el('div', {class: 'vm-form-header'}, roleIcon(role), el('div', {}, el('h4', {id: `vm-heading-${role}`}, `${roleName(role)} VM`), el('p', {}, 'Operating system from your selected OS ISO')), el('span', {class: 'vm-form-number'}, `VM ${index + 1} of ${selected.length}`)), wizard.vmError?.role === role ? el('div', {id: `vm-error-${role}`, class: 'alert alert-error vm-validation-error', role: 'alert', tabindex: '-1'}, wizard.vmError.error) : null, field('Virtual machine name', input('name', {type: 'text', required: true, maxlength: 63, pattern: '[a-z](?:(?:[a-z0-9]|-)*[a-z0-9])?', autocomplete: 'off', spellcheck: 'false'}), 'A unique hostname starting with a letter; lowercase letters, numbers, and hyphens only.'), el('div', {class: 'field-grid three'}, field('CPU cores', input('cpu', {type: 'number', min: 1, max: 128, step: 1, required: true}), 'vCPU'), field('Memory', input('ram_gb', {type: 'number', min: ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[role], max: 2048, step: 1, required: true}), 'GB RAM'), field('Disk size', input('disk_gb', {type: 'number', min: 25, max: 65536, step: 1, required: true}), 'GB · thin provisioned'))].filter(Boolean));
+      form.append(...[el('div', {class: 'vm-form-header'}, roleIcon(role), el('div', {}, el('h4', {id: `vm-heading-${role}`}, `${roleName(role)} VM`), el('p', {}, 'Operating system from your selected OS ISO')), el('span', {class: 'vm-form-number'}, `VM ${index + 1} of ${selected.length}`)), wizard.vmError?.role === role ? el('div', {id: `vm-error-${role}`, class: 'alert alert-error vm-validation-error', role: 'alert', tabindex: '-1'}, wizard.vmError.error) : null, field('Virtual machine name', input('name', {type: 'text', required: true, maxlength: 63, pattern: '[a-z](?:(?:[a-z0-9]|-)*[a-z0-9])?', autocomplete: 'off', spellcheck: 'false'}), 'A unique hostname starting with a letter; lowercase letters, numbers, and hyphens only.'), el('div', {class: 'field-grid three'}, field('CPU cores', input('cpu', {type: 'number', min: limits.cpu, max: 128, step: 1, required: true}), 'vCPU'), field('Memory', input('ram_gb', {type: 'number', min: limits.ram, max: 2048, step: 1, required: true}), 'GB RAM'), field('Disk size', input('disk_gb', {type: 'number', min: limits.disk, max: 65536, step: 1, required: true}), 'GB · thin provisioned'))].filter(Boolean));
+      if (role === 'fleetmanager') form.append(el('p', {class: 'media-help'}, 'FleetManager requires at least 2 CPUs, 8 GB RAM, and enough disk for 30 GB in /var, 20 GB in /tmp, and the operating system. The 80 GB default provides additional headroom.'));
       const datastore = el('select', {id: `vm-${role}-datastore`, ...invalidAttrs('datastore'), required: true, onChange: event => { vm.datastore = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a datastore'), (state.inventory?.datastores || []).map(store => el('option', {value: store.name}, `${store.name} · ${Math.floor(Number(store.free_gb))} GB free`))); datastore.value = vm.datastore;
       const network = el('select', {id: `vm-${role}-network`, ...invalidAttrs('network'), required: true, onChange: event => { vm.network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a port group'), (state.inventory?.networks || []).map(net => el('option', {value: net.name}, net.name))); network.value = vm.network;
       form.append(el('div', {class: 'field-grid'}, field('Datastore', datastore, 'Storage destination on the ESXi host.'), field('Network / port group', network, 'Must be reachable from GDeploy.')), el('hr', {class: 'form-divider'}), el('div', {class: 'field-section-label'}, 'IP address configuration'));
@@ -1546,6 +1738,7 @@
     const review = el('div', {});
     for (const vm of spec.vms) review.append(el('div', {class: 'review-vm'}, el('div', {class: 'review-vm-head'}, roleIcon(vm.role), el('strong', {}, vm.name)), el('small', {}, `${roleName(vm.role)} · ${vm.cpu} vCPU · ${vm.ram_gb} GB RAM · ${vm.disk_gb} GB disk`, el('br'), `${vm.datastore} · ${vm.network} · ${vm.ip_mode === 'dhcp' ? 'DHCP' : vm.address}`, vm.ip_mode === 'static' ? [el('br'), `Gateway ${vm.gateway} · DNS ${vm.dns.join(', ')}`] : null)));
     content.append(review);
+    if (wizard.selected.has('fleetmanager')) content.append(el('div', {class: 'wizard-callout'}, icon('server'), el('span', {}, `FleetManager installation: ${state.settings?.fleetmanager_mode === 'offline' ? 'Offline .deb packages. Package installation uses only the supplied files and installed dependencies.' : 'Online vendor repository. The VM needs internet access; the repository remains configured for future updates.'} Saved community string and license are applied during installation.`)));
     if (wizard.selected.has('splunk')) content.append(el('div', {class: 'license-box'}, el('label', {class: 'check-label'}, el('input', {type: 'checkbox', checked: wizard.accepted, onChange: event => { wizard.accepted = event.target.checked; invalidatePreflight(); renderWizard(); }}), el('span', {}, 'I have reviewed and accept the Splunk license terms applicable to the supplied package, and I authorize unattended acceptance during installation.'))));
     content.append(el('div', {class: 'wizard-callout'}, icon('key'), el('span', {}, 'Linux and application credentials are generated during provisioning. Reveal them from the Credentials panel on the deployment page.')));
     const preflight = el('div', {class: 'preflight-box'}, el('div', {class: 'preflight-title'}, el('h4', {}, 'Preflight checks'), el('span', {}, wizard.preflight ? wizard.preflight.ok ? 'All checks passed' : 'Resolve failed checks' : 'Not run yet')));
@@ -1562,11 +1755,12 @@
     const spec = getSpec(); const names = new Set();
     for (const vm of spec.vms) {
       let invalid = null;
+      const limits = roleLimits(vm.role);
       if (!validHostname(vm.name)) invalid = ['name', 'Use a VM name of 1–63 lowercase letters, numbers, or hyphens, beginning with a letter and ending with a letter or number.'];
       else if (names.has(vm.name)) invalid = ['name', 'Every virtual machine needs a unique name.'];
-      else if (!Number.isInteger(vm.cpu) || vm.cpu < 1 || vm.cpu > 128) invalid = ['cpu', 'CPU cores must be a whole number from 1 to 128.'];
-      else if (!Number.isInteger(vm.ram_gb) || vm.ram_gb < ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role] || vm.ram_gb > 2048) invalid = ['ram_gb', `Memory must be a whole number from ${({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[vm.role]} to 2048 GB for this role.`];
-      else if (!Number.isInteger(vm.disk_gb) || vm.disk_gb < 25 || vm.disk_gb > 65536) invalid = ['disk_gb', 'Disk size must be a whole number from 25 to 65536 GB.'];
+      else if (!Number.isInteger(vm.cpu) || vm.cpu < limits.cpu || vm.cpu > 128) invalid = ['cpu', `CPU cores must be a whole number from ${limits.cpu} to 128.`];
+      else if (!Number.isInteger(vm.ram_gb) || vm.ram_gb < limits.ram || vm.ram_gb > 2048) invalid = ['ram_gb', `Memory must be a whole number from ${limits.ram} to 2048 GB for this role.`];
+      else if (!Number.isInteger(vm.disk_gb) || vm.disk_gb < limits.disk || vm.disk_gb > 65536) invalid = ['disk_gb', `Disk size must be a whole number from ${limits.disk} to 65536 GB.`];
       else if (!vm.datastore || !vm.network) invalid = [!vm.datastore ? 'datastore' : 'network', 'Choose a datastore and network for this VM.'];
       else if (vm.ip_mode === 'static') {
         const [address, prefix, extra] = vm.address.split('/');

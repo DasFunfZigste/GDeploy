@@ -141,6 +141,7 @@ def _ipv4(value: str) -> str:
 
 def _autoinstall_data(
     spec: dict, username: str, password: str, ssh_public_key: str, authorized_ssh_keys: list[str] | None = None,
+    *, offline: bool = False,
 ) -> dict:
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", username):
         raise GuestError("Ubuntu username must start with a letter and be at most 32 characters.")
@@ -179,7 +180,7 @@ def _autoinstall_data(
         )
     else:
         raise GuestError("IP mode must be dhcp or static.")
-    return {
+    data = {
         "autoinstall": {
             "version": 1,
             "refresh-installer": {"update": False},
@@ -201,6 +202,14 @@ def _autoinstall_data(
             "shutdown": "reboot",
         }
     }
+    if offline:
+        # No candidate mirrors forces Subiquity's supported offline fallback.
+        # Keep networking enabled for SSH/VMware Tools after installing from ISO.
+        data["autoinstall"]["apt"] = {
+            "mirror-selection": {"primary": []}, "fallback": "offline-install", "geoip": False,
+        }
+        data["autoinstall"]["source"] = {"id": "ubuntu-server", "search_drivers": False}
+    return data
 
 
 def _patch_grub(text: str) -> str:
@@ -261,6 +270,7 @@ def _iso_tool_log(output, secrets):
 def build_seed_iso(
     source_iso: Path, output_iso: Path, spec: dict, username: str, password: str, ssh_public_key: str,
     *, authorized_ssh_keys: list[str] | None = None, log: Callable[[str, str], None] | None = None,
+    offline: bool = False,
 ) -> None:
     """Replay the original ISO's boot metadata while adding a NoCloud seed."""
     source_iso, output_iso = Path(source_iso), Path(output_iso)
@@ -268,7 +278,7 @@ def build_seed_iso(
         raise GuestError("A separate readable Ubuntu 24.04 live-server ISO is required.")
     if output_iso.exists():
         raise GuestError("Refusing to overwrite an existing deployment ISO.")
-    data = _autoinstall_data(spec, username, password, ssh_public_key, authorized_ssh_keys)
+    data = _autoinstall_data(spec, username, password, ssh_public_key, authorized_ssh_keys, offline=offline)
     installed_keys = data["autoinstall"]["ssh"]["authorized-keys"]
     # Tool errors may print a whole YAML key or only its encoded key material.
     secrets = (
@@ -954,9 +964,18 @@ class GuestSession:
             time.sleep(min(5, max(0, deadline - time.monotonic())))
         raise GuestError(f"Timed out verifying OS readiness: {last_pending}. Expand deployment logs and check the guest console.")
 
-    def _run_script(self, script: str, payload: dict, package: Path | None = None) -> dict:
+    def _run_script(
+        self, script: str, payload: dict, package: Path | None = None, *, extra_files: dict[str, Path] | None = None,
+    ) -> dict:
         if self.client is None:
             raise GuestError("SSH session is not connected.")
+        extra_files = extra_files or {}
+        if any(
+            not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name)
+            or name in {"install.sh", "payload.json", "splunk.tgz"}
+            for name in extra_files
+        ):
+            raise GuestError("Guest installation file names must be safe, unique staging names.")
         remote = f"/home/{self.username}/.gdeploy-{secret_tools.token_hex(16)}"
         transferred = False
         try:
@@ -969,6 +988,9 @@ class GuestSession:
                 if package is not None:
                     sftp.put(str(package), f"{remote}/splunk.tgz")
                     sftp.chmod(f"{remote}/splunk.tgz", 0o600)
+                for filename, local in extra_files.items():
+                    sftp.put(str(local), f"{remote}/{filename}")
+                    sftp.chmod(f"{remote}/{filename}", 0o600)
             transferred = True
             quoted = shlex.quote(remote)
             # Scripts and their secret payload become root-owned before execution.
@@ -1003,12 +1025,59 @@ class GuestSession:
         splunk_package: Path | None = None,
         splunk_sha256: str | None = None,
         log: Callable[[str], None] = lambda message: None,
+        fleetmanager: dict | None = None,
     ) -> dict:
         self._secrets.update(value for value in secrets.values() if isinstance(value, str))
         payload: dict = {"ip": self.ip, "secrets": secrets}
         if role == "ubuntu":
             log("Ubuntu installation verified; no application selected.")
             return {"services": []}
+        if role == "fleetmanager":
+            from .fleet_guest import installer_script, secret_values
+
+            if not isinstance(fleetmanager, dict) or fleetmanager.get("mode") not in {"online", "offline"}:
+                raise GuestError("Configure Fleet Manager installation settings in Setup before deploying.")
+            for key in ("community_string", "license_pem", "license_sha256"):
+                if not isinstance(fleetmanager.get(key), str) or not fleetmanager[key]:
+                    raise GuestError("Fleet Manager requires a verified license PEM and community string from Setup.")
+            if not re.fullmatch(r"[0-9a-f]{64}", fleetmanager["license_sha256"]):
+                raise GuestError("Fleet Manager requires a verified license PEM SHA-256 from Setup.")
+            if fleetmanager["mode"] == "online" and (
+                not isinstance(fleetmanager.get("repository_token"), str) or not fleetmanager["repository_token"]
+            ):
+                raise GuestError("ONLINE Fleet Manager requires a customer repository token in Setup.")
+            self._secrets.update(secret_values(fleetmanager))
+            payload["fleetmanager"] = {key: fleetmanager.get(key) for key in (
+                "mode", "community_string", "repository_token", "license_pem", "license_name", "license_sha256",
+            )}
+            files = {}
+            payload["fleet_files"] = []
+            if fleetmanager["mode"] == "offline":
+                packages = [fleetmanager.get("package"), *fleetmanager.get("dependencies", [])]
+                for index, item in enumerate(packages):
+                    if (
+                        not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                        or not isinstance(item.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                    ):
+                        raise GuestError("OFFLINE Fleet Manager requires verified installer and dependency .deb packages from Setup.")
+                    filename = "fleetmanager.deb" if index == 0 else f"dependency-{index}.deb"
+                    files[filename] = Path(item["path"])
+                    payload["fleet_files"].append({"filename": filename, "sha256": item["sha256"]})
+            mode = fleetmanager["mode"].upper()
+            log(f"Installing Fleet Manager in {mode} mode, applying its product identity license, and verifying its services.")
+            result = self._run_script(installer_script(), payload, extra_files=files)
+            if (
+                not isinstance(result, dict) or result.get("username") != "admin"
+                or not isinstance(result.get("password"), str) or not result["password"]
+                or result.get("password_change_required") is not True or not result.get("version")
+            ):
+                raise GuestError("Fleet Manager did not return its verified initial administrator credentials.")
+            self._secrets.add(result["password"])
+            return {"services": [{
+                "name": "Fleet Manager", "url": f"https://{self.ip}", "username": "admin", "password": result["password"],
+                "password_change_required": True, "version": result["version"],
+                "community_string": fleetmanager["community_string"],
+            }]}
         if role == "elasticsearch":
             _safe_text(secrets["elastic_password"], "Elasticsearch password")
             payload["config"] = _elasticsearch_config(self.ip)

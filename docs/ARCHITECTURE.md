@@ -14,6 +14,8 @@ flowchart LR
   Worker -->|SSH| Ubuntu
   Kibana[Kibana VM] -->|Service token and verified TLS| Elastic[Elasticsearch VM]
   Splunk[Splunk VM]
+  Fleet[FleetManager VM]
+  FleetPackages[Online Corelight repository or supplied offline .deb files] --> Fleet
 ```
 
 Deployment stages: queued → preflight → preparing media → creating VM → installing OS → installing software → verifying → completed. An exception moves the job to failed and preserves its error/events. Shutdown during work becomes interrupted on restart. Queued jobs survive restart; running jobs are deliberately not resumed because an external operation may have completed without a local acknowledgment.
@@ -56,4 +58,22 @@ SSH access settings store validated administrator public keys in a separate encr
 
 Saving or clearing the default key list does not contact existing guests. Jobs created before this feature have no administrator-key snapshot and keep their prior behavior. A replacement created by delete-and-redeploy captures the current list. The settings table and deployment snapshots belong in complete data-volume backups. Older app versions ignore these administrator keys, including snapshots on queued jobs; finish queued work before rollback. Generated automation keys, password access and guest sudo behavior are unchanged.
 
-An actual host/guest lab is required to establish integration compatibility. No simulated deployment mode is exposed to users, and production success is only reported after OS and application checks return successfully.
+## FleetManager
+
+FleetManager is a fifth optional VM role alongside OS only, Splunk, Elasticsearch and Kibana. Its own VM specification requires at least 2 vCPUs, 8 GiB RAM and 60 GiB disk; the UI defaults to 80 GiB disk. The Ubuntu direct layout uses the full disk, with `/var` and `/tmp` normally sharing the root filesystem. Guest checks validate 30 GiB free at `/var` and 20 GiB free at `/tmp` before installing Fleet Manager.
+
+`FleetManager` manages encrypted `fleetmanager_settings` and `fleetmanager_files` records. Its authenticated settings API exposes readiness flags, package metadata and license name/checksum/expiry. Community strings, repository tokens and raw PEM/private-key data are omitted from ordinary responses. Saving validates the product identity PEM's first certificate, matching unencrypted private key and dates; actual Corelight product entitlement is checked by the guest application. Blank fields retain existing secrets. Clearing defaults does not contact guests or delete registered packages.
+
+Online settings contain the community string, license PEM and repository token, with no offline package references. The guest configures the Corelight stable apt repository using its signing key downloaded over verified TLS, stores apt credentials in a root-only file and installs `corelight-fleet`. Redirects are refused when retrieving the authenticated signing key. The repository remains configured for later administrator-managed apt updates. Existing guest configuration is preserved during apt operations using `--force-confold`.
+
+Offline settings select the main `corelight-fleet` amd64 `.deb` and optional amd64/`all` dependencies. The server catalog scans the ISO media directory, normally the read-only `/media` mount. Uploaded packages persist under `/data/fleetmanager-packages`, limited to 4 GiB each. `dpkg-deb --field` reads actual Debian control metadata; the app does not install the packages or execute maintainer scripts. It computes SHA-256 and optionally compares an administrator-supplied checksum. Computed hashes protect later integrity without proving publisher provenance.
+
+New deployment secrets snapshot the installation mode, community string, repository token, PEM/license checksum, and offline package paths/checksums. Preflight and the worker validate the snapshot rather than adopting subsequent Setup edits. Database transactions serialize uploaded-package registration, selection, deletion and deployment insertion. Selected files and references in queued/running/cleaning jobs cannot be deleted. Mounted files are never deleted through this API; invalid or interrupted uploads preserve earlier settings and are cleaned up.
+
+For offline FleetManager only, Ubuntu autoinstall selects the regular `ubuntu-server` source, uses no apt mirror candidates and chooses the installer's offline fallback. The supplied live-server ISO must provide SSH, VMware Tools, Python and CA certificates. This limits package sources without asserting that unrelated installer components never attempt network lookups. After SSH readiness, the worker transfers the offline package set, checks every SHA-256 inside the guest and runs apt with repository sources/indexes disabled and `--no-download`. Missing dependencies fail with diagnostics. Other VM roles retain their existing installation behavior.
+
+The guest writes `/etc/corelight-fleetd.conf`, installs the product identity PEM at `/etc/corelight-fleetd.pem` with ownership `corelight-fleetd` and mode 0400, and enables the `corelight-fleetd` service. Readiness verifies active systemd state, HTTPS on loopback port 443 pinned to the supplied leaf certificate, and a listening sensor port 1443. It does not simulate sensor authentication. Fleet Manager generates a temporary `admin` password; the encrypted result and community string are available through the authenticated Credentials reveal, with password replacement required at first Fleet Manager sign-in. Sensor enrollment, live guest upgrades and subsequent credential rotation are outside GDeploy's provisioning workflow.
+
+Complete data-volume backups include encrypted FleetManager configuration and all uploaded dependency packages. Back up mounted media and guest application data separately. Older GDeploy releases do not support the FleetManager role; finish or resolve those jobs before rollback. Clearing settings or updating GDeploy never updates the configuration/license already installed inside a VM.
+
+An actual host/guest lab is required to establish integration compatibility. No simulated deployment mode is exposed to users, and production success is only reported after OS and application checks return successfully. FleetManager's synthetic Debian packages, API and installer tests do not establish live Corelight license, real vendor package, sensor or ESXi compatibility.

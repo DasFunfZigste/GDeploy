@@ -31,6 +31,7 @@ DEPLOYMENT_FILES = (
     ("docs/INSTALL.md", "INSTALL.md"),
     ("docs/INSTALL.md", "docs/INSTALL.md"),
     ("docs/LAB_VALIDATION.md", "docs/LAB_VALIDATION.md"),
+    ("docs/FLEETMANAGER.md", "docs/FLEETMANAGER.md"),
     ("docs/ARCHITECTURE.md", "docs/ARCHITECTURE.md"),
     ("docs/overview.png", "docs/overview.png"),
     ("media/.gitkeep", "media/.gitkeep"),
@@ -221,7 +222,7 @@ def release_notes(info: ReleaseInfo, metadata: dict, guide: str, asset_names: li
         f"## Download assets\n\n{downloads}\n\n"
         "Verify downloaded files against `SHA256SUMS` before using them. "
         "The deployment bundle contains configuration templates and documentation; "
-        "Ubuntu and Splunk installers are supplied separately.\n\n"
+        "Operating-system media, licensed software installers and product licenses are supplied separately.\n\n"
         + installation_for_release_notes(guide, info.tag).rstrip()
         + "\n"
     )
