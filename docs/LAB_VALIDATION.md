@@ -7,13 +7,24 @@ Use an isolated datastore/network with disposable VMs. This checklist verifies t
 3. Reveal credentials, sign in through SSH as `gdeploy`, verify sudo works, and check the recorded SSH host key. Restart GDeploy and confirm history and credentials remain available.
 4. Repeat using a reserved static IPv4 address. Confirm address/prefix, default route and DNS in the guest.
 5. Deploy Elasticsearch and Kibana as separate VMs. Confirm the same package version on both, Elasticsearch HTTPS authentication, Kibana HTTPS login and available status. Verify Kibana uses its service account token and CA validation. Restart both guests and confirm the connection recovers.
-6. Deploy Splunk using your supported Ubuntu-compatible Enterprise x86_64 package. Accept its license explicitly. Confirm HTTPS web sign-in using the shown admin password and that the Splunkd systemd service survives reboot.
+6. Configure your supported Ubuntu-compatible Splunk Enterprise x86_64 package through **Setup → Software packages** using the checks below, then deploy Splunk. Accept its license explicitly. Confirm HTTPS web sign-in using the shown admin password and that the Splunkd systemd service survives reboot.
 7. Deliberately select insufficient resources or unavailable media and verify preflight blocks creation with a useful explanation.
 8. Interrupt an OS installation by restarting GDeploy. Confirm it is marked interrupted rather than silently retried. Run delete & redeploy with typed confirmation; confirm only that deployment's VMs/disks/media disappear and the replacement receives new credentials.
 9. Remove cleanup permission and repeat recovery. Confirm cleanup failure prevents replacement. Restore permission and confirm retry succeeds.
 10. Verify unauthenticated API requests are rejected, credential reveals are audited, and passwords do not appear in ordinary history, logs, browser storage or Git.
 
 Record your exact ESXi build, Ubuntu ISO checksum, Splunk version, Elastic version and any host-specific findings before expanding use.
+
+## Splunk package configuration and deployment drafts
+
+1. Open **Setup → Software packages** and `/#settings/packages` on desktop and mobile. Upload a licensed Splunk Enterprise Linux x86_64 `.tgz` with its publisher SHA-256, retaining its vendor filename. Repeat with a package in the mounted server media directory. Confirm the saved name, source, checksum and readiness state identify the intended package without an environment edit or container restart.
+2. Try a wrong checksum, invalid/truncated archive, unsupported package, conflicting duplicate paths, nonregular launcher/daemon entries, upload exceeding 4 GiB and insufficient free data-filesystem space. Confirm useful errors, no partial uploaded file left registered, and the previous selection unchanged. Safe internal archive links must remain supported. Test interrupted uploads and recreate the container using the same data volume; saved packages and selections must remain available.
+3. Start a deployment with distinct VM names, resources and network settings, select Splunk and trigger missing-package preflight. Use **Configure Splunk package**, upload/select a valid package, and choose **Return to deployment**. Confirm the draft fields and selected roles survive, preflight runs against the new configuration and license acceptance is still required. The action must not queue a VM until the administrator completes the normal deployment flow. Check keyboard navigation and existing ISO/SSH/ESXi Setup tabs.
+4. Queue a job with package A, then save package B or clear the package default. Confirm the job retains A's path/checksum and installs A. Change a disposable source file outside GDeploy while its job is queued; the checksum check must stop the job before using the changed package. Also alter a disposable copy after local validation or during transfer: the guest must reject its checksum before any package-manager or extraction work. Confirm jobs created before v0.8.0 use their original environment package behavior, and newly created replacement jobs use current settings.
+5. Clear the default or select another package, then delete an unused uploaded copy after confirmation. Only that local upload should disappear; server files, ISO selections, VMs, accounts and credentials must remain. Selected packages and uploads referenced by queued/running/cleaning jobs must reject deletion, including stale-browser requests. Clearing alone must keep the file, restore an available environment fallback and preserve active-job protection.
+6. Complete a real Splunk deployment with the selected package. Verify the installed version, generated administrator credentials, HTTPS service health and restart behavior. Record the package filename/checksum and guest compatibility. Confirm an OS-only or Elastic deployment does not require a Splunk package, and Kibana still connects to its separate Elasticsearch VM.
+
+Package archive tests and fixture downloads are not evidence that a particular licensed Splunk version runs successfully on the guest. Keep acceptance installers outside Git and release assets.
 
 ## Ubuntu readiness and cloud-init diagnostics
 
@@ -43,7 +54,7 @@ Hiding is a presentation control. It does not verify guest readiness, resume a f
 3. Queue a deployment with key A, change Setup to key B before the job begins, and confirm its generated ISO contains its automation key and A only. A newly queued deployment must use B. Check all selected roles receive the same administrator-key snapshot while keeping different generated automation keys.
 4. In disposable real guests, connect as `gdeploy` using each saved private key with `ssh -o PasswordAuthentication=no -o IdentitiesOnly=yes -i PRIVATE_KEY gdeploy@VM_IP`. Confirm the matching public keys exist in `~gdeploy/.ssh/authorized_keys`, file ownership/modes permit authentication, password/sudo behavior still works, and GDeploy can continue software installation using its automation key.
 5. Clear the saved list. Confirm future VMs still have their generated automation key but no saved administrator keys, while existing VMs and queued jobs retain their original keys. Do not describe clearing Setup as key revocation. Test an older queued record without a snapshot and a newly created replacement job separately.
-6. Check keyboard navigation across all three Setup tabs, draft preservation when switching tabs, mobile layout and safe literal rendering of key comments. Save failures must keep the unsaved draft visible and allow retry.
+6. Check keyboard navigation across all Setup tabs, draft preservation when switching tabs, mobile layout and safe literal rendering of key comments. Save failures must keep the unsaved draft visible and allow retry.
 
 ## Setup and OS installation media
 

@@ -189,6 +189,12 @@ def test_worker_installs_snapshot_on_every_role_without_changing_automation(conf
     db.set_ssh_public_keys(ssh_keys[1:3])
     spec["vms"] = [dict(spec["vms"][0], name="lab-" + role, role=role) for role in ("ubuntu", "splunk", "elasticsearch", "kibana")]
     spec["splunk_license_accepted"] = True
+    # This test stubs OS/application installation to isolate SSH key snapshots.
+    # Supply a package reference too; its integrity is exercised separately.
+    config.splunk_package.write_bytes(b"package fixture")
+    package = service.packages._snapshot(config.splunk_package, sha256="0" * 64)
+    monkeypatch.setattr(service.packages, "selected", lambda: package)
+    monkeypatch.setattr(service.packages, "validate_snapshot", lambda snapshot: config.splunk_package)
     item = service.enqueue(spec, {"host": "esxi.example.test"})
     if legacy:
         secret_data = db.get(item["id"], private=True)["secrets"]

@@ -3,12 +3,15 @@
 
 import argparse
 import base64
+import gzip
 import hashlib
 import http.cookiejar
+import io
 import json
 import os
 import secrets
 import subprocess
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -21,6 +24,18 @@ SMOKE_SSH_KEY = "ssh-ed25519 " + base64.b64encode(
     b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
     + bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
 ).decode("ascii") + " container-smoke"
+
+
+def smoke_splunk_package():
+    """Tiny archive-format fixture; never deployed or represented as a vendor installer."""
+    body = io.BytesIO()
+    with tarfile.open(fileobj=body, mode="w") as archive:
+        elf = b"\x7fELF\x02\x01" + b"\0" * 12 + (62).to_bytes(2, "little")
+        for name, contents in (("splunk/bin/splunk", b"container smoke only"), ("splunk/bin/splunkd", elf)):
+            member = tarfile.TarInfo(name)
+            member.size = len(contents)
+            archive.addfile(member, io.BytesIO(contents))
+    return gzip.compress(body.getvalue(), mtime=0)
 
 
 HOST_ROUTE_PROBE = """
@@ -106,7 +121,7 @@ def verify_login_and_storage(url, credentials, write=False):
     if session["must_change_credentials"]:
         assert write, "The chosen administrator account did not survive container recreation"
         assert request("/api/session")["must_change_credentials"] is True
-        for path in ("/api/settings", "/api/settings/ssh-keys", "/api/deployments"):
+        for path in ("/api/settings", "/api/settings/ssh-keys", "/api/settings/splunk-package", "/api/deployments"):
             try:
                 request(path)
             except urllib.error.HTTPError as error:
@@ -136,6 +151,8 @@ def verify_login_and_storage(url, credentials, write=False):
     # this smoke check never attempts an OS installation or contacts ESXi.
     media_body = b"\0" * (16 * 2048) + b"\x01CD001\x01" + b"gdeploy-container-smoke"
     media_checksum = hashlib.sha256(media_body).hexdigest()
+    package_body = smoke_splunk_package()
+    package_checksum = hashlib.sha256(package_body).hexdigest()
     if write:
         request(
             "/api/settings",
@@ -147,6 +164,10 @@ def verify_login_and_storage(url, credentials, write=False):
             f"/api/settings/media/upload?filename=container-smoke.iso&sha256={media_checksum}",
             media_body, "POST", session["csrf_token"],
         )
+        request(
+            f"/api/settings/splunk-package/upload?filename=container-smoke-linux-amd64.tgz&sha256={package_checksum}",
+            package_body, "POST", session["csrf_token"],
+        )
         saved_keys = request(
             "/api/settings/ssh-keys", {"public_keys": [SMOKE_SSH_KEY, SMOKE_SSH_KEY]},
             "PUT", session["csrf_token"],
@@ -156,6 +177,7 @@ def verify_login_and_storage(url, credentials, write=False):
     assert settings["host"] == "esxi.example.invalid" and settings["configured"] is True
     assert "password" not in settings
     assert settings["iso_configured"] is True
+    assert settings["splunk_configured"] is True
     assert settings["ssh_key_count"] == 1
     ssh_keys = request("/api/settings/ssh-keys")
     assert ssh_keys["count"] == 1 and ssh_keys["keys"][0]["public_key"] == SMOKE_SSH_KEY
@@ -164,6 +186,11 @@ def verify_login_and_storage(url, credentials, write=False):
     assert media["ready"] and media["selected"]["source"] == "upload"
     assert media["selected"]["name"] == "container-smoke.iso"
     assert media["selected"]["sha256"] == media_checksum
+    package = request("/api/settings/splunk-package")
+    assert package["ready"] and package["selected"]["source"] == "upload"
+    assert package["selected"]["name"] == "container-smoke-linux-amd64.tgz"
+    assert package["selected"]["sha256"] == package_checksum
+    assert package["items"][0]["can_delete"] is False
     request("/api/logout", {}, "POST", session["csrf_token"])
     return credentials
 

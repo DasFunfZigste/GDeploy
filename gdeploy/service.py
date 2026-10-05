@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import logging
 import re
@@ -9,12 +8,12 @@ import shutil
 import threading
 import time
 import uuid
-from functools import lru_cache
 from pathlib import Path
 
 from .certificate_trust import certificate_endpoint
 from .guest import GuestConnectionError, GuestSession, build_seed_iso, generate_ssh_key
 from .media import MediaError, MediaManager
+from .packages import PackageError, SplunkPackageManager
 from .vmware import ESXiClient
 
 
@@ -66,16 +65,11 @@ def safe_error(error, secret_data=None):
     return text[:2000]
 
 
-@lru_cache(maxsize=16)
-def media_hash(path, size, mtime_ns):
-    with open(path, "rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
 class DeploymentService:
     def __init__(self, db, config, client_factory=ESXiClient):
         self.db, self.config, self.client_factory = db, config, client_factory
         self.media = MediaManager(db, config)
+        self.packages = SplunkPackageManager(db, config)
         self.action_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = None
@@ -112,43 +106,12 @@ class DeploymentService:
         except Exception as exc:
             raise DeploymentError(safe_error(exc, settings)) from None
 
-    def preflight(self, spec, settings=None, exclude_id=None, os_media=None):
+    def preflight(self, spec, settings=None, exclude_id=None, os_media=None, splunk_package=None):
         settings = settings or self.db.settings()
         checks = []
 
         def check(name, ok, message):
             checks.append({"name": name, "ok": bool(ok), "message": message})
-
-        def media(name, path, expected):
-            try:
-                present = path.is_file()
-                check(
-                    name + " available",
-                    present,
-                    f"Mount {path.name} in the media directory." if not present else f"{path.name} is available.",
-                )
-                if not present:
-                    return None
-                stat = path.stat()
-                matches = (
-                    bool(re.fullmatch(r"[a-f0-9]{64}", expected))
-                    and media_hash(str(path), stat.st_size, stat.st_mtime_ns) == expected
-                )
-                check(
-                    name + " integrity",
-                    matches,
-                    "SHA-256 matches the configured checksum."
-                    if matches
-                    else f"Set the correct SHA-256 checksum for {path.name}; verify it against the vendor's published checksum.",
-                )
-                return stat.st_size
-            except OSError:
-                check(
-                    name + " access",
-                    False,
-                    f"Cannot read {path.name}. Make the media directory traversable and this file readable by container UID 10001.",
-                )
-                return None
 
         os_media = self.media.selected() if os_media is None else os_media
         iso_size = None
@@ -161,7 +124,15 @@ class DeploymentService:
         except (MediaError, OSError) as exc:
             check("OS ISO", False, str(exc))
         if any(vm["role"] == "splunk" for vm in spec["vms"]):
-            media("Splunk Linux x86_64 package", self.config.splunk_package, self.config.splunk_sha256)
+            package = self.packages.selected() if splunk_package is None else splunk_package
+            try:
+                if not package:
+                    raise PackageError("Upload or select a Splunk Enterprise Linux x86_64 .tgz and verify its publisher SHA-256.")
+                self.packages.validate_snapshot(package)
+                check("Splunk Linux x86_64 package", True, f"{package['name']} is available; SHA-256 and archive checks passed.")
+            except (PackageError, OSError) as exc:
+                check("Splunk Linux x86_64 package", False, f"Open Setup → Software packages. {exc}")
+                checks[-1]["action"] = {"label": "Configure Splunk package", "href": "#settings/packages"}
         check(
             "ISO builder",
             shutil.which("xorriso"),
@@ -261,7 +232,10 @@ class DeploymentService:
     def enqueue(self, spec, settings=None, parent_id=None):
         settings = settings or self.db.settings()
         os_media = self.media.selected()
-        result = self.preflight(spec, settings, exclude_id=parent_id, os_media=os_media or {})
+        splunk_package = self.packages.selected() if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
+        result = self.preflight(
+            spec, settings, exclude_id=parent_id, os_media=os_media or {}, splunk_package=splunk_package or {},
+        )
         if not result["ok"]:
             raise DeploymentError(
                 "Preflight failed: "
@@ -281,6 +255,7 @@ class DeploymentService:
         data = {
             "esxi": settings,
             "os_media": os_media,
+            "splunk_package": splunk_package,
             "authorized_ssh_keys": self.db.ssh_public_keys(),
             "vm_credentials": vm_credentials,
             "software": {
@@ -371,12 +346,16 @@ class DeploymentService:
             # Jobs created before media selection existed retain their environment
             # configuration. A later Setup edit must not switch a queued job's ISO.
             os_media = secret_data.get("os_media") or self.media.legacy()
+            # Never adopt a later Setup selection for an already queued job.
+            # Jobs from before package selection retain their environment source.
+            splunk_package = secret_data.get("splunk_package") if "splunk_package" in secret_data else self.packages.legacy()
             vms = deployment["vms"]
             resources = deployment["resources"]
             artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.stage(deployment_id, "preflight", "Checking media, host capacity and deployment inputs")
             result = self.preflight(
-                deployment["spec"], secret_data["esxi"], exclude_id=deployment_id, os_media=os_media or {}
+                deployment["spec"], secret_data["esxi"], exclude_id=deployment_id, os_media=os_media or {},
+                splunk_package=splunk_package or {},
             )
             if not result["ok"]:
                 raise DeploymentError(
@@ -434,6 +413,9 @@ class DeploymentService:
                     vms, key=lambda item: {"elasticsearch": 0, "kibana": 1, "splunk": 2, "ubuntu": 3}[item["role"]]
                 ):
                     credential = secret_data["vm_credentials"][vm["name"]]
+                    # OS installation may take time: a mounted installer can be
+                    # replaced since preflight. Recheck the snapshotted bytes.
+                    package_path = self.packages.validate_snapshot(splunk_package or {}) if vm["role"] == "splunk" else None
                     role_label = "operating system" if vm["role"] == "ubuntu" else vm["role"]
                     self.stage(deployment_id, "installing_software", f"Configuring {role_label} on {vm['name']}")
                     vm["status"] = "installing_software"
@@ -449,7 +431,8 @@ class DeploymentService:
                             vm["role"],
                             secret_data["software"],
                             elastic=elastic,
-                            splunk_package=self.config.splunk_package,
+                            splunk_package=package_path,
+                            splunk_sha256=splunk_package["sha256"] if package_path is not None else None,
                             log=lambda text: self.db.event(deployment_id, safe_error(text, secret_data)),
                         )
                     if installed.get("elastic"):

@@ -246,7 +246,7 @@
     state.detailId = null;
     page.replaceChildren(loading('Loading your workspace…'));
     const hash = location.hash.slice(1);
-    const setupRoute = /^(?:settings|setup)(?:\/(connection|media|ssh))?$/.exec(hash);
+    const setupRoute = /^(?:settings|setup)(?:\/(connection|media|ssh|packages))?$/.exec(hash);
     if (setupRoute) {
       state.route = 'settings';
       markNav('settings');
@@ -281,6 +281,7 @@
         state.deployments = results[0].value;
         renderOverview();
         if (results[1].status === 'rejected') globalError(results[1].reason.message);
+        if (hash === 'deployments/continue' && state.wizard?.suspended) openWizard();
       } else renderLoadError(results[0].reason, route);
     }
   }
@@ -354,7 +355,7 @@
     }}), 'Show hidden');
     const history = el('section', {class: 'surface', 'aria-labelledby': 'history-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'history-title'}, 'Deployment history', el('span', {class: 'count-badge'}, rows.length)), el('p', {}, 'Hide finished runs without changing their VMs. Restore them at any time.')), showHidden), el('div', {class: 'history-controls'}, search, filter), el('div', {id: 'deployment-rows'}));
     const setupBanner = !state.settings?.configured || !state.settings?.iso_configured ? el('div', {class: 'connection-banner'}, icon('server'), el('div', {}, el('strong', {}, 'Finish your GDeploy setup'), el('p', {}, 'Connect an ESXi host and select an OS ISO before creating a deployment.')), el('a', {href: state.settings?.configured ? '#settings/media' : '#settings/connection', class: 'button button-small'}, 'Open Setup', icon('arrow'))) : null;
-    page.replaceChildren(...[heading('Deployments', 'Build your environment. We’ll take care of the setup.', button('New deployment', 'button-primary', openWizard, 'plus')), metrics, setupBanner, history].filter(Boolean));
+    page.replaceChildren(...[heading('Deployments', 'Build your environment. We’ll take care of the setup.', button(state.wizard?.suspended ? 'Continue deployment' : 'New deployment', 'button-primary', openWizard, 'plus')), metrics, setupBanner, history].filter(Boolean));
     renderDeploymentRows();
   }
   function renderDeploymentRows() {
@@ -381,13 +382,13 @@
     const index = bytes > 0 ? Math.min(3, Math.floor(Math.log(bytes) / Math.log(1024))) : 0;
     return `${new Intl.NumberFormat(undefined, {maximumFractionDigits: index ? 1 : 0}).format(bytes / (1024 ** index))} ${units[index]}`;
   }
-  function uploadMedia(file, sha256, onProgress) {
+  function uploadMedia(file, sha256, onProgress, endpoint = '/api/settings/media/upload') {
     return new Promise((resolve, reject) => {
       if (!state.session || setupRequired()) { reject(new Error('Sign in with your configured administrator account before uploading media.')); return; }
       const requestSession = state.session;
       const xhr = new XMLHttpRequest();
       const finish = () => { if (state.mediaUpload === xhr) state.mediaUpload = null; };
-      xhr.open('POST', `/api/settings/media/upload?filename=${encodeURIComponent(file.name)}&sha256=${encodeURIComponent(sha256)}`);
+      xhr.open('POST', `${endpoint}?filename=${encodeURIComponent(file.name)}&sha256=${encodeURIComponent(sha256)}`);
       xhr.withCredentials = true;
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       xhr.setRequestHeader('Accept', 'application/json');
@@ -694,6 +695,160 @@
     checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
     return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
+  function createSplunkPackagePanel(onChange, onBusy) {
+    const viewEpoch = state.routeEpoch;
+    let catalog = null, mode = 'upload', busy = '', externalBusy = false;
+    const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const endpoint = '/api/settings/splunk-package';
+    const sourceLabel = item => item.source === 'upload' ? 'Uploaded' : 'GDeploy server';
+    const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+    const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
+    const badge = el('span', {class: 'status'}, 'Loading…');
+    const selectedSummary = el('div', {class: 'media-selected-summary', id: 'splunk-package-summary'});
+    const packageList = el('div', {class: 'stored-media-list', id: 'splunk-package-list'});
+    const clearSelection = button('Clear saved selection', 'button-small button-ghost', clearPackageSelection);
+    clearSelection.id = 'splunk-package-clear-selection';
+    const serverSelect = el('select', {id: 'splunk-package-server', name: 'package_id', required: true, 'aria-describedby': 'splunk-package-server-help'});
+    const fileInput = el('input', {id: 'splunk-package-file', name: 'package_file', type: 'file', accept: '.tgz', 'aria-describedby': 'splunk-package-file-help'});
+    const fileHelp = el('small', {id: 'splunk-package-file-help'}, 'Upload the Linux x86_64 .tgz package from your computer.');
+    const checksum = el('input', {id: 'splunk-package-sha256', name: 'sha256', type: 'text', required: true, minlength: 64, maxlength: 64, pattern: '[a-fA-F0-9]{64}', placeholder: 'Paste the publisher’s 64-character SHA-256 checksum', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', class: 'mono', 'aria-describedby': 'splunk-package-sha256-help'});
+    const currentItem = () => catalog?.items?.find(item => item.id === serverSelect.value);
+    const sourceInput = value => el('input', {type: 'radio', name: 'splunk-package-source', value, checked: mode === value, onChange: () => {
+      mode = value; checksum.value = value === 'server' ? currentItem()?.sha256 || '' : '';
+      inlineError(errorBox, ''); successBox.hidden = true; syncControls();
+    }});
+    const uploadRadio = sourceInput('upload'), serverRadio = sourceInput('server');
+    const serverFields = el('div', {class: 'media-source-fields', hidden: true}, field('Splunk package on the GDeploy server', serverSelect), el('p', {class: 'media-help', id: 'splunk-package-server-help'}, 'Choose a previous upload or a .tgz file in the media folder beside compose.yaml. Keep its original filename, then refresh this list.'));
+    const uploadFields = el('div', {class: 'media-source-fields'}, field('Splunk package file', fileInput), fileHelp);
+    const progress = el('progress', {max: 100, value: 0, 'aria-label': 'Splunk package upload progress'});
+    const progressText = el('span', {role: 'status', 'aria-live': 'polite'});
+    const cancel = button('Cancel upload', 'button-ghost button-small', () => state.mediaUpload?.abort());
+    const progressBox = el('div', {class: 'media-progress', hidden: true}, progress, el('div', {}, progressText, cancel));
+    function syncControls() {
+      const locked = Boolean(busy || externalBusy || !catalog);
+      for (const radio of [serverRadio, uploadRadio]) { radio.checked = mode === radio.value; radio.disabled = locked; }
+      serverFields.hidden = mode !== 'server'; uploadFields.hidden = mode !== 'upload';
+      serverSelect.disabled = locked || mode !== 'server';
+      fileInput.disabled = locked || mode !== 'upload'; fileInput.required = mode === 'upload';
+      checksum.disabled = locked;
+      refresh.disabled = Boolean(busy || externalBusy);
+      clearSelection.disabled = Boolean(locked || !catalog?.has_saved_selection);
+      for (const control of packageList.querySelectorAll('button[data-delete-id]')) control.disabled = locked || !catalog?.items.find(item => item.id === control.dataset.deleteId)?.can_delete;
+      submit.disabled = locked || (mode === 'server' && !serverSelect.value) || (mode === 'upload' && !fileInput.files.length);
+      if (!busy) submit.replaceChildren(icon(mode === 'server' ? 'check' : 'layers'), mode === 'upload' ? 'Upload & use package' : 'Use selected package');
+      panel.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+    function renderCatalog(next) {
+      catalog = next;
+      const previousId = serverSelect.value;
+      serverSelect.replaceChildren(el('option', {value: ''}, next.items.length ? 'Choose a Splunk package' : 'No .tgz packages found'), ...next.items.filter(item => item.available !== false).map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${sourceLabel(item)}`)));
+      serverSelect.value = next.selected?.id || (next.items.some(item => item.id === previousId && item.available !== false) ? previousId : '');
+      if (mode === 'server') checksum.value = currentItem()?.sha256 || '';
+      fileHelp.textContent = `Upload a .tgz file up to ${formatBytes(next.max_upload_bytes)}. Uploads are kept with GDeploy’s persistent data.`;
+      badge.className = next.ready ? 'status status-completed' : 'status';
+      badge.textContent = next.ready ? 'Ready for preflight' : 'Package required for Splunk';
+      if (next.selected) {
+        selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('span', {class: 'eyebrow'}, 'SAVED SPLUNK PACKAGE'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${sourceLabel(next.selected)}`))), el('details', {class: 'media-integrity'}, el('summary', {}, 'Saved SHA-256 checksum'), el('code', {class: 'certificate-fingerprint'}, next.selected.sha256 || 'Not configured')));
+        if (!next.ready) selectedSummary.append(el('p', {class: 'media-help'}, 'The selected package is unavailable or needs attention. Choose and verify a package below before deploying Splunk.'));
+      } else selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('strong', {}, 'Add the Splunk installer'), el('p', {}, 'Required only when your deployment includes Splunk.'))));
+      if (next.has_saved_selection) selectedSummary.append(el('div', {class: 'media-clear-selection'}, clearSelection, el('p', {class: 'media-help'}, 'Clearing the selection keeps the file. Queued and running deployments keep their package; a server-configured package may become the default.')));
+      packageList.replaceChildren(el('h4', {}, 'Available packages', el('span', {class: 'count-badge'}, next.items.length)));
+      if (!next.items.length) packageList.append(el('p', {class: 'media-help'}, 'No packages saved yet. Upload a Splunk Enterprise package above to get started.'));
+      for (const item of next.items) {
+        const reasonId = `splunk-package-delete-reason-${item.id}`;
+        const reason = item.delete_reason || (item.available === false ? 'This saved file is unavailable.' : '');
+        const remove = button('Delete', 'button-small button-danger', () => openDeletePackage(item));
+        remove.dataset.deleteId = item.id; remove.disabled = !item.can_delete;
+        remove.setAttribute('aria-label', `Delete ${item.name}`);
+        if (reason) { remove.setAttribute('aria-describedby', reasonId); remove.title = reason; }
+        packageList.append(el('article', {class: 'stored-media-item'}, el('div', {class: 'stored-media-info'}, el('div', {class: 'stored-media-name'}, icon('layers'), el('strong', {}, item.name), item.selected ? el('span', {class: 'status status-completed'}, 'Selected') : null), el('p', {class: 'media-help'}, `${formatBytes(item.size_bytes)} · ${sourceLabel(item)}${item.available === false ? ' · File unavailable' : ''}`), reason ? el('p', {class: 'media-delete-reason', id: reasonId}, reason) : null), remove));
+      }
+      onChange(next); syncControls();
+    }
+    async function load() {
+      if (!currentView() || busy || externalBusy) return;
+      busy = 'load'; inlineError(errorBox, ''); setBusy(refresh, 'Refreshing…'); syncControls();
+      try {
+        const next = await api(endpoint);
+        if (!currentView()) return;
+        if (!catalog && next.items.length) mode = 'server';
+        renderCatalog(next);
+      } catch (error) { if (currentView()) { inlineError(errorBox, error.message); badge.textContent = 'Couldn’t load packages'; } }
+      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh list'); syncControls(); } }
+    }
+    async function clearPackageSelection() {
+      if (!currentView() || busy || externalBusy || !catalog?.has_saved_selection) return;
+      busy = 'clear'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true; setBusy(clearSelection, 'Clearing…'); syncControls();
+      try {
+        const next = await api(endpoint, {method: 'DELETE'});
+        if (!currentView()) return;
+        renderCatalog(next);
+        successBox.textContent = next.selected ? 'Saved selection cleared. The server-configured package is now selected.' : 'Saved selection cleared. Choose a package before creating another Splunk deployment.';
+        successBox.hidden = false;
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally { if (currentView()) { busy = ''; clearSelection.replaceChildren('Clear saved selection'); onBusy(false); syncControls(); } }
+    }
+    function openDeletePackage(item) {
+      if (!currentView() || busy || externalBusy || !item.can_delete) return;
+      const dialog = $('#confirm-dialog');
+      const deleteError = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+      const dismiss = button('Cancel', '', () => dialog.close());
+      const remove = button('Delete package', 'button-danger', async () => {
+        if (!currentView()) { dialog.close(); return; }
+        if (busy || externalBusy) return;
+        busy = 'delete'; onBusy(true); inlineError(deleteError, ''); setBusy(remove, 'Deleting…'); dismiss.disabled = true; dialog.dataset.busy = 'true'; syncControls();
+        try {
+          const next = await api(`${endpoint}/${encodeURIComponent(item.id)}`, {method: 'DELETE'});
+          if (!currentView()) return;
+          renderCatalog(next); dialog.close();
+          successBox.textContent = `${item.name} deleted from GDeploy storage.`; successBox.hidden = false;
+        } catch (error) {
+          if (currentView()) {
+            inlineError(deleteError, error.message);
+            try { const next = await api(endpoint); if (currentView()) renderCatalog(next); } catch { /* Keep the original deletion error visible. */ }
+          }
+        } finally {
+          delete dialog.dataset.busy; dismiss.disabled = false; remove.disabled = false; remove.replaceChildren('Delete package');
+          if (currentView()) { busy = ''; onBusy(false); syncControls(); }
+        }
+      });
+      dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, 'Delete saved package?')), el('div', {class: 'confirm-body'}, el('p', {}, 'Permanently delete ', el('strong', {}, item.name), ` from GDeploy and free ${formatBytes(item.size_bytes)}? You would need to upload it again to use it later.`), el('p', {}, 'Selected packages and files used by queued or running deployments cannot be deleted.'), deleteError, el('div', {class: 'confirm-actions'}, dismiss, remove)));
+      dialog.showModal(); dismiss.focus();
+    }
+    const refresh = button('Refresh list', 'button-small', load, 'refresh'); refresh.id = 'splunk-package-refresh';
+    const submit = button('Upload & use package', 'button-primary', null, 'layers'); submit.type = 'submit';
+    const form = el('form', {onSubmit: async event => {
+      event.preventDefault();
+      if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return;
+      const file = fileInput.files[0], uploading = mode === 'upload';
+      if (uploading && (!file || !file.name.toLowerCase().endsWith('.tgz') || !file.size || file.size > catalog.max_upload_bytes)) { inlineError(errorBox, `Choose a nonempty .tgz file no larger than ${formatBytes(catalog.max_upload_bytes)}.`); return; }
+      busy = uploading ? 'upload' : 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true;
+      progressBox.hidden = !uploading; progress.value = 0; cancel.disabled = false; progressText.textContent = 'Starting upload…';
+      setBusy(submit, uploading ? 'Uploading package…' : 'Verifying package…'); syncControls();
+      try {
+        const digest = checksum.value.trim().toLowerCase();
+        const next = uploading ? await uploadMedia(file, digest, (loaded, total) => {
+          if (!currentView()) return;
+          if (loaded >= total) { progress.removeAttribute('value'); cancel.disabled = true; progressText.textContent = 'Upload complete. Verifying checksum and Splunk package…'; setBusy(submit, 'Verifying package…'); }
+          else { progress.value = Math.round(loaded / total * 100); progressText.textContent = `${formatBytes(loaded)} of ${formatBytes(total)} uploaded`; }
+        }, `${endpoint}/upload`) : await api(endpoint, {method: 'PUT', body: {package_id: serverSelect.value, sha256: digest}});
+        if (!currentView()) return;
+        mode = 'server'; fileInput.value = ''; renderCatalog(next);
+        successBox.textContent = `${next.selected?.name || 'Splunk package'} verified and saved. New Splunk deployments will use this package.`; successBox.hidden = false;
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
+    }}, el('div', {class: 'form-body'},
+      el('div', {class: 'package-download-guide'}, el('p', {}, 'Download the ', el('strong', {}, 'Splunk Enterprise Linux x86_64 .tgz'), ' installer and its SHA-256 checksum from ', el('a', {href: 'https://www.splunk.com/en_us/download/splunk-enterprise.html', target: '_blank', rel: 'noopener noreferrer'}, 'Splunk’s download page', icon('link')), '. Use a package covered by your Splunk license or trial.'), el('p', {class: 'media-help'}, 'GDeploy does not bundle or automatically download Splunk. Upload the package below or select one on the GDeploy server. License acceptance is required when you deploy.')),
+      selectedSummary, errorBox, successBox,
+      el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose a package source'), el('label', {}, uploadRadio, 'Upload a package'), el('label', {}, serverRadio, 'GDeploy server')),
+      uploadFields, serverFields, field('Publisher SHA-256 checksum', checksum, el('span', {id: 'splunk-package-sha256-help'}, 'Copy the checksum for this exact file from Splunk’s download page. GDeploy checks the archive, architecture, and checksum before saving.')), progressBox),
+      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), submit));
+    const panel = el('section', {class: 'surface', id: 'splunk-package-panel', 'aria-labelledby': 'splunk-package-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'splunk-package-title'}, 'Splunk Enterprise'), el('p', {}, 'Add and manage the installer used for Splunk deployments.')), badge, refresh), form, el('section', {class: 'media-storage'}, el('div', {class: 'media-storage-body'}, packageList)));
+    serverSelect.addEventListener('change', () => { checksum.value = currentItem()?.sha256 || ''; successBox.hidden = true; syncControls(); });
+    fileInput.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
+    checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
+    return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
+  }
   function createSSHAccessPanel(onSaved, onBusy, initialDraft) {
     const viewEpoch = state.routeEpoch;
     let savedKeys = [], loaded = false, busy = false, externalBusy = false;
@@ -818,6 +973,9 @@
     let mediaControls = null;
     let sshBusy = false;
     let sshControls = null;
+    let packagesBusy = false;
+    let packagesControls = null;
+    const returnToWizard = state.wizard?.suspended ? button('Return to deployment', 'button-primary button-small', () => { location.hash = 'deployments/continue'; }, 'back') : null;
     let fingerprintConfirmed = false;
     let trustButton = null;
     let removeButton = null;
@@ -834,7 +992,7 @@
       return value && !Number.isNaN(parsed.getTime()) ? new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}).format(parsed) : 'Not available';
     };
     function syncControls() {
-      const busy = Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy);
+      const busy = Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy || packagesBusy);
       const identityChanged = hostKey(host.value) !== hostKey(settings.host) || username.value.trim() !== (settings.username || '');
       const lockInputs = Boolean(connectionBusy || ['trust', 'remove'].includes(certificateBusy));
       host.disabled = lockInputs; username.disabled = lockInputs; password.disabled = lockInputs;
@@ -846,8 +1004,10 @@
       if (removeButton) removeButton.disabled = busy;
       if (comparison) comparison.disabled = busy || !certificateUsable();
       certificatePanel.setAttribute('aria-busy', certificateBusy ? 'true' : 'false');
-      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || sshBusy));
-      sshControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy));
+      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || sshBusy || packagesBusy));
+      sshControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || packagesBusy));
+      packagesControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy));
+      if (returnToWizard) returnToWizard.disabled = busy;
     }
     function renderCertificate() {
       trustButton = null; removeButton = null; comparison = null;
@@ -1021,6 +1181,7 @@
     createSetupTab('connection', '1', 'ESXi connection');
     createSetupTab('media', '2', 'OS installation media');
     createSetupTab('ssh', '3', 'SSH access');
+    createSetupTab('packages', '4', 'Software packages');
     function renderReadiness() {
       const saved = state.settings || settings;
       const updateTab = (key, ready, description) => {
@@ -1033,16 +1194,20 @@
       updateTab('media', saved.iso_configured, saved.iso_configured ? 'OS ISO selected · ready for preflight' : 'Select or upload an OS ISO');
       const sshCount = Number(saved.ssh_key_count || 0);
       updateTab('ssh', sshCount > 0, sshCount ? `${sshCount} public ${sshCount === 1 ? 'key' : 'keys'} saved · optional` : 'Optional · add your public keys');
-      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · optional', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Only needed for Splunk: configure its Linux x86_64 .tgz package and checksum on the server.', 'layers')));
+      updateTab('packages', saved.splunk_configured, saved.splunk_configured ? 'Splunk package selected' : 'Required for Splunk deployments');
+      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · when selected', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Open Software packages to upload or select the Splunk installer and verify its checksum.', 'layers')));
     }
     mediaControls = createMediaPanel(catalog => { if (state.settings) state.settings.iso_configured = catalog.ready; renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
     sshControls = createSSHAccessPanel(count => { if (state.settings) state.settings.ssh_key_count = count; renderReadiness(); }, value => { sshBusy = value; syncControls(); }, initialSSHdraft);
+    packagesControls = createSplunkPackagePanel(catalog => { if (state.settings) state.settings.splunk_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { packagesBusy = value; syncControls(); });
     panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form);
     panels.media = el('div', {id: 'setup-panel-media', role: 'tabpanel', 'aria-labelledby': 'setup-tab-media', tabindex: '0'}, mediaControls.panel);
     panels.ssh = el('div', {id: 'setup-panel-ssh', role: 'tabpanel', 'aria-labelledby': 'setup-tab-ssh', tabindex: '0'}, sshControls.panel);
-    page.replaceChildren(heading('Setup', 'Connect ESXi, select an OS ISO, and optionally add your SSH public keys.'), steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, panels.connection, panels.media, panels.ssh), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.'))));
+    panels.packages = el('div', {id: 'setup-panel-packages', role: 'tabpanel', 'aria-labelledby': 'setup-tab-packages', tabindex: '0'}, packagesControls.panel);
+    const draftBanner = returnToWizard ? el('div', {class: 'connection-banner'}, icon('clock'), el('div', {}, el('strong', {}, 'Your deployment draft is saved in this tab'), el('p', {}, 'Finish setup, then return to your VM names, resources, and network settings. Preflight will run again before deployment.')), returnToWizard) : null;
+    page.replaceChildren(...[heading('Setup', 'Configure your host, OS installation media, SSH access, and software packages.'), draftBanner, steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, panels.connection, panels.media, panels.ssh, panels.packages), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.')))].filter(Boolean));
     selectSetupTab(state.setupTab || (settings.configured && !settings.iso_configured ? 'media' : 'connection'), {updateHash: false});
-    renderReadiness(); renderCertificate(); syncControls(); mediaControls.load(); sshControls.load();
+    renderReadiness(); renderCertificate(); syncControls(); mediaControls.load(); packagesControls.load(); sshControls.load();
   }
   function field(label, input, hint) { return el('label', {class: 'field'}, el('span', {}, label), input, hint ? el('small', {}, hint) : null); }
   function renderDetail(data) {
@@ -1235,29 +1400,44 @@
 
   async function openWizard() {
     if (!state.session || setupRequired()) return;
+    if (state.wizard?.busy) return;
     if (!state.settings?.configured || !state.settings?.iso_configured) { location.hash = state.settings?.configured ? 'settings/media' : 'settings/connection'; notify('Complete Setup with an ESXi connection and an OS ISO to begin a deployment.'); return; }
     hideCredentials();
     const dialog = $('#wizard-dialog');
-    state.wizard = {step: 0, name: '', selected: new Set(['elasticsearch', 'kibana']), vms: {}, accepted: false, preflight: null, busy: true, error: ''};
+    if (state.wizard?.suspended) { state.wizard.suspended = false; invalidatePreflight(); state.wizard.accepted = false; state.wizard.busy = true; }
+    else state.wizard = {step: 0, name: '', selected: new Set(['elasticsearch', 'kibana']), vms: {}, accepted: false, preflight: null, busy: true, error: ''};
     dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), loading('Loading ESXi datastores and networks…')));
     dialog.showModal();
     const wizard = state.wizard;
     try {
-      state.inventory = await api('/api/inventory');
+      const results = await Promise.allSettled([api('/api/inventory'), api('/api/settings')]);
       if (state.wizard !== wizard) return;
+      if (results[0].status === 'rejected') throw results[0].reason;
+      if (results[1].status === 'rejected') throw results[1].reason;
+      state.inventory = results[0].value; state.settings = results[1].value;
       wizard.busy = false;
       renderWizard();
     } catch (error) {
       if (state.wizard !== wizard) return;
       wizard.busy = false;
-      dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), el('div', {class: 'wizard-content'}, el('h3', {}, 'Couldn’t load your ESXi inventory'), el('p', {class: 'muted'}, 'Check the saved connection and your host’s certificate, permissions, and availability.'), el('div', {class: 'alert alert-error', role: 'alert'}, error.message), button('Open Setup', 'button-primary', () => { closeWizard(); location.hash = 'settings/connection'; }, 'server'))));
+      dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), el('div', {class: 'wizard-content'}, el('h3', {}, 'Couldn’t load your deployment settings'), el('p', {class: 'muted'}, 'Check the saved connection and your host’s certificate, permissions, and availability.'), el('div', {class: 'alert alert-error', role: 'alert'}, error.message), wizardSetupLink('Open Setup', '#settings/connection'))));
     }
   }
   function closeWizard() {
     if (state.wizard?.busy) return;
     $('#wizard-dialog').close(); state.wizard = null;
+    if (state.route === 'deployments') renderOverview();
   }
-  $('#wizard-dialog').addEventListener('cancel', event => { if (state.wizard?.busy) event.preventDefault(); else state.wizard = null; });
+  function wizardSetupLink(label, href = '#settings/packages') {
+    if (!/^#settings\/(connection|media|ssh|packages)$/.test(href)) return null;
+    return el('a', {href, class: 'button button-small wizard-setup-link', onClick: event => {
+      event.preventDefault();
+      if (!state.wizard || state.wizard.busy) return;
+      invalidatePreflight(); state.wizard.suspended = true;
+      $('#wizard-dialog').close(); location.hash = href;
+    }}, label, icon('arrow'));
+  }
+  $('#wizard-dialog').addEventListener('cancel', event => { if (state.wizard?.busy) event.preventDefault(); else { state.wizard = null; if (state.route === 'deployments') renderOverview(); } });
   function wizardHeader() {
     const close = el('button', {type: 'button', class: 'icon-button dialog-close', 'aria-label': 'Close deployment wizard', onClick: closeWizard}, icon('close'));
     return el('div', {class: 'wizard-header'}, el('div', {}, el('h2', {id: 'wizard-title'}, 'New deployment'), el('p', {}, 'A ready-to-use environment, configured your way.')), close);
@@ -1318,9 +1498,11 @@
         if (role === 'elasticsearch' && !event.target.checked) wizard.selected.delete('kibana');
         invalidatePreflight(); renderWizard();
       }});
-      grid.append(el('label', {class: 'role-option'}, checkbox, roleIcon(role), el('span', {class: 'role-option-text'}, el('strong', {}, config.name), el('small', {}, config.description))));
+      const packageStatus = role === 'splunk' ? el('small', {class: `role-package-status ${state.settings?.splunk_configured ? 'ready' : ''}`}, state.settings?.splunk_configured ? 'Installer package configured' : 'Installer package needed in Setup') : null;
+      grid.append(el('label', {class: 'role-option'}, checkbox, roleIcon(role), el('span', {class: 'role-option-text'}, el('strong', {}, config.name), el('small', {}, config.description), packageStatus)));
     }
     content.append(el('div', {class: 'field-section-label'}, 'Software & roles', el('span', {}, `${wizard.selected.size} ${wizard.selected.size === 1 ? 'VM' : 'VMs'} selected`)), grid, el('div', {class: 'wizard-callout'}, icon('info'), el('span', {}, 'Selecting Kibana also selects Elasticsearch. GDeploy configures their connection, matching versions, and TLS. Splunk runs independently on its own VM.')));
+    if (wizard.selected.has('splunk') && !state.settings?.splunk_configured) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'Add the Splunk Enterprise Linux x86_64 .tgz package and its publisher checksum in Setup. Your deployment draft will be kept while you do this.'), wizardSetupLink('Configure Splunk package')));
   }
   function renderResources(content) {
     const wizard = state.wizard;
@@ -1366,7 +1548,7 @@
     content.append(el('div', {class: 'wizard-callout'}, icon('key'), el('span', {}, 'Linux and application credentials are generated during provisioning. Reveal them from the Credentials panel on the deployment page.')));
     const preflight = el('div', {class: 'preflight-box'}, el('div', {class: 'preflight-title'}, el('h4', {}, 'Preflight checks'), el('span', {}, wizard.preflight ? wizard.preflight.ok ? 'All checks passed' : 'Resolve failed checks' : 'Not run yet')));
     if (wizard.preflight) {
-      const checks = el('div', {}, (wizard.preflight.checks || []).map(check => el('div', {class: `preflight-check ${check.ok ? '' : 'fail'}`}, icon(check.ok ? 'checkCircle' : 'alert'), el('div', {}, el('strong', {}, check.name), el('p', {}, check.message)))));
+      const checks = el('div', {}, (wizard.preflight.checks || []).map(check => el('div', {class: `preflight-check ${check.ok ? '' : 'fail'}`}, icon(check.ok ? 'checkCircle' : 'alert'), el('div', {}, el('strong', {}, check.name), el('p', {}, check.message), !check.ok && check.action?.href && typeof check.action.label === 'string' ? wizardSetupLink(check.action.label, check.action.href) : null))));
       preflight.append(checks);
       if (wizard.preflight.ok) preflight.append(el('p', {class: 'credentials-hint'}, 'Deployment checks run again when you submit, then the job is added to the worker queue.'));
     } else preflight.append(el('p', {class: 'muted small'}, 'Run preflight to verify that this environment is ready to deploy.'));

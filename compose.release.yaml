@@ -2,7 +2,7 @@ name: gdeploy
 
 services:
   gdeploy:
-    image: ${GDEPLOY_IMAGE:-ghcr.io/dasfunfzigste/gdeploy:0.7.1}
+    image: ${GDEPLOY_IMAGE:-ghcr.io/dasfunfzigste/gdeploy:0.8.0}
     platform: linux/amd64
     restart: unless-stopped
     init: true

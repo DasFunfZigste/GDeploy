@@ -575,6 +575,14 @@ PY
 _SPLUNK_SCRIPT = (
     _SCRIPT_HEADER
     + r"""
+python3 - <<'PY'
+import hashlib, hmac, json, pathlib
+p = json.loads(pathlib.Path('payload.json').read_text())
+with pathlib.Path('splunk.tgz').open('rb') as package:
+    actual = hashlib.file_digest(package, 'sha256').hexdigest()
+if not hmac.compare_digest(actual, p['package_sha256']):
+    raise SystemExit('Splunk package SHA-256 changed during transfer; no package was installed. Review Software packages in Setup.')
+PY
 apt-get -q update
 apt-get -q install -y ca-certificates openssl python3 libnuma1
 test ! -e /opt/splunk
@@ -628,18 +636,24 @@ PY
 )
 
 
-def _validate_splunk_archive(package: Path) -> None:
+def _validate_splunk_archive(package: Path, *, fileobj=None) -> None:
     """Reject unsafe tar paths and non-x86_64 packages before upload/extraction."""
     try:
         seen = set()
+        directories = set()
         links: dict[str, str] = {}
         machine = None
-        with tarfile.open(package, "r:gz") as archive:
+        launcher = False
+        with tarfile.open(name=package if fileobj is None else None, mode="r:gz", fileobj=fileobj) as archive:
             for member in archive:
                 name = member.name.removeprefix("./")
                 normalized = posixpath.normpath(name)
                 if name.startswith("/") or normalized.split("/")[0] != "splunk" or ".." in name.split("/"):
                     raise GuestError("Splunk archive contains an unsafe file path.")
+                if normalized in seen and not (member.isdir() and normalized in directories):
+                    raise GuestError("Splunk archive contains duplicate file paths.")
+                if member.isdir():
+                    directories.add(normalized)
                 if member.isdev() or member.isfifo():
                     raise GuestError("Splunk archive contains an unsupported special file.")
                 if member.issym() or member.islnk():
@@ -651,6 +665,8 @@ def _validate_splunk_archive(package: Path) -> None:
                         raise GuestError("Splunk archive contains a link outside its installation directory.")
                     links[normalized] = resolved
                 seen.add(normalized)
+                if normalized == "splunk/bin/splunk":
+                    launcher = member.isfile() and member.size > 0
                 if normalized == "splunk/bin/splunkd" and member.isfile():
                     reader = archive.extractfile(member)
                     if reader is not None:
@@ -661,7 +677,7 @@ def _validate_splunk_archive(package: Path) -> None:
             ancestors = ["/".join(name.split("/")[:index]) for index in range(1, len(name.split("/")))]
             if any(parent in links for parent in ancestors):
                 raise GuestError("Splunk archive tries to write through a linked directory.")
-        if "splunk/bin/splunk" not in seen or machine != 62:
+        if not launcher or machine != 62:
             raise GuestError("Supply a Splunk Enterprise Linux x86_64 .tgz package.")
     except (OSError, tarfile.TarError) as exc:
         raise GuestError("Could not read the Splunk .tgz package.") from exc
@@ -985,6 +1001,7 @@ class GuestSession:
         secrets: dict,
         elastic: dict | None = None,
         splunk_package: Path | None = None,
+        splunk_sha256: str | None = None,
         log: Callable[[str], None] = lambda message: None,
     ) -> dict:
         self._secrets.update(value for value in secrets.values() if isinstance(value, str))
@@ -1034,6 +1051,9 @@ class GuestSession:
             _safe_text(secrets["splunk_password"], "Splunk admin password")
             if splunk_package is None:
                 raise GuestError("A Splunk Enterprise Linux x86_64 .tgz package must be configured.")
+            if not isinstance(splunk_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", splunk_sha256):
+                raise GuestError("A verified Splunk package SHA-256 is required before installation.")
+            payload["package_sha256"] = splunk_sha256
             _validate_splunk_archive(Path(splunk_package))
             log("Installing the supplied Splunk package, enabling HTTPS and its systemd service.")
             self._run_script(_SPLUNK_SCRIPT, payload, Path(splunk_package))

@@ -20,6 +20,10 @@ class MediaStateError(ValueError):
     """A media mutation conflicted with a selection or deployment."""
 
 
+class PackageStateError(MediaStateError):
+    """A package mutation conflicted with a selection or deployment."""
+
+
 class DeploymentVisibilityError(ValueError):
     """A deployment cannot be hidden while it may still change resources."""
 
@@ -41,6 +45,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS ssh_public_keys (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS splunk_package_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS splunk_package_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS deployments (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
                     stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -232,6 +238,97 @@ class Database:
             )
         return value
 
+    def splunk_package_settings(self):
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
+        return self.unseal(row[0]) if row else None
+
+    def splunk_package_files(self):
+        with self.connect() as connection:
+            rows = connection.execute("SELECT value FROM splunk_package_files ORDER BY id").fetchall()
+        return [self.unseal(row[0]) for row in rows]
+
+    def set_splunk_package_settings(self, value, *, uploaded=False):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if uploaded:
+                connection.execute("INSERT INTO splunk_package_files VALUES(?,?)", (value["id"], self.seal(value)))
+            else:
+                self._require_registered_splunk_package(connection, value)
+            connection.execute("INSERT OR REPLACE INTO splunk_package_settings VALUES(1,?)", (self.seal(value),))
+            connection.execute(
+                "INSERT INTO audit VALUES(?,?)", (now(), f"Splunk package selected: {value['name']}; SHA-256 {value['sha256']}"),
+            )
+
+    def clear_splunk_package_settings(self):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            removed = connection.execute("DELETE FROM splunk_package_settings WHERE id=1").rowcount
+            if removed:
+                connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Saved Splunk package selection cleared"))
+
+    def _require_registered_splunk_package(self, connection, value):
+        if not value:
+            return
+        saved = value
+        if value.get("source") == "upload":
+            row = connection.execute("SELECT value FROM splunk_package_files WHERE id=?", (value.get("id"),)).fetchone()
+            saved = self.unseal(row[0]) if row else None
+        path = Path(value.get("path", ""))
+        if (
+            not saved
+            or any(saved.get(key) != value.get(key) for key in ("id", "path", "source", "sha256"))
+            or path.is_symlink() or not path.is_file()
+        ):
+            raise PackageStateError("The Splunk package was removed or changed while this action was running. Refresh and select it again.")
+
+    def _active_splunk_packages(self, connection):
+        rows = connection.execute(
+            "SELECT secrets FROM deployments WHERE status IN ('queued','running','cleaning')"
+        ).fetchall()
+        return [package for row in rows if (package := self.unseal(row[0]).get("splunk_package"))]
+
+    def splunk_package_storage_state(self):
+        with self.connect() as connection:
+            connection.execute("BEGIN")
+            rows = connection.execute("SELECT value FROM splunk_package_files ORDER BY id").fetchall()
+            selected = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
+            return {
+                "items": [self.unseal(row[0]) for row in rows],
+                "selected": self.unseal(selected[0]) if selected else None,
+                "references": self._active_splunk_packages(connection),
+            }
+
+    @staticmethod
+    def splunk_package_delete_reason(value, selected, references):
+        def matches(other):
+            return other and (value["id"] == other.get("id") or value["path"] == other.get("path"))
+
+        if matches(selected):
+            return "Clear the saved selection or choose another Splunk package before deleting this one."
+        if any(matches(reference) for reference in references):
+            return "Used by a queued, running, or cleaning deployment."
+        return None
+
+    def delete_splunk_package(self, package_id, remove_file, *, fallback_selected=None):
+        """Serialize file deletion with package selection and deployment creation."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT value FROM splunk_package_files WHERE id=?", (package_id,)).fetchone()
+            if row is None:
+                return False
+            value = self.unseal(row[0])
+            selected = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
+            reason = self.splunk_package_delete_reason(
+                value, self.unseal(selected[0]) if selected else fallback_selected, self._active_splunk_packages(connection)
+            )
+            if reason:
+                raise PackageStateError(reason)
+            remove_file(value)
+            connection.execute("DELETE FROM splunk_package_files WHERE id=?", (package_id,))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), f"Uploaded Splunk package deleted: {value['name']}"))
+            return True
+
     def remove_esxi_certificate(self, endpoint):
         with self.connect() as connection:
             connection.execute("DELETE FROM esxi_certificates WHERE endpoint=?", (endpoint,))
@@ -335,6 +432,7 @@ class Database:
             # Preflight and credential generation run before this transaction. A
             # concurrent administrator may have removed a previously selected ISO.
             self._require_registered_media(c, secret_data.get("os_media"))
+            self._require_registered_splunk_package(c, secret_data.get("splunk_package"))
             c.execute(
                 """INSERT INTO deployments
                    (id,name,status,stage,created_at,updated_at,spec,vms,resources,secrets,error,parent_id)

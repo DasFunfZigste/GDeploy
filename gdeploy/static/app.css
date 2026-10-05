@@ -1045,7 +1045,7 @@ td {
 }
 .setup-steps {
   display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
+  grid-template-columns:repeat(4,minmax(0,1fr));
   gap:16px;
   margin:0 0 24px
 }
@@ -1104,11 +1104,11 @@ td {
   margin-top:4px;
   color:var(--muted)
 }
-#os-media-panel>.surface-header {
+#os-media-panel>.surface-header,#splunk-package-panel>.surface-header {
   flex-wrap:wrap;
   gap:12px
 }
-#os-media-panel>.surface-header>div {
+#os-media-panel>.surface-header>div,#splunk-package-panel>.surface-header>div {
   flex:1 1 220px
 }
 .media-selected-summary {
@@ -1442,6 +1442,11 @@ td {
   color:var(--muted);
   margin:8px 0 0
 }
+@media(max-width:1200px) {
+  .setup-steps {
+    grid-template-columns:repeat(2,minmax(0,1fr))
+  }
+}
 @media(max-width:700px) {
   .media-storage-body {
     padding:20px
@@ -1460,13 +1465,53 @@ td {
     grid-template-columns:1fr;
     gap:10px
   }
-  #os-media-panel .form-footer {
+  #os-media-panel .form-footer,#splunk-package-panel .form-footer {
     flex-direction:column;
     align-items:stretch
   }
   .media-progress>div {
     flex-wrap:wrap
   }
+}
+.package-download-guide {
+  margin-bottom:22px;
+  line-height:1.65
+}
+.package-download-guide p {
+  margin:0 0 10px
+}
+.package-download-guide a {
+  color:var(--accent-strong)
+}
+.package-download-guide a svg {
+  width:13px;
+  height:13px;
+  margin-left:4px;
+  vertical-align:middle
+}
+.wizard-package-notice {
+  margin-top:18px;
+  padding:16px;
+  border:1px solid var(--border-light);
+  border-radius:8px;
+  background:var(--panel-2)
+}
+.wizard-package-notice p {
+  margin:0 0 12px;
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.6
+}
+.role-option-text .role-package-status {
+  margin-top:8px;
+  color:var(--warning)
+}
+.role-option-text .role-package-status.ready {
+  color:var(--accent-strong)
+}
+.preflight-check .wizard-setup-link {
+  margin-top:10px;
+  white-space:normal
 }
 .form-body {
   padding:24px

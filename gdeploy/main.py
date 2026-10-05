@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,7 +28,9 @@ from .models import (
     MediaSelection,
     RedeployRequest,
     SSHKeySettings,
+    SplunkPackageSelection,
 )
+from .packages import PackageError, SplunkPackageManager
 from .service import DeploymentError, DeploymentService
 from .ssh_keys import SSHKeyError, ssh_public_key_details
 from .vmware import VMwareError
@@ -55,6 +56,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         app.state.certificates = CertificateTrust(app.state.db)
         app.state.media = MediaManager(app.state.db, app.state.config)
         app.state.media.recover_uploads()
+        app.state.packages = SplunkPackageManager(app.state.db, app.state.config)
+        app.state.packages.recover_uploads()
         app.state.login_lock = threading.Lock()
         if start_worker:
             app.state.service.start()
@@ -141,6 +144,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     async def media_conflict(request, exc):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
+    @app.exception_handler(PackageError)
+    async def package_error(request, exc):
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
     @app.exception_handler(SSHKeyError)
     async def ssh_key_error(request, exc):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
@@ -225,7 +232,6 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.get("/api/settings")
     def settings(request: Request, current=Depends(authenticated)):
         saved = request.app.state.db.settings() or {}
-        cfg = request.app.state.config
         return {
             "host": saved.get("host", ""),
             "username": saved.get("username", ""),
@@ -234,15 +240,33 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "certificate_trust": request.app.state.certificates.saved(saved["host"]) if saved else None,
             "iso_configured": request.app.state.media.catalog()["ready"],
             "ssh_key_count": len(request.app.state.db.ssh_public_keys()),
-            "splunk_configured": os.access(cfg.splunk_package, os.R_OK)
-            and cfg.splunk_package.is_file()
-            and bool(cfg.splunk_sha256),
+            "splunk_configured": request.app.state.packages.catalog()["ready"],
         }
 
     @app.get("/api/settings/ssh-keys")
     def ssh_keys(request: Request, current=Depends(authenticated)):
         keys = ssh_public_key_details(request.app.state.db.ssh_public_keys())
         return {"keys": keys, "count": len(keys)}
+
+    @app.get("/api/settings/splunk-package")
+    def splunk_package_settings(request: Request, current=Depends(authenticated)):
+        return request.app.state.packages.catalog()
+
+    @app.put("/api/settings/splunk-package")
+    def select_splunk_package(payload: SplunkPackageSelection, request: Request, current=Depends(authenticated)):
+        return request.app.state.packages.select(payload.package_id, payload.sha256)
+
+    @app.delete("/api/settings/splunk-package")
+    def clear_splunk_package(request: Request, current=Depends(authenticated)):
+        return request.app.state.packages.clear_selection()
+
+    @app.post("/api/settings/splunk-package/upload")
+    async def upload_splunk_package(request: Request, filename: str, sha256: str, current=Depends(authenticated)):
+        return await request.app.state.packages.upload(request, filename, sha256)
+
+    @app.delete("/api/settings/splunk-package/{package_id}")
+    def delete_splunk_package(package_id: str, request: Request, current=Depends(authenticated)):
+        return request.app.state.packages.delete(package_id)
 
     @app.put("/api/settings/ssh-keys")
     def save_ssh_keys(payload: SSHKeySettings, request: Request, current=Depends(authenticated)):

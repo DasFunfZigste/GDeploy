@@ -4,6 +4,26 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-05
+
+### Added
+
+- **Setup → Software packages** configures the licensed Splunk Enterprise Linux x86_64 `.tgz` used for future deployments. Upload a package from your computer or select one from the GDeploy server, retaining its vendor filename. Enter the publisher's verified SHA-256; GDeploy checks the checksum, archive safety and expected Splunk binaries before allowing deployment.
+- Persist uploaded packages under `/data/packages`, with a 4 GiB upload limit. Clear the saved default or delete unused uploads in Setup. Selected packages and uploads referenced by queued, running or cleaning jobs are protected; server-mounted files cannot be deleted through the app.
+- Snapshot the selected package path/checksum for each new Splunk deployment. Changing the default later does not switch the package used by an already queued job.
+- Verify the transferred package's SHA-256 inside the guest against the queued checksum before package-manager or extraction work. Archive validation rejects conflicting duplicate paths and nonregular Splunk launcher/daemon entries while allowing safe internal links.
+
+### Fixed
+
+- A missing Splunk package in preflight now links to **Configure Splunk package**. The deployment draft is retained while completing Setup; use **Return to deployment** and rerun preflight before starting.
+- Splunk configuration can be completed in the browser without renaming the package to `splunk.tgz`, editing `.env` or restarting the container.
+
+### Installation and compatibility
+
+- Update with `git pull --ff-only` and `docker compose up -d --build --wait`, refresh the browser, and check **v0.8.0**. Preserve the existing data volume, configuration, encryption key, credentials, SSH keys, ESXi trust and media. Back up uploaded packages with the complete data volume.
+- Existing `GDEPLOY_SPLUNK_PACKAGE` / `GDEPLOY_SPLUNK_SHA256` settings, including the default `/media/splunk.tgz` path, remain the fallback when no package is selected in Setup. Jobs created before this feature keep their environment-configured package behavior. The application does not download Splunk, bundle its installer or provide a license; license acceptance remains required per deployment. Elasticsearch and Kibana installation is unchanged.
+- Earlier releases do not understand saved package selections or queued package snapshots. Finish queued work before rollback, retain a complete backup and supply the older release's verified environment package settings if needed. Deleting an uploaded package removes that copy; changing app versions cannot restore it.
+
 ## [0.7.1] - 2026-10-02
 
 ### Fixed
