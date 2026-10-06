@@ -179,6 +179,7 @@
     state.detailId = null;
     state.openLogs.clear();
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
+    $('#wizard-dialog').replaceChildren();
     page.replaceChildren();
     clearTimeout(state.toastTimer);
     $('#toast').hidden = true;
@@ -855,10 +856,11 @@
     checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
     return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
-  function createFleetManagerPanel(onChange, onBusy) {
+  function createFleetManagerPanel(onChange, onBusy, options = {}) {
     const viewEpoch = state.routeEpoch, endpoint = '/api/settings/fleetmanager';
     let catalog = null, mode = 'online', packageId = '', dependencyIds = new Set(), busy = '', externalBusy = false;
-    const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const currentView = () => panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
+    const changed = () => { successBox.hidden = true; options.onDirty?.(); };
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
     const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
     const badge = el('span', {class: 'status'}, 'Loading…');
@@ -869,7 +871,7 @@
     const tokenHelp = el('small');
     const license = el('input', {id: 'fleetmanager-license', type: 'file', accept: '.pem', 'aria-describedby': 'fleetmanager-license-help'});
     const licenseHelp = el('small', {id: 'fleetmanager-license-help'});
-    const sourceRadio = value => el('input', {type: 'radio', name: 'fleetmanager-mode', value, checked: mode === value, onChange: () => { mode = value; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); }});
+    const sourceRadio = value => el('input', {type: 'radio', name: 'fleetmanager-mode', value, checked: mode === value, onChange: () => { mode = value; changed(); inlineError(errorBox, ''); syncControls(); }});
     const onlineRadio = sourceRadio('online'), offlineRadio = sourceRadio('offline');
     const onlineFields = el('div', {class: 'media-source-fields'}, field('Repository access token', token, tokenHelp), el('p', {class: 'media-help'}, 'Find your token under Downloads → Fleet Manager in the ', el('a', {href: 'https://my.corelight.cloud/', target: '_blank', rel: 'noopener noreferrer'}, 'Corelight customer portal', icon('link')), '. The VM needs internet access to the vendor repository and Ubuntu package repositories. The vendor repository remains configured for future updates.'));
     const packageSelect = el('select', {id: 'fleetmanager-package', 'aria-describedby': 'fleetmanager-package-help'});
@@ -919,7 +921,7 @@
       const mainPackages = packages.filter(item => item.package === 'corelight-fleet' && item.architecture === 'amd64' && item.available !== false);
       packageSelect.replaceChildren(el('option', {value: ''}, mainPackages.length ? 'Choose a FleetManager package' : 'Upload a corelight-fleet .deb package'), ...mainPackages.map(item => el('option', {value: item.id}, `${item.name} · ${item.version} · ${formatBytes(item.size_bytes)}`))); packageSelect.value = packageId;
       const dependencies = packages.filter(item => item.package !== 'corelight-fleet' && ['amd64', 'all'].includes(item.architecture) && item.available !== false);
-      dependencyList.replaceChildren(...dependencies.map(item => el('label', {class: 'check-label fleet-dependency'}, el('input', {type: 'checkbox', checked: dependencyIds.has(item.id), value: item.id, onChange: event => { if (event.target.checked) dependencyIds.add(item.id); else dependencyIds.delete(item.id); successBox.hidden = true; }}), el('span', {}, el('strong', {}, item.name), el('small', {}, `${item.package} ${item.version} · ${item.architecture}`)))));
+      dependencyList.replaceChildren(...dependencies.map(item => el('label', {class: 'check-label fleet-dependency'}, el('input', {type: 'checkbox', checked: dependencyIds.has(item.id), value: item.id, onChange: event => { if (event.target.checked) dependencyIds.add(item.id); else dependencyIds.delete(item.id); changed(); }}), el('span', {}, el('strong', {}, item.name), el('small', {}, `${item.package} ${item.version} · ${item.architecture}`)))));
       if (!dependencies.length) dependencyList.append(el('p', {class: 'media-help'}, 'No dependency packages uploaded. Add any required .deb files below.'));
       uploadHelp.textContent = `Upload one or more .deb files, up to ${formatBytes(next.max_upload_bytes)} each. Files are stored with GDeploy’s persistent data. Select packages and save setup after uploading.`;
       packageList.replaceChildren(el('h4', {}, 'Available .deb packages', el('span', {class: 'count-badge'}, packages.length)));
@@ -935,10 +937,10 @@
     }
     async function load() {
       if (!currentView() || busy || externalBusy) return;
-      busy = 'load'; inlineError(errorBox, ''); setBusy(refresh, 'Refreshing…'); syncControls();
+      busy = 'load'; if (options.wizard) onBusy(true); inlineError(errorBox, ''); setBusy(refresh, 'Refreshing…'); syncControls();
       try { const next = await api(endpoint); if (currentView()) renderCatalog(next, !catalog); }
       catch (error) { if (currentView()) { inlineError(errorBox, error.message); badge.textContent = 'Couldn’t load setup'; } }
-      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh'); syncControls(); } }
+      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh'); if (options.wizard) onBusy(false); syncControls(); } }
     }
     function confirmRemoval(item = null) {
       if (!currentView() || busy || externalBusy || (item && !item.can_delete)) return;
@@ -962,30 +964,32 @@
     }
     const refresh = button('Refresh', 'button-small', load, 'refresh'); refresh.id = 'fleetmanager-refresh';
     const save = button('Save FleetManager setup', 'button-primary', null, 'check'); save.type = 'submit';
-    const form = el('form', {onSubmit: async event => {
-      event.preventDefault();
-      if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return;
-      if (community.value && /["'\x00-\x1f\x7f]/.test(community.value)) { inlineError(errorBox, 'Use a community string without quotation marks or control characters.'); community.focus(); return; }
-      if (mode === 'online' && token.value && /[^\x21-\x7e]|:/.test(token.value)) { inlineError(errorBox, 'The repository access token must use ASCII characters without whitespace or colons.'); token.focus(); return; }
+    save.hidden = Boolean(options.wizard);
+    async function saveSettings() {
+      if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return false;
+      if (community.value && /["'\x00-\x1f\x7f]/.test(community.value)) { inlineError(errorBox, 'Use a community string without quotation marks or control characters.'); community.focus(); return false; }
+      if (mode === 'online' && token.value && /[^\x21-\x7e]|:/.test(token.value)) { inlineError(errorBox, 'The repository access token must use ASCII characters without whitespace or colons.'); token.focus(); return false; }
       const file = license.files[0];
-      if (file && (!file.name.toLowerCase().endsWith('.pem') || !file.size || file.size > catalog.max_license_bytes)) { inlineError(errorBox, `Choose a nonempty .pem license file no larger than ${formatBytes(catalog.max_license_bytes)}.`); return; }
+      if (file && (!file.name.toLowerCase().endsWith('.pem') || !file.size || file.size > catalog.max_license_bytes)) { inlineError(errorBox, `Choose a nonempty .pem license file no larger than ${formatBytes(catalog.max_license_bytes)}.`); license.focus(); return false; }
       busy = 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true; setBusy(save, 'Saving…'); syncControls();
       try {
         const payload = {mode, package_id: packageId || null, dependency_ids: [...dependencyIds]};
         if (community.value) payload.community_string = community.value;
         if (mode === 'online' && token.value) payload.repository_token = token.value;
         if (file) { payload.license_pem = await file.text(); payload.license_name = file.name; }
-        if (!currentView()) return;
+        if (!currentView()) return false;
         const next = await api(endpoint, {method: 'PUT', body: payload});
-        if (!currentView()) return;
+        if (!currentView()) return false;
         community.value = ''; token.value = ''; license.value = ''; renderCatalog(next, true);
         successBox.textContent = 'FleetManager setup saved. New FleetManager deployments will use this configuration.'; successBox.hidden = false;
-      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+        return next.ready;
+      } catch (error) { if (currentView()) { inlineError(errorBox, error.message); errorBox.scrollIntoView({block: 'center'}); } return false; }
       finally { if (currentView()) { busy = ''; onBusy(false); syncControls(); } }
-    }}, el('div', {class: 'form-body'}, savedSummary, errorBox, successBox,
+    }
+    const form = el('form', {onSubmit: event => { event.preventDefault(); if (options.onContinue) options.onContinue(); else saveSettings(); }}, el('div', {class: 'form-body'}, savedSummary, errorBox, successBox,
       el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Installation method'), el('label', {}, onlineRadio, 'Online repository'), el('label', {}, offlineRadio, 'Offline package')),
       field('Community string', community, communityHelp), field('Corelight license (.pem)', license, licenseHelp), onlineFields, offlineFields),
-      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), save));
+      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, options.wizard ? 'Save & continue validates these settings and saves them as defaults for new deployments.' : 'Saved changes apply to new deployments.'), save));
     const upload = button('Upload packages', 'button-primary button-small', async () => {
       if (!currentView() || busy || externalBusy || !catalog) return;
       const files = [...uploadFiles.files];
@@ -1007,10 +1011,10 @@
     }, 'plus'); upload.id = 'fleetmanager-upload';
     const uploads = el('section', {class: 'media-storage'}, el('div', {class: 'surface-header'}, el('div', {}, el('h3', {}, 'Offline packages'), el('p', {}, 'Upload FleetManager and any required dependency .deb files.'))), el('div', {class: 'media-storage-body'}, field('Package files (.deb)', uploadFiles, uploadHelp), field('Expected SHA-256 · optional', checksum, 'Only for a single file. If supplied by your package source, GDeploy checks this value. Otherwise it records a checksum for future integrity checks.'), el('div', {class: 'fleet-upload-actions'}, upload), progressBox, packageList));
     const panel = el('section', {class: 'surface', id: 'fleetmanager-panel', 'aria-labelledby': 'fleetmanager-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'fleetmanager-title'}, 'FleetManager'), el('p', {}, 'Configure Corelight FleetManager installation and sensor access.')), badge, refresh), form, uploads);
-    packageSelect.addEventListener('change', () => { packageId = packageSelect.value; successBox.hidden = true; });
+    packageSelect.addEventListener('change', () => { packageId = packageSelect.value; changed(); });
     uploadFiles.addEventListener('change', () => { checksum.value = ''; syncControls(); });
-    for (const input of [community, token, license]) input.addEventListener('input', () => { successBox.hidden = true; inlineError(errorBox, ''); });
-    return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
+    for (const input of [community, token, license]) input.addEventListener('input', () => { changed(); inlineError(errorBox, ''); });
+    return {panel, load, save: saveSettings, canSave: () => Boolean(catalog && !busy && !externalBusy), setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
   function createSSHAccessPanel(onSaved, onBusy, initialDraft) {
     const viewEpoch = state.routeEpoch;
@@ -1594,7 +1598,11 @@
     if (!state.settings?.configured || !state.settings?.iso_configured) { location.hash = state.settings?.configured ? 'settings/media' : 'settings/connection'; notify('Complete Setup with an ESXi connection and an OS ISO to begin a deployment.'); return; }
     hideCredentials();
     const dialog = $('#wizard-dialog');
-    if (state.wizard?.suspended) { state.wizard.suspended = false; invalidatePreflight(); state.wizard.accepted = false; state.wizard.busy = true; }
+    if (state.wizard?.suspended) {
+      state.wizard.suspended = false; invalidatePreflight(); state.wizard.accepted = false; state.wizard.busy = true;
+      state.wizard.fleetControls = null; state.wizard.fleetValidated = false;
+      if (state.wizard.selected.has('fleetmanager') && state.wizard.step > 2) state.wizard.step = 2;
+    }
     else state.wizard = {step: 0, name: '', selected: new Set(['elasticsearch', 'kibana']), vms: {}, accepted: false, preflight: null, busy: true, error: ''};
     dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), loading('Loading ESXi datastores and networks…')));
     dialog.showModal();
@@ -1615,7 +1623,7 @@
   }
   function closeWizard() {
     if (state.wizard?.busy) return;
-    $('#wizard-dialog').close(); state.wizard = null;
+    $('#wizard-dialog').close(); $('#wizard-dialog').replaceChildren(); state.wizard = null;
     if (state.route === 'deployments') renderOverview();
   }
   function wizardSetupLink(label, href = '#settings/packages') {
@@ -1627,12 +1635,43 @@
       $('#wizard-dialog').close(); location.hash = href;
     }}, label, icon('arrow'));
   }
-  $('#wizard-dialog').addEventListener('cancel', event => { if (state.wizard?.busy) event.preventDefault(); else { state.wizard = null; if (state.route === 'deployments') renderOverview(); } });
+  $('#wizard-dialog').addEventListener('cancel', event => { if (state.wizard?.busy) event.preventDefault(); else { $('#wizard-dialog').replaceChildren(); state.wizard = null; if (state.route === 'deployments') renderOverview(); } });
   function wizardHeader() {
     const close = el('button', {type: 'button', class: 'icon-button dialog-close', 'aria-label': 'Close deployment wizard', onClick: closeWizard}, icon('close'));
     return el('div', {class: 'wizard-header'}, el('div', {}, el('h2', {id: 'wizard-title'}, 'New deployment'), el('p', {}, 'A ready-to-use environment, configured your way.')), close);
   }
   function selectedRoles() { return Object.keys(roles).filter(role => state.wizard.selected.has(role)); }
+  function wizardSteps() {
+    return ['Choose software', 'Configure VMs', ...(state.wizard.selected.has('fleetmanager') ? ['FleetManager configuration'] : []), 'Review & deploy'];
+  }
+  function isFleetStep() { return state.wizard?.selected.has('fleetmanager') && state.wizard.step === 2; }
+  function syncFleetWizardActions(wizard) {
+    if (state.wizard !== wizard || !isFleetStep()) return;
+    for (const control of $('#wizard-dialog').querySelectorAll('.wizard-footer button,.dialog-close')) control.disabled = wizard.busy;
+    const next = $('#wizard-next');
+    if (next) {
+      next.disabled = wizard.busy || !wizard.fleetControls?.canSave();
+      next.replaceChildren(...(wizard.busy ? [spinner(), 'Please wait…'] : [icon('arrow'), 'Save & continue']));
+    }
+  }
+  function renderFleetConfiguration(content) {
+    const wizard = state.wizard;
+    content.append(el('h3', {}, 'FleetManager configuration'), el('p', {class: 'muted'}, 'Choose how to install FleetManager and provide its community string, license, and repository token or offline packages. Saved values can be reused. Complete this step before running preflight.'));
+    if (!wizard.fleetControls) {
+      wizard.fleetControls = createFleetManagerPanel(catalog => {
+        if (state.wizard !== wizard) return;
+        if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; state.settings.fleetmanager_mode = catalog.mode; }
+        wizard.fleetValidated = false; invalidatePreflight();
+      }, busy => {
+        if (state.wizard !== wizard) return;
+        wizard.busy = busy; syncFleetWizardActions(wizard);
+      }, {
+        wizard: true, isCurrent: () => state.wizard === wizard && !wizard.suspended && isFleetStep(),
+        onDirty: () => { wizard.fleetValidated = false; invalidatePreflight(); }, onContinue: wizardNext,
+      });
+    }
+    content.append(wizard.fleetControls.panel);
+  }
   function defaultVMName(name, role) { return `${(name || 'environment').slice(0, 62 - role.length).replace(/-+$/, '')}-${role}`; }
   function ensureVMs() {
     const wizard = state.wizard;
@@ -1650,26 +1689,30 @@
     const wizard = state.wizard; if (!wizard) return;
     const focusedId = $('#wizard-dialog').contains(document.activeElement) ? document.activeElement.id : '';
     ensureVMs();
+    const steps = wizardSteps(), reviewStep = steps.length - 1;
+    const loadFleet = isFleetStep() && !wizard.fleetControls;
     const sidebar = el('aside', {class: 'wizard-sidebar', 'aria-label': 'Deployment steps'});
-    ['Choose software', 'Configure VMs', 'Review & deploy'].forEach((label, index) => sidebar.append(el('div', {class: `wizard-step ${index === wizard.step ? 'active' : index < wizard.step ? 'done' : ''}`, ...(index === wizard.step ? {'aria-current': 'step'} : {})}, el('b', {}, index < wizard.step ? '✓' : index + 1), label)));
+    steps.forEach((label, index) => sidebar.append(el('div', {class: `wizard-step ${index === wizard.step ? 'active' : index < wizard.step ? 'done' : ''}`, ...(index === wizard.step ? {'aria-current': 'step'} : {})}, el('b', {}, index < wizard.step ? '✓' : index + 1), el('span', {}, label))));
     sidebar.append(el('p', {class: 'wizard-aside-note'}, 'The OS ISO selected in Setup is used for each VM. Every selected role gets its own dedicated machine.'));
     const content = el('div', {class: 'wizard-content', id: 'wizard-content'});
     if (wizard.error && !wizard.vmError) content.append(el('div', {class: 'alert alert-error', role: 'alert'}, wizard.error));
     if (wizard.step === 0) renderBlueprint(content);
     if (wizard.step === 1) renderResources(content);
-    if (wizard.step === 2) renderReview(content);
-    const footer = el('div', {class: 'wizard-footer'}, el('span', {}, `Step ${wizard.step + 1} of 3`));
+    if (isFleetStep()) renderFleetConfiguration(content);
+    if (wizard.step === reviewStep) renderReview(content);
+    const footer = el('div', {class: 'wizard-footer'}, el('span', {}, `Step ${wizard.step + 1} of ${steps.length}`));
     const actions = el('div', {class: 'wizard-footer-actions'});
     if (wizard.step > 0) actions.append(button('Back', 'button-ghost', () => { if (wizard.busy) return; wizard.step--; renderWizard(); }));
     else actions.append(button('Cancel', 'button-ghost', closeWizard));
-    const nextLabel = wizard.step < 2 ? 'Continue' : wizard.preflight?.ok ? `Deploy ${selectedRoles().length} ${selectedRoles().length === 1 ? 'VM' : 'VMs'}` : 'Run preflight';
-    const next = button(nextLabel, 'button-primary', wizardNext, wizard.step < 2 ? 'arrow' : wizard.preflight?.ok ? 'plus' : 'shield');
+    const nextLabel = isFleetStep() ? 'Save & continue' : wizard.step < reviewStep ? 'Continue' : wizard.preflight?.ok ? `Deploy ${selectedRoles().length} ${selectedRoles().length === 1 ? 'VM' : 'VMs'}` : 'Run preflight';
+    const next = button(nextLabel, 'button-primary', wizardNext, wizard.step < reviewStep ? 'arrow' : wizard.preflight?.ok ? 'plus' : 'shield'); next.id = 'wizard-next';
     if (wizard.busy) setBusy(next, wizard.preflight?.ok ? 'Queuing deployment…' : 'Checking prerequisites…');
     for (const action of actions.children) action.disabled = wizard.busy;
     actions.append(next); footer.append(actions);
     $('#wizard-dialog').replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), el('div', {class: 'wizard-layout'}, sidebar, content), footer));
     if (wizard.busy) for (const control of $('#wizard-dialog').querySelectorAll('button,input,select')) control.disabled = true;
     else if (focusedId) document.getElementById(focusedId)?.focus({preventScroll: true});
+    if (isFleetStep()) { syncFleetWizardActions(wizard); if (loadFleet) wizard.fleetControls.load(); }
   }
   function renderBlueprint(content) {
     const wizard = state.wizard;
@@ -1689,12 +1732,12 @@
         invalidatePreflight(); renderWizard();
       }});
       const readiness = role === 'splunk' ? state.settings?.splunk_configured : role === 'fleetmanager' ? state.settings?.fleetmanager_configured : null;
-      const packageStatus = ['splunk', 'fleetmanager'].includes(role) ? el('small', {class: `role-package-status ${readiness ? 'ready' : ''}`}, readiness ? role === 'fleetmanager' ? `${state.settings.fleetmanager_mode === 'offline' ? 'Offline package' : 'Online repository'} configured` : 'Installer package configured' : role === 'fleetmanager' ? 'Installation setup needed' : 'Installer package needed in Setup') : null;
+      const packageStatus = ['splunk', 'fleetmanager'].includes(role) ? el('small', {class: `role-package-status ${readiness ? 'ready' : ''}`}, readiness ? role === 'fleetmanager' ? `${state.settings.fleetmanager_mode === 'offline' ? 'Offline package' : 'Online repository'} configured` : 'Installer package configured' : role === 'fleetmanager' ? 'Configure after VM resources' : 'Installer package needed in Setup') : null;
       grid.append(el('label', {class: 'role-option'}, checkbox, roleIcon(role), el('span', {class: 'role-option-text'}, el('strong', {}, config.name), el('small', {}, config.description), packageStatus)));
     }
     content.append(el('div', {class: 'field-section-label'}, 'Software & roles', el('span', {}, `${wizard.selected.size} ${wizard.selected.size === 1 ? 'VM' : 'VMs'} selected`)), grid, el('div', {class: 'wizard-callout'}, icon('info'), el('span', {}, 'Selecting Kibana also selects Elasticsearch. GDeploy configures their connection, matching versions, and TLS. Splunk and FleetManager each run on their own VM.')));
     if (wizard.selected.has('splunk') && !state.settings?.splunk_configured) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'Add the Splunk Enterprise Linux x86_64 .tgz package and its publisher checksum in Setup. Your deployment draft will be kept while you do this.'), wizardSetupLink('Configure Splunk package')));
-    if (wizard.selected.has('fleetmanager') && !state.settings?.fleetmanager_configured) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'Configure FleetManager’s installation method, community string, and .pem license in Setup. Your deployment draft will be kept while you do this.'), wizardSetupLink('Configure FleetManager', '#settings/packages/fleetmanager')));
+    if (wizard.selected.has('fleetmanager')) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'After configuring VM resources, you’ll choose FleetManager’s installation method and provide its community string, license, and installation credentials before preflight.')));
   }
   function renderResources(content) {
     const wizard = state.wizard;
@@ -1743,7 +1786,15 @@
     content.append(el('div', {class: 'wizard-callout'}, icon('key'), el('span', {}, 'Linux and application credentials are generated during provisioning. Reveal them from the Credentials panel on the deployment page.')));
     const preflight = el('div', {class: 'preflight-box'}, el('div', {class: 'preflight-title'}, el('h4', {}, 'Preflight checks'), el('span', {}, wizard.preflight ? wizard.preflight.ok ? 'All checks passed' : 'Resolve failed checks' : 'Not run yet')));
     if (wizard.preflight) {
-      const checks = el('div', {}, (wizard.preflight.checks || []).map(check => el('div', {class: `preflight-check ${check.ok ? '' : 'fail'}`}, icon(check.ok ? 'checkCircle' : 'alert'), el('div', {}, el('strong', {}, check.name), el('p', {}, check.message), !check.ok && check.action?.href && typeof check.action.label === 'string' ? wizardSetupLink(check.action.label, check.action.href) : null))));
+      const checks = el('div', {}, (wizard.preflight.checks || []).map(check => {
+        let action = null;
+        if (!check.ok && check.action?.href && typeof check.action.label === 'string') {
+          action = check.action.href === '#settings/packages/fleetmanager' && wizard.selected.has('fleetmanager')
+            ? button('Edit FleetManager configuration', 'button-small wizard-setup-link', () => { if (wizard.busy) return; invalidatePreflight(); wizard.fleetControls = null; wizard.fleetValidated = false; wizard.step = 2; renderWizard(); }, 'back')
+            : wizardSetupLink(check.action.label, check.action.href);
+        }
+        return el('div', {class: `preflight-check ${check.ok ? '' : 'fail'}`}, icon(check.ok ? 'checkCircle' : 'alert'), el('div', {}, el('strong', {}, check.name), el('p', {}, check.message), action));
+      }));
       preflight.append(checks);
       if (wizard.preflight.ok) preflight.append(el('p', {class: 'credentials-hint'}, 'Deployment checks run again when you submit, then the job is added to the worker queue.'));
     } else preflight.append(el('p', {class: 'muted small'}, 'Run preflight to verify that this environment is ready to deploy.'));
@@ -1794,6 +1845,16 @@
       }
       else $('#wizard-content')?.scrollTo({top: 0});
       return;
+    }
+    if (isFleetStep()) {
+      const saved = await wizard.fleetControls.save();
+      if (state.wizard !== wizard || !saved) return;
+      wizard.fleetValidated = true; wizard.step++;
+      renderWizard(); $('#wizard-content')?.scrollTo({top: 0});
+      return;
+    }
+    if (wizard.selected.has('fleetmanager') && !wizard.fleetValidated) {
+      wizard.step = 2; renderWizard(); return;
     }
     if (wizard.selected.has('splunk') && !wizard.accepted) { wizard.error = 'Accept the license terms for the supplied Splunk package before running preflight.'; renderWizard(); return; }
     const deploy = Boolean(wizard.preflight?.ok);

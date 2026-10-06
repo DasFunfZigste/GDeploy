@@ -1,6 +1,8 @@
 # Deploy Corelight FleetManager
 
-GDeploy creates a dedicated Ubuntu Server 24.04 LTS amd64 VM for **Corelight Fleet Manager**, labeled **FleetManager** in the UI. Configure its installation in **Setup → Software packages → FleetManager**, or open `http://SERVER_LAN_IP:8000/#settings/packages/fleetmanager`.
+GDeploy creates a dedicated Ubuntu Server 24.04 LTS amd64 VM for **Corelight Fleet Manager**, labeled **FleetManager** in the UI. Select it in **New deployment** to use this flow: **Choose software → Configure VMs → FleetManager configuration → Review & deploy**. The FleetManager step appears before preflight and reuses saved defaults; complete and save it before continuing to review.
+
+**Setup → Software packages → FleetManager** remains available for saving defaults and managing packages outside a deployment, including at `http://SERVER_LAN_IP:8000/#settings/packages/fleetmanager`. Deployments without FleetManager retain the three-step wizard without the FleetManager configuration step.
 
 This walkthrough follows the **Corelight Fleet Manager User Guide, release 29.2.2, updated October 2, 2026**, especially the requirements and Linux installation instructions on PDF pages 7–15. Use the version of Fleet Manager supported by your Corelight entitlement and Ubuntu release. GDeploy's automated checks do not establish that a particular licensed package works in your environment; complete the [lab acceptance checklist](LAB_VALIDATION.md#fleetmanager-installation) with your actual ESXi host and Corelight license.
 
@@ -34,11 +36,11 @@ Setup stores the community string, repository token and PEM encrypted in the exi
 
 ## Online installation
 
-1. Open **Setup → Software packages → FleetManager** and choose **Online repository**.
-2. Enter the community string and Corelight repository token. Choose the product identity `.pem` file.
-3. Select **Save FleetManager setup**. Confirm **Online repository configured** and the saved license details.
-4. Open **New deployment**, select **FleetManager**, and set its distinct VM name, CPU, RAM, disk, datastore, port group and DHCP/static settings. Other selected applications keep their own VMs and resources.
-5. Run preflight, review the deployment and start it. If preflight links back to **Configure FleetManager**, complete Setup, use **Return to deployment**, then rerun preflight.
+1. Open **New deployment**, select **FleetManager** in **Choose software**, then continue to **Configure VMs**.
+2. Set its distinct VM name, CPU, RAM, disk, datastore, port group and DHCP/static settings. Other selected applications keep their own VMs and resources. Continue to **FleetManager configuration**.
+3. Choose **Online repository**. Enter the community string and Corelight repository token, and choose the product identity `.pem` file. Existing saved values are reused; leave a secret field blank and omit a replacement PEM to retain them.
+4. Select **Save & continue** to validate and save the configuration, then open **Review & deploy**. These settings also become the defaults for future FleetManager deployments.
+5. In **Review & deploy**, explicitly run preflight, review its results and start the deployment. Saving configuration does not run preflight or queue a job automatically. If a later check reports changed or missing configuration, return to the FleetManager step, correct it and run preflight again.
 
 The new VM installs Ubuntu, obtains the Corelight stable repository signing key over verified HTTPS, configures the authenticated apt repository and installs `corelight-fleet`. Ubuntu and repository access are required from the guest. Saving online mode clears unused offline package selections; it does not delete their uploaded files.
 
@@ -65,10 +67,10 @@ Offline mode performs no repository downloads during the Fleet Manager VM's unat
 1. On a connected workstation or staging server, obtain the **Ubuntu-compatible `corelight-fleet` amd64 `.deb`** through your Corelight entitlement. The vendor guide supports downloading from the customer portal or running `apt download corelight-fleet` on an Ubuntu host already configured for the Corelight repository. Keep the actual file produced by that command; `apt download` normally writes into the working directory.
 2. Obtain any additional **Ubuntu 24.04 amd64 or `all` dependency `.deb` files** needed by that Fleet Manager version. Include recursive dependencies absent from the new VM, not just the main package. Resolve them on a matching Ubuntu 24.04 staging environment and validate the set in an isolated lab; a package already installed on the staging machine may otherwise be missed.
 3. In **Setup → OS installation media**, select the regular **Ubuntu Server 24.04 LTS amd64 live-server ISO** with its publisher SHA-256. The ISO must contain the base packages needed for OpenSSH Server, open-vm-tools, Python and CA certificates. Offline mode selects the regular `ubuntu-server` source and disables repository mirror candidates and automatic country-mirror selection, using the installer's offline fallback. This governs package sources, not every unrelated network lookup the installer may attempt. Unsupported/minimal media or a missing base package can stop the OS installation.
-4. Open **Setup → Software packages → FleetManager** and choose **Offline package**. Enter the community string and choose the product identity PEM. A repository token is unnecessary.
+4. In **New deployment**, select FleetManager, complete **Configure VMs**, then choose **Offline package** in **FleetManager configuration**. Enter the community string and choose the product identity PEM, or retain the saved values. A repository token is unnecessary.
 5. Under **Offline packages**, select one or more `.deb` files and choose **Upload packages**, or place them in the Docker host's `media/` directory and choose **Refresh**. Server-mounted files must be readable by container UID 10001, normally directory mode 0755 and file mode 0644. Uploads accept **4 GiB per file** and persist in `/data/fleetmanager-packages`.
-6. Select the main **FleetManager .deb package** and the needed **Additional dependency packages**. Select one version of each dependency. Choose **Save FleetManager setup** and confirm **Offline package configured**. Uploading alone registers files; saving the selection makes them available for future deployments.
-7. Create the deployment as above. Keep all chosen files present and unchanged until the job finishes.
+6. Select the main **FleetManager .deb package** and the needed **Additional dependency packages**. Select one version of each dependency. Select **Save & continue** to validate and save the choices, then open **Review & deploy**. Uploading alone registers files; saving stores the selections as defaults and makes them available for deployment.
+7. Explicitly run preflight, review its results and start the deployment. Keep all chosen files present and unchanged until the job finishes. You can also prepare and save the same package selections in Setup before starting a deployment; the wizard then reuses those defaults.
 
 GDeploy reads Debian control metadata without installing the package in the app container. The main package must identify itself as `corelight-fleet` for `amd64`; dependencies can be `amd64` or `all`. An optional expected SHA-256 can be supplied for a single uploaded file. If no trusted checksum is available, GDeploy computes one for later integrity checks. That calculated checksum detects changed bytes; it does not establish publisher provenance. Obtain packages from trusted, authenticated sources. The vendor guide does not provide a mandatory publisher checksum workflow.
 

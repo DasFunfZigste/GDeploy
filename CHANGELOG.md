@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-06
+
+### Fixed
+
+- Add **FleetManager configuration** between **Configure VMs** and **Review & deploy** whenever FleetManager is selected. Choose online/offline installation and supply its community string, product identity PEM, repository token or packages before running preflight, without first triggering a missing-configuration error.
+- Reuse saved FleetManager defaults and save changes before continuing to review. **Setup → Software packages → FleetManager** remains available for default settings and package management. Deployments without FleetManager retain the three-step wizard.
+- Keep preflight an explicit action on **Review & deploy** after configuration is saved; saving configuration alone does not queue a deployment.
+- Preserve FleetManager drafts during Back navigation, block navigation during saves/uploads, and discard unsaved credential fields when the wizard closes or the session ends.
+
+### Installation and compatibility
+
+- Update with `git pull --ff-only` and `docker compose up -d --build --wait`, refresh the browser, and check **v0.9.1**. Preserve the existing data volume, encryption key, `.env`, credentials, certificates, SSH keys, media and uploaded packages.
+- This patch changes the wizard flow and instructions. FleetManager API validation, encrypted settings, queued snapshots, package installation and existing VMs are unchanged. Saved settings from v0.9.0 remain usable; no license or package re-upload is required. The v0.9.0 backup and compatibility requirements still apply.
+
 ## [0.9.0] - 2026-10-05
 
 ### Added
