@@ -18,7 +18,7 @@ GDeploy uses the full VM disk for the Ubuntu installation. `/var` and `/tmp` nor
 | GDeploy to the new VM | SSH 22 for configuration and verification |
 | Administrator browser to Fleet Manager | HTTPS 443 |
 | Corelight sensor management interfaces to Fleet Manager | TCP 1443, using the shared community string and product identity |
-| Online Fleet Manager guest | DNS, Ubuntu package mirrors, and HTTPS to `pkgrepos.corelight.cloud` |
+| Online Fleet Manager guest | DNS, Ubuntu package mirrors, and HTTPS to `pkgrepos.corelight.cloud` plus the signing-key download destination returned by the repository (which can be CloudFront) |
 | Offline Fleet Manager guest | Local ESXi/GDeploy/network services remain reachable; installation uses the ISO and supplied packages |
 
 Choose a static address or DHCP reservation. GDeploy does not create upstream firewall rules, enroll sensors, configure external data-feed connectivity or install your organization's monitoring and backup tools.
@@ -46,6 +46,12 @@ Setup stores the community string, repository token and PEM encrypted in the exi
 The new VM installs Ubuntu, obtains the Corelight stable repository signing key over verified HTTPS, configures the authenticated apt repository and installs `corelight-fleet`. For an exact version, it checks availability, installs `corelight-fleet=VERSION` and verifies the installed version. An unavailable version stops installation with a logged error; GDeploy does not substitute another release. Preflight checks configuration and version syntax; repository access, actual availability and dependencies are checked inside the VM during installation. Ubuntu and repository access are required from the guest. Saving online mode clears unused offline package selections; it does not delete their uploaded files.
 
 Each queued deployment keeps its saved version choice. A blank field is resolved to the repository candidate at installation time, so separate deployments may receive different releases. Choosing an exact version controls the initial install without creating an apt hold or preventing later administrator-managed upgrades. Clearing **Version to install** and saving returns future deployments to the latest candidate.
+
+The signing-key endpoint can redirect to a download service such as CloudFront. GDeploy follows a bounded chain of HTTPS redirects and verifies TLS at every destination. It sends the repository token only while requests remain on the original origin; after the first origin change, the token is never reattached during that download. Signed download query strings are used for the request but are not logged. HTTP destinations, embedded URL credentials, invalid destinations and excessive redirects are rejected. Downloaded bytes must pass `gpg --dearmor` before repository trust files are written.
+
+If the original signing-key request returns **HTTP 401**, confirm repository entitlement and save the current token from **Corelight Customer Portal → Downloads → Fleet Manager** before creating another deployment. Blank token fields preserve the saved token. A failed or queued job retains its original token even after Setup changes. A **302** response only establishes a redirect, not successful key retrieval or valid credentials. If a redirected download is rejected, check the vendor download service and guest access to that destination. Do not share the token, PEM, authorization headers or a full signed redirect URL in support logs.
+
+Updating GDeploy fixes the redirect handling for future installation attempts; it does not resume an already failed job or repair an existing VM. **Delete & redeploy** replaces the VM and its disks; use it only when replacement is intended.
 
 The repository remains configured for ordinary package administration:
 

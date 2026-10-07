@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-07
+
+### Fixed
+
+- Follow HTTPS redirects when retrieving the FleetManager repository signing key, including Corelight's reported CloudFront download redirect. Previous releases rejected every redirect even though the vendor's documented download command follows them.
+- Keep the repository token on the original origin only. After a redirect changes origin, remove authentication permanently for that download, including any later redirect back. Verify TLS on each request, reject insecure or malformed destinations and embedded URL credentials, bound the redirect chain and key size, and keep signed URLs out of diagnostic output.
+- Distinguish rejection of the original repository token from a failure at a redirected download. A redirect alone does not establish successful authentication or a valid signing key; downloaded bytes must still pass the key parser.
+
+### Installation and compatibility
+
+- From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the existing data volume, encryption key, environment files, licenses, credentials and media. No data migration is required; online version selection and offline installation are unchanged.
+- If the failed job reported HTTP 401, save the current token from Corelight Customer Portal → Downloads → Fleet Manager before creating another deployment. Blank token fields retain the saved token; existing jobs keep the token captured when queued. This redirect fix does not correct invalid credentials, resume failed jobs or alter an existing VM.
+- Automated coverage includes real local TLS redirects and credential isolation. Customer-token, vendor-package and ESXi installation acceptance still requires the lab environment. Earlier releases will again reject signing-key redirects if rolled back.
+
 ## [0.10.0] - 2026-10-07
 
 ### Added
