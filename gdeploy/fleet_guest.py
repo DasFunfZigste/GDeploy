@@ -94,12 +94,26 @@ def run(command, label, *, input=None, timeout=1200, private=False, binary=False
     return result.stdout if binary else result.stdout.decode("utf-8", "replace")
 
 
+def requested_online_version(snapshot):
+    """Accept legacy snapshots without a selection; reject APT expressions."""
+    version = snapshot.get("online_version")
+    if version is None:
+        return ""
+    if not isinstance(version, str) or len(version) > 128 or (
+        version and not re.fullmatch(r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~\-]*", version)
+    ):
+        raise FleetInstallError("Choose Latest or an exact Fleet Manager Debian package version, including any epoch or revision.")
+    return version
+
+
 def verify_transfers(payload):
     """Validate all snapshotted bytes before executing any package-manager command."""
     snapshot = payload["fleetmanager"]
     register_secrets(snapshot)
     if snapshot.get("mode") not in {"online", "offline"}:
         raise FleetInstallError("Choose ONLINE or OFFLINE for Fleet Manager in Setup.")
+    if snapshot["mode"] == "online":
+        requested_online_version(snapshot)
     license_pem = snapshot.get("license_pem")
     license_sha256 = snapshot.get("license_sha256")
     if (
@@ -218,6 +232,7 @@ class NoKeyRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def configure_online_repository(snapshot):
+    version = requested_online_version(snapshot)
     token = snapshot.get("repository_token")
     if not isinstance(token, str) or not token or any(c.isspace() or ord(c) < 32 for c in token):
         raise FleetInstallError("ONLINE Fleet Manager installation requires the customer repository token in Setup.")
@@ -248,7 +263,35 @@ def configure_online_repository(snapshot):
         f"deb [signed-by={keyring}] {REPOSITORY}any/ any main\n", 0o644,
     )
     run(["apt-get", "-q", "update"], "Could not update the signed Fleet Manager repository; check the customer repository token and network access")
-    run(APT_INSTALL + ["--", "corelight-fleet"], "Could not install corelight-fleet from the vendor repository")
+    if version:
+        available = run(["apt-cache", "madison", "corelight-fleet"], "Could not list available Fleet Manager repository versions")
+        versions = {
+            fields[1].strip()
+            for line in available.splitlines()
+            if len(fields := line.split("|")) >= 2 and fields[0].strip() == "corelight-fleet"
+        }
+        if version not in versions:
+            raise FleetInstallError(
+                f"Fleet Manager version {version} is not available from the configured repository. "
+                "Choose an available exact package version or Latest before retrying."
+            )
+    package = "corelight-fleet" + ("=" + version if version else "")
+    run(APT_INSTALL + ["--", package], "Could not install corelight-fleet from the vendor repository")
+    # Check the exact selection before writing configuration or starting services.
+    # This is an initial-install selection, with no hold preventing later upgrades.
+    return installed_package_version(version) if version else None
+
+
+def installed_package_version(requested=""):
+    version = run(["dpkg-query", "-W", "-f=${Version}", "corelight-fleet"], "Could not determine the installed Fleet Manager version", timeout=30).strip()
+    if not version:
+        raise FleetInstallError("Fleet Manager did not report its installed package version.")
+    if requested and version != requested:
+        raise FleetInstallError(
+            f"The installed Fleet Manager package does not match requested version {requested}; "
+            "check the repository package and select an available exact version before redeploying."
+        )
+    return version
 
 
 def install_offline(files):
@@ -344,9 +387,10 @@ def install(payload):
     fingerprint = verify_transfers(payload)
     host_checks()
     snapshot = payload["fleetmanager"]
+    version = None
     with suppress_package_start():
         if snapshot["mode"] == "online":
-            configure_online_repository(snapshot)
+            version = configure_online_repository(snapshot)
         else:
             install_offline(payload["fleet_files"])
         configure_fleet(snapshot)
@@ -354,9 +398,7 @@ def install(payload):
     run(["systemctl", "enable", "corelight-fleetd"], "Could not enable Fleet Manager at startup")
     run(["systemctl", "restart", "corelight-fleetd"], "Could not start Fleet Manager; check the product identity license")
     verify_health(fingerprint)
-    version = run(["dpkg-query", "-W", "-f=${Version}", "corelight-fleet"], "Could not determine the installed Fleet Manager version", timeout=30).strip()
-    if not version:
-        raise FleetInstallError("Fleet Manager did not report its installed package version.")
+    version = version or installed_package_version()
     return {"username": "admin", "password": create_admin(), "password_change_required": True, "version": version}
 
 

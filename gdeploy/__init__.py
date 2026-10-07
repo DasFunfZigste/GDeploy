@@ -1,3 +1,3 @@
 """GDeploy: unattended OS and application VMs on standalone ESXi."""
 
-__version__ = "0.9.2"
+__version__ = "0.10.0"

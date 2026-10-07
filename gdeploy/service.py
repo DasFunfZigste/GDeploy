@@ -141,8 +141,11 @@ class DeploymentService:
             fleet = self.fleetmanager.selected() if fleetmanager is None else fleetmanager
             try:
                 self.fleetmanager.validate_snapshot(fleet or {})
+                version = fleet.get("online_version", "")
                 message = (
                     "Online repository token, community string and license are configured. "
+                    f"Requested corelight-fleet version: {version or 'latest available'}. "
+                    "Version availability will be checked from the VM during installation. "
                     "The VM must reach Ubuntu and Corelight repositories during installation."
                     if fleet["mode"] == "online" else
                     "Offline FleetManager package, community string and license are configured. "

@@ -19,6 +19,8 @@ from cryptography.hazmat.primitives import serialization
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
+from .models import FLEETMANAGER_VERSION_PATTERN
+
 MAX_UPLOAD_BYTES = 4 * 1024**3
 MAX_LICENSE_BYTES = 64 * 1024
 MAX_DEPENDENCIES = 128
@@ -228,6 +230,15 @@ class FleetManager:
             raise FleetManagerError("The repository token must contain at most 4096 ASCII characters without whitespace, controls or colons.")
         if snapshot["mode"] == "online" and not token:
             raise FleetManagerError("Online Fleet Manager installation requires a Corelight repository token.")
+        version = snapshot.get("online_version", "")
+        if snapshot["mode"] == "online" and (
+            not isinstance(version, str) or len(version) > 128
+            or (version and not re.fullmatch(FLEETMANAGER_VERSION_PATTERN, version))
+        ):
+            raise FleetManagerError(
+                "Enter an exact Debian package version of at most 128 characters without spaces or wildcards, "
+                "or leave it blank for latest."
+            )
         license_info = validate_license(snapshot.get("license_pem"), snapshot.get("license_name"))
         if snapshot.get("license_sha256") and snapshot["license_sha256"] != license_info["sha256"]:
             raise FleetManagerError("The saved Fleet Manager license checksum is inconsistent. Save the license again.")
@@ -257,6 +268,8 @@ class FleetManager:
         self._settings_valid(snapshot)
         if snapshot["mode"] == "online":
             snapshot = {**snapshot, "package": None, "dependencies": []}
+        elif snapshot.get("online_version"):
+            snapshot = {**snapshot, "online_version": ""}
         for item in self.db.fleetmanager_packages(snapshot):
             path = self._path(item)
             checked = self._inspect_package(path, _checksum(item.get("sha256")))
@@ -293,6 +306,7 @@ class FleetManager:
             })
         return {
             "mode": saved["mode"] if saved else "online", "ready": bool(saved and not errors),
+            "online_version": saved.get("online_version", "") if saved and saved["mode"] == "online" else "",
             "community_string_configured": bool(saved and saved.get("community_string")),
             "repository_token_configured": bool(saved and saved.get("repository_token")),
             "license": license_info, "package_id": (saved.get("package") or {}).get("id") if saved else None,
@@ -309,6 +323,7 @@ class FleetManager:
             **{key: value.get(key) or previous.get(key, "") for key in ("community_string", "repository_token", "license_pem")},
             "license_name": previous.get("license_name", "corelight-fleetd.pem"),
         }
+        snapshot["online_version"] = value.get("online_version", previous.get("online_version", "")) if snapshot["mode"] == "online" else ""
         if value.get("license_pem"):
             snapshot["license_name"] = value.get("license_name") or "corelight-fleetd.pem"
         candidates = {item["id"]: item for item in self._files()} if snapshot["mode"] == "offline" else {}

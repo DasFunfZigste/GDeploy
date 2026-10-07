@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .ssh_keys import MAX_SSH_KEY_BYTES, MAX_SSH_KEYS
 
+FLEETMANAGER_VERSION_PATTERN = r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~\-]*"
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -102,10 +104,19 @@ class FleetManagerSettings(StrictModel):
     mode: Literal["online", "offline"]
     community_string: str = Field(default="", max_length=4096)
     repository_token: str = Field(default="", max_length=4096)
+    online_version: str = Field(default="", max_length=128)
     license_pem: str = Field(default="", max_length=65536)
     license_name: str = Field(default="", max_length=200)
     package_id: str | None = Field(default=None, max_length=1024)
     dependency_ids: list[Annotated[str, Field(min_length=1, max_length=1024)]] = Field(default_factory=list, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_online_version(self):
+        if self.mode == "offline":
+            self.online_version = ""
+        elif self.online_version and not re.fullmatch(FLEETMANAGER_VERSION_PATTERN, self.online_version):
+            raise ValueError("Enter an exact Debian package version without spaces or wildcards, or leave it blank for latest.")
+        return self
 
 
 class VMSpec(StrictModel):

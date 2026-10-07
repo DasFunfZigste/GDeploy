@@ -89,3 +89,42 @@ def test_ui_cache_policy_does_not_change_api_health_or_authentication(client):
     settings = client.get("/api/settings")
     assert settings.status_code == 401
     assert settings.headers["Cache-Control"] == "no-store"
+
+
+def test_fleetmanager_version_field_accepts_exact_debian_versions(client):
+    script = client.get("/static/app.js").text
+    declaration = re.search(r"const onlineVersion = el\('input', \{(.+?)\}\);", script).group(1)
+    assert "id: 'fleetmanager-online-version'" in declaration
+    assert "maxlength: 128" in declaration
+    assert "required:" not in declaration
+    pattern = re.search(r"pattern: '([^']+)'", declaration).group(1).replace("\\\\", "\\")
+    for version in ("29.2.2", "29.2.2-1", "1:29.2.2-1", "29.2.2~rc1+build.1"):
+        assert re.fullmatch(pattern, version), version
+    for version in ("latest", "v29.2.2", "29.*", "29.2.2:1", "29.2.2 --option", "$(command)"):
+        assert not re.fullmatch(pattern, version), version
+    assert "'Version to install · optional', onlineVersion, onlineVersionHelp" in script
+    assert "Version availability is checked on the VM during installation." in script
+
+
+def test_fleetmanager_ui_saves_restores_and_clears_online_version_for_offline(client):
+    script = client.get("/static/app.js").text
+    panel = script.split("function createFleetManagerPanel(", 1)[1].split("function createSSHAccessPanel(", 1)[0]
+    assert "onlineVersion.value = next.online_version || ''" in panel
+    assert "onlineVersion.disabled = locked || mode !== 'online'" in panel
+    assert "online_version: mode === 'online' ? onlineVersion.value.trim() : ''" in panel
+    assert "[community, token, onlineVersion, license]" in panel
+    assert "options.onDirty?.()" in panel
+    assert "renderCatalog(next, !catalog)" in panel  # Refresh preserves an edited draft.
+    assert "onDirty: () => { wizard.fleetValidated = false; invalidatePreflight(); }" in script
+
+
+def test_fleetmanager_version_is_shown_in_setup_and_preflight_review(client):
+    script = client.get("/static/app.js").text
+    assert "id: 'fleetmanager-saved-version'}, fleetManagerVersionSummary(next)" in script
+    assert "wizard.fleetCatalog = catalog" in script
+    review = script.split("function renderReview(content)", 1)[1].split("const validHostname", 1)[0]
+    assert "fleetManagerVersionSummary(fleet)" in review
+    assert review.index("id: 'fleetmanager-review'") < review.index("'Preflight checks'")
+    assert "Version: ${catalog.online_version} (exact)." in script
+    assert "Version: latest available in the repository." in script
+    assert "Version: ${selected.version} from the selected .deb package." in script

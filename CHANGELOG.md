@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-07
+
+### Added
+
+- Choose an exact FleetManager Debian package version in **FleetManager configuration → Online repository → Version to install**, before running preflight. The same field is available in Setup defaults. Leave it blank to install the repository's latest candidate; offline mode continues to use the selected `.deb` package version.
+- Show the saved version choice during review and preflight, and retain it in each queued deployment. Changing defaults later does not change existing jobs or VMs.
+- Install the requested version without falling back to a newer release. The guest checks repository availability and verifies the installed version, with actionable errors when the requested package is unavailable or does not match. Preflight validates configuration; repository availability and dependencies are checked inside the VM during installation.
+
+### Installation and compatibility
+
+- From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the existing volume, encryption key, environment files, credentials, licenses and media. No database migration or license re-upload is required.
+- Existing online settings and queued jobs without a version keep their previous latest-candidate behavior. Clearing the version field explicitly returns to that behavior. Offline installs ignore the online version field.
+- This choice controls the initial installation. It does not put the package on hold or upgrade existing FleetManager VMs. Finish jobs requesting a specific version before rolling back to an older GDeploy release, which ignores this choice. Live Corelight repository, licensed-package and ESXi acceptance remain lab validation tasks.
+
 ## [0.9.2] - 2026-10-07
 
 ### Changed

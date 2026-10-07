@@ -8,10 +8,11 @@ from dataclasses import replace
 import pytest
 
 from gdeploy.db import Database
-from gdeploy.fleetmanager import FleetManagerError
+from gdeploy.fleetmanager import FleetManager, FleetManagerError
 from gdeploy.guest import _autoinstall_data
 from gdeploy.models import DeploymentSpec, VMSpec
 from gdeploy.service import DeploymentError, DeploymentService, safe_error
+from test_fleetmanager import license_pem
 
 
 @pytest.fixture
@@ -58,6 +59,9 @@ def fleet_job(config, spec, monkeypatch):
 
         def delete_iso(self, *args):
             calls.append("delete-iso")
+
+        def find_owned_vms(self, *args):
+            return []
 
     class Guest:
         def __init__(self, *args):
@@ -146,6 +150,60 @@ def test_queued_fleet_secrets_and_mode_survive_setup_changes(fleet_job, mode):
     assert private["password_change_required"] is True
     assert private["community_string"] == original["community_string"]
     assert "fleet-generated-temporary-password" not in json.dumps(db.get(job["id"]))
+
+
+@pytest.mark.parametrize("version", ["", "1:29.2.2-1~ubuntu24.04"])
+def test_online_version_is_frozen_for_queue_and_worker(fleet_job, version):
+    service, db, spec, saved, calls = fleet_job
+    saved["online_version"] = version
+    original = copy.deepcopy(saved)
+    job = service.enqueue(spec)
+    saved["online_version"] = "30.1.0-1"
+    snapshot = db.get(job["id"], private=True)["secrets"]["fleetmanager"]
+    assert snapshot["online_version"] == version
+    db.claim()
+    service.run(job["id"])
+    assert db.get(job["id"])["status"] == "completed"
+    assert ("install", original) in calls
+
+
+def test_replacement_uses_current_online_version_without_changing_original_snapshot(fleet_job):
+    service, db, spec, saved, _ = fleet_job
+    saved["online_version"] = "29.2.2-1"
+    original = service.enqueue(spec)
+    saved["online_version"] = "30.1.0-1"
+    db.update(original["id"], status="failed")
+    replacement = service.redeploy(original["id"], original["name"])
+    assert db.get(replacement["id"], private=True)["secrets"]["fleetmanager"]["online_version"] == "30.1.0-1"
+    assert db.get(original["id"], private=True)["secrets"]["fleetmanager"]["online_version"] == "29.2.2-1"
+
+
+@pytest.mark.parametrize("version", [None, "", "1:29.2.2-1~ubuntu24.04"])
+def test_online_preflight_describes_version_without_claiming_repository_availability(fleet_job, monkeypatch, version):
+    service, db, spec, saved, calls = fleet_job
+    saved["license_pem"] = license_pem()
+    saved["license_sha256"] = hashlib.sha256(saved["license_pem"].encode()).hexdigest()
+    if version is not None:
+        saved["online_version"] = version
+    monkeypatch.setattr(service.fleetmanager, "validate_snapshot", FleetManager.validate_snapshot.__get__(service.fleetmanager))
+    result = service.preflight(spec)
+    check = next(check for check in result["checks"] if check["name"] == "FleetManager configuration")
+    assert result["ok"] and check["ok"]
+    assert f"Requested corelight-fleet version: {version or 'latest available'}." in check["message"]
+    assert "Version availability will be checked from the VM during installation." in check["message"]
+    assert calls == [] and db.list() == []
+
+
+def test_invalid_saved_version_stops_preflight_and_queue_before_vm_changes(fleet_job, monkeypatch):
+    service, db, spec, saved, calls = fleet_job
+    saved["online_version"] = "29.*"
+    monkeypatch.setattr(service.fleetmanager, "validate_snapshot", FleetManager.validate_snapshot.__get__(service.fleetmanager))
+    result = service.preflight(spec)
+    check = next(check for check in result["checks"] if check["name"] == "FleetManager configuration")
+    assert not check["ok"] and "exact Debian package version" in check["message"]
+    with pytest.raises(DeploymentError, match="exact Debian package version"):
+        service.enqueue(spec)
+    assert calls == [] and db.list() == []
 
 
 @pytest.mark.parametrize("when", ["before_vm", "after_os"])

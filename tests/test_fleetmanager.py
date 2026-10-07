@@ -86,9 +86,10 @@ def offline(manager):
 
 
 def test_online_settings_are_encrypted_redacted_and_persisted(manager, config):
-    payload = settings()
+    payload = settings(online_version="1:29.2.2-1~ubuntu24.04")
     catalog = manager.save(payload)
     assert catalog["ready"] and catalog["mode"] == "online"
+    assert catalog["online_version"] == payload["online_version"]
     assert catalog["community_string_configured"] and catalog["repository_token_configured"]
     assert catalog["license"]["sha256"] == hashlib.sha256(payload["license_pem"].encode()).hexdigest()
     for secret in [payload["community_string"], payload["repository_token"], payload["license_pem"]]:
@@ -98,11 +99,55 @@ def test_online_settings_are_encrypted_redacted_and_persisted(manager, config):
     reopened = FleetManager(Database(config.data_dir, config.secret_key), config)
     assert reopened.validate_snapshot(reopened.selected()) == manager.selected()
     assert reopened.catalog()["license"] == catalog["license"]
+    assert reopened.catalog()["online_version"] == payload["online_version"]
     manager.save({"mode": "online", "community_string": "", "repository_token": "", "license_pem": ""})
     assert manager.selected()["license_pem"] == payload["license_pem"]
     assert manager.selected()["community_string"] == payload["community_string"]
+    assert manager.selected()["online_version"] == payload["online_version"]
     assert not manager.clear()["ready"]
     assert manager.selected() is None
+
+
+def test_version_defaults_to_latest_and_explicit_blank_clears_selection(manager):
+    assert manager.catalog()["online_version"] == ""
+    assert manager.save(settings())["online_version"] == ""
+    manager.save({"mode": "online", "online_version": "29.2.2-1"})
+    assert manager.save({"mode": "online"})["online_version"] == "29.2.2-1"
+    assert manager.save({"mode": "online", "online_version": ""})["online_version"] == ""
+    assert manager.selected()["online_version"] == ""
+
+
+@pytest.mark.parametrize("version", ["latest", " 29.2.2", "29.2.2 ", "29.*", "29.2\n", "--option", "29;id", "29/branch", "29=2", "29:2:1", "2" * 129, None, 29])
+def test_invalid_online_version_rejected_before_settings_are_changed(manager, version):
+    original = manager.save(settings(online_version="29.2.2-1"))
+    with pytest.raises(FleetManagerError, match="exact Debian package version"):
+        manager.save({"mode": "online", "online_version": version})
+    assert manager.catalog() == original
+    with pytest.raises(FleetManagerError, match="exact Debian package version"):
+        manager.validate_snapshot({**manager.selected(), "online_version": version})
+
+
+@pytest.mark.parametrize("version", ["29", "29.2.2-1", "1:29.2.2-1~ubuntu24.04+build3", "2" * 128])
+def test_exact_online_package_versions_supported(manager, version):
+    assert manager.save(settings(online_version=version))["online_version"] == version
+    assert manager.validate_snapshot(manager.selected())["online_version"] == version
+
+
+def test_old_online_settings_without_version_remain_ready(manager):
+    manager.save(settings())
+    original = manager.selected()
+    original.pop("online_version")
+    manager.db.set_fleetmanager_settings(original)
+    assert manager.catalog()["ready"] and manager.catalog()["online_version"] == ""
+    assert manager.validate_snapshot(original) == original
+
+
+def test_offline_ignores_and_clears_prior_online_version(manager):
+    manager.save(settings(online_version="29.2.2-1"))
+    saved = offline(manager)
+    assert saved["online_version"] == "" and manager.catalog()["online_version"] == ""
+    assert manager.validate_snapshot({**saved, "online_version": "stale-invalid-version"}) == saved
+    assert manager.save({"mode": "online", "repository_token": "repo-token"})["online_version"] == ""
 
 
 def test_upload_registers_without_selecting_and_optional_hash_is_computed(manager):

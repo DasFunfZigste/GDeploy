@@ -56,6 +56,34 @@ def add_file(payload, tmp_path, filename="fleetmanager.deb", contents=b"verified
     return path
 
 
+@pytest.fixture
+def online_repository(payload, tmp_path, monkeypatch):
+    payload["fleetmanager"]["mode"] = "online"
+    root = tmp_path / "root"
+    monkeypatch.setattr(fleet, "ROOT", root)
+    state = {"commands": [], "available": ["29.2.2-1"], "installed": "29.2.2-1", "root": root}
+
+    def runner(command, label, **kwargs):
+        state["commands"].append(command)
+        if command[0] == "gpg":
+            return b"dearmored-key"
+        if command[0] == "apt-cache":
+            return "\n".join(f" corelight-fleet | {version} | {fleet.REPOSITORY}any/ any/main amd64 Packages" for version in state["available"])
+        if command[0] == "dpkg-query":
+            return state["installed"]
+        if command[-1].startswith("corelight-fleet") and state.get("install_error"):
+            raise fleet.FleetInstallError("Requested Fleet Manager package could not be installed.")
+        return ""
+
+    class Opener:
+        def open(self, request, timeout):
+            return io.BytesIO(b"vendor-signing-key")
+
+    monkeypatch.setattr(fleet, "run", runner)
+    monkeypatch.setattr(fleet.urllib.request, "build_opener", lambda *args: Opener())
+    return state
+
+
 @pytest.mark.parametrize("changed", ["fleetmanager.deb", "dependency-1.deb"])
 def test_modified_transfer_stops_before_package_manager(payload, tmp_path, monkeypatch, changed):
     add_file(payload, tmp_path)
@@ -103,7 +131,9 @@ def test_generated_script_runs_same_integrity_guard(payload, tmp_path):
         namespace["verify_transfers"](payload)
 
 
-def test_offline_pipeline_uses_only_local_packages_and_preserves_configuration(payload, tmp_path, monkeypatch):
+@pytest.mark.parametrize("online_version", [None, "29.2.2-1", "invalid-unused-online-version"])
+def test_offline_pipeline_uses_only_local_packages_and_preserves_configuration(payload, tmp_path, monkeypatch, online_version):
+    payload["fleetmanager"]["online_version"] = online_version
     add_file(payload, tmp_path)
     add_file(payload, tmp_path, "dependency-1.deb", b"dependency bytes")
     root = tmp_path / "root"
@@ -217,6 +247,104 @@ def test_online_repo_keeps_token_out_of_url_argv_and_public_files(payload, tmp_p
         fleet.NoKeyRedirect().redirect_request(requests[0], None, 302, "", {}, "https://elsewhere.invalid/key")
 
 
+@pytest.mark.parametrize("version", ["29.2.2-1", "1:29.2.2-1", "29.2.2~rc1+build.4-2"])
+def test_online_repository_installs_and_verifies_exact_debian_version(payload, online_repository, version):
+    payload["fleetmanager"]["online_version"] = version
+    online_repository["available"] = ["30.0.0-1", version]
+    online_repository["installed"] = version + "\n"
+    assert fleet.configure_online_repository(payload["fleetmanager"]) == version
+    commands = online_repository["commands"]
+    assert commands[-3:] == [
+        ["apt-cache", "madison", "corelight-fleet"],
+        fleet.APT_INSTALL + ["--", "corelight-fleet=" + version],
+        ["dpkg-query", "-W", "-f=${Version}", "corelight-fleet"],
+    ]
+    assert commands[-4] == ["apt-get", "-q", "update"]
+    assert not any(command[0] == "apt-mark" for command in commands)
+    assert not (online_repository["root"] / "etc/apt/preferences.d").exists()
+
+
+@pytest.mark.parametrize("snapshot_selection", [{}, {"online_version": None}, {"online_version": ""}])
+def test_online_legacy_and_latest_install_the_repository_candidate(payload, online_repository, snapshot_selection):
+    payload["fleetmanager"].update(snapshot_selection)
+    assert fleet.configure_online_repository(payload["fleetmanager"]) is None
+    commands = online_repository["commands"]
+    assert commands[-1] == fleet.APT_INSTALL + ["--", "corelight-fleet"]
+    assert not any(command[0] in {"apt-cache", "dpkg-query", "apt-mark"} for command in commands)
+
+
+@pytest.mark.parametrize("available", [[], ["29.2.2"], ["29.2.2-10"], ["1:29.2.2-1"], ["30.0.0-1"]])
+def test_unavailable_exact_version_does_not_install_or_fall_back(payload, online_repository, available):
+    payload["fleetmanager"]["online_version"] = "29.2.2-1"
+    online_repository["available"] = available
+    with pytest.raises(fleet.FleetInstallError, match="29.2.2-1 is not available.*Choose an available exact"):
+        fleet.configure_online_repository(payload["fleetmanager"])
+    assert not any(command[0] == "apt-get" and command[-1].startswith("corelight-fleet") for command in online_repository["commands"])
+
+
+def test_failed_exact_install_does_not_retry_with_latest(payload, online_repository):
+    payload["fleetmanager"]["online_version"] = "29.2.2-1"
+    online_repository["install_error"] = True
+    with pytest.raises(fleet.FleetInstallError, match="could not be installed"):
+        fleet.configure_online_repository(payload["fleetmanager"])
+    commands = online_repository["commands"]
+    assert commands[-1] == fleet.APT_INSTALL + ["--", "corelight-fleet=29.2.2-1"]
+    assert not any(command == fleet.APT_INSTALL + ["--", "corelight-fleet"] for command in commands)
+
+
+@pytest.mark.parametrize("installed", ["29.2.2", "29.2.2-2", "30.0.0-1", ""])
+def test_version_mismatch_stops_before_configuration_health_and_admin(payload, online_repository, monkeypatch, installed):
+    payload["fleetmanager"]["online_version"] = "29.2.2-1"
+    online_repository["installed"] = installed
+    monkeypatch.setattr(fleet, "host_checks", lambda: None)
+    configure = Mock(side_effect=AssertionError("Version must match before configuration"))
+    health = Mock(side_effect=AssertionError("Version must match before health checks"))
+    admin = Mock(side_effect=AssertionError("Version must match before creating accounts"))
+    monkeypatch.setattr(fleet, "configure_fleet", configure)
+    monkeypatch.setattr(fleet, "verify_health", health)
+    monkeypatch.setattr(fleet, "create_admin", admin)
+    with pytest.raises(fleet.FleetInstallError, match="does not match requested version|did not report its installed"):
+        fleet.install(payload)
+    configure.assert_not_called()
+    health.assert_not_called()
+    admin.assert_not_called()
+    assert not any(command[0] == "systemctl" for command in online_repository["commands"])
+    assert not (online_repository["root"] / "usr/sbin/policy-rc.d").exists()
+
+
+@pytest.mark.parametrize("version", ["29.2.2-1", "1:29.2.2-1"])
+def test_exact_online_pipeline_reports_verified_version(payload, online_repository, monkeypatch, version):
+    payload["fleetmanager"]["online_version"] = version
+    online_repository["available"] = [version]
+    online_repository["installed"] = version
+    monkeypatch.setattr(fleet, "host_checks", lambda: None)
+    monkeypatch.setattr(fleet, "verify_health", lambda fingerprint: None)
+    monkeypatch.setattr(fleet, "create_admin", lambda: "private-initial-password")
+
+    def configure(snapshot):
+        assert online_repository["commands"][-1][0] == "dpkg-query"
+        assert (online_repository["root"] / "usr/sbin/policy-rc.d").exists()
+
+    monkeypatch.setattr(fleet, "configure_fleet", configure)
+    result = fleet.install(payload)
+    assert result == {"username": "admin", "password": "private-initial-password", "password_change_required": True, "version": version}
+    assert sum(command[0] == "dpkg-query" for command in online_repository["commands"]) == 1
+
+
+@pytest.mark.parametrize("version", [
+    "29.2.2;touch /tmp/unsafe", "$(id)", "29.2.2\n", "29.2.2 --allow-unauthenticated", "29.2.*", "latest",
+    "29.2.2/unstable", "-1", "1::29.2.2", "1:rc1", "1" * 129, 29, True, [], {},
+])
+@pytest.mark.parametrize("entrypoint", ["install", "configure_online_repository"])
+def test_invalid_online_version_is_rejected_before_commands(payload, monkeypatch, version, entrypoint):
+    payload["fleetmanager"].update({"mode": "online", "online_version": version})
+    runner = Mock(side_effect=AssertionError("No package-manager command may run for an invalid version"))
+    monkeypatch.setattr(fleet.subprocess, "run", runner)
+    with pytest.raises(fleet.FleetInstallError, match="exact Fleet Manager Debian package version"):
+        getattr(fleet, entrypoint)(payload if entrypoint == "install" else payload["fleetmanager"])
+    runner.assert_not_called()
+
+
 def test_online_key_failure_never_reports_token(payload, monkeypatch, capsys):
     token = payload["fleetmanager"]["repository_token"]
     register = fleet.register_secrets(payload["fleetmanager"])
@@ -300,6 +428,7 @@ def test_session_transfers_snapshot_files_and_returns_private_initial_password(p
     def scripted(script, data, *, extra_files):
         assert extra_files == {"fleetmanager.deb": Path(snapshot["package"]["path"]), "dependency-1.deb": Path(snapshot["dependencies"][0]["path"])}
         assert data["fleet_files"] == [{"filename": "fleetmanager.deb", "sha256": "a" * 64}, {"filename": "dependency-1.deb", "sha256": "b" * 64}]
+        assert data["fleetmanager"]["online_version"] == ""
         assert snapshot["community_string"] in session._secrets
         assert snapshot["repository_token"] in session._secrets
         assert snapshot["license_pem"] in session._secrets
@@ -311,6 +440,38 @@ def test_session_transfers_snapshot_files_and_returns_private_initial_password(p
     assert result["services"] == [{"name": "Fleet Manager", "url": "https://192.0.2.20", "username": "admin", "password": "fleet-temporary-secret", "password_change_required": True, "version": "29.2.2", "community_string": snapshot["community_string"]}]
     assert "fleet-temporary-secret" in session._secrets
     assert "fleet-temporary-secret" not in "\n".join(logs)
+
+
+@pytest.mark.parametrize("selection", [{}, {"online_version": None}, {"online_version": ""}, {"online_version": "1:29.2.2-1"}])
+def test_session_forwards_selected_version_to_actual_generated_installer(payload, monkeypatch, selection):
+    snapshot = {**payload["fleetmanager"], "mode": "online", **selection}
+    session = guest.GuestSession("192.0.2.20", "gdeploy", "ssh-private-key", "guest-password")
+    expected = selection.get("online_version") or ""
+
+    def scripted(script, data, *, extra_files):
+        assert data["fleetmanager"]["online_version"] == expected
+        assert extra_files == {} and data["fleet_files"] == []
+        source = re.search(r"python3 - <<'GDEPLOY_FLEET_PY'\n(.*)\nGDEPLOY_FLEET_PY", script, re.S)[1]
+        namespace = {"__name__": "fleet_version_test"}
+        exec(compile(source, "fleet-guest-script", "exec"), namespace)
+        namespace["verify_transfers"](data)
+        assert namespace["requested_online_version"](data["fleetmanager"]) == expected
+        return {"username": "admin", "password": "initial-private-password", "password_change_required": True, "version": expected or "30.0.0-1"}
+
+    monkeypatch.setattr(session, "_run_script", scripted)
+    result = session.install("fleetmanager", {}, fleetmanager=snapshot)
+    assert result["services"][0]["version"] == (expected or "30.0.0-1")
+
+
+@pytest.mark.parametrize("version", ["29.2.2\n", "$(id)", 29, False, []])
+def test_session_rejects_invalid_online_selection_before_ssh(payload, monkeypatch, version):
+    snapshot = {**payload["fleetmanager"], "mode": "online", "online_version": version}
+    session = guest.GuestSession("192.0.2.20", "gdeploy", "ssh-private-key", "guest-password")
+    scripted = Mock(side_effect=AssertionError("Do not transfer invalid version selections"))
+    monkeypatch.setattr(session, "_run_script", scripted)
+    with pytest.raises(guest.GuestError, match="exact Fleet Manager Debian package version"):
+        session.install("fleetmanager", {}, fleetmanager=snapshot)
+    scripted.assert_not_called()
 
 
 @pytest.mark.parametrize("filename", ["../outside", "/outside", "payload.json", "install.sh", "splunk.tgz", ".hidden", "line\nbreak.deb"])

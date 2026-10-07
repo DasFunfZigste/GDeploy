@@ -1033,7 +1033,7 @@ class GuestSession:
             log("Ubuntu installation verified; no application selected.")
             return {"services": []}
         if role == "fleetmanager":
-            from .fleet_guest import installer_script, secret_values
+            from .fleet_guest import FleetInstallError, installer_script, requested_online_version, secret_values
 
             if not isinstance(fleetmanager, dict) or fleetmanager.get("mode") not in {"online", "offline"}:
                 raise GuestError("Configure Fleet Manager installation settings in Setup before deploying.")
@@ -1050,6 +1050,12 @@ class GuestSession:
             payload["fleetmanager"] = {key: fleetmanager.get(key) for key in (
                 "mode", "community_string", "repository_token", "license_pem", "license_name", "license_sha256",
             )}
+            payload["fleetmanager"]["online_version"] = fleetmanager.get("online_version", "")
+            if fleetmanager["mode"] == "online":
+                try:
+                    payload["fleetmanager"]["online_version"] = requested_online_version(fleetmanager)
+                except FleetInstallError as error:
+                    raise GuestError(str(error)) from None
             files = {}
             payload["fleet_files"] = []
             if fleetmanager["mode"] == "offline":

@@ -55,11 +55,12 @@ def test_fleetmanager_routes_require_initial_account_setup(signed_in, method, pa
 
 def test_online_saved_settings_redacted_restart_and_blank_secret_retention(signed_in, config):
     assert not signed_in.get("/api/settings").json()["fleetmanager_configured"]
-    original = payload()
+    original = {**payload(), "online_version": "1:29.2.2-1~ubuntu24.04"}
     response = signed_in.put(ENDPOINT, json=original)
     assert response.status_code == 200 and response.json()["ready"]
     data = response.json()
     assert data["license"]["name"] == "customer-fleet.pem"
+    assert data["online_version"] == original["online_version"]
     for field in ["community_string", "repository_token", "license_pem"]:
         assert original[field] not in response.text
     assert signed_in.get("/api/settings").json()["fleetmanager_configured"]
@@ -72,6 +73,36 @@ def test_online_saved_settings_redacted_restart_and_blank_secret_retention(signe
         assert restarted.delete(ENDPOINT).status_code == 200
         assert not restarted.get(ENDPOINT).json()["ready"]
         assert not restarted.get("/api/settings").json()["fleetmanager_configured"]
+
+
+def test_online_version_can_be_selected_retained_and_cleared_before_preflight(signed_in):
+    assert signed_in.get(ENDPOINT).json()["online_version"] == ""
+    response = signed_in.put(ENDPOINT, json={**payload(), "online_version": "29.2.2-1"})
+    assert response.status_code == 200 and response.json()["online_version"] == "29.2.2-1"
+    assert signed_in.put(ENDPOINT, json={"mode": "online"}).json()["online_version"] == "29.2.2-1"
+    response = signed_in.put(ENDPOINT, json={"mode": "online", "online_version": ""})
+    assert response.status_code == 200 and response.json()["ready"]
+    assert response.json()["online_version"] == ""
+    assert signed_in.app.state.db.fleetmanager_settings()["online_version"] == ""
+
+
+@pytest.mark.parametrize("version", ["latest", " 29.2.2", "29.2.2 ", "29.*", "29.2\n", "--option", "29;id", "29:2:1", "2" * 129, None, 29])
+def test_invalid_online_version_returns_validation_error_without_changing_settings(signed_in, version):
+    before = signed_in.put(ENDPOINT, json={**payload(), "online_version": "29.2.2-1"}).json()
+    response = signed_in.put(ENDPOINT, json={"mode": "online", "online_version": version})
+    assert response.status_code == 422
+    assert signed_in.get(ENDPOINT).json() == before
+
+
+def test_offline_settings_clear_online_version_and_use_package_metadata(signed_in):
+    signed_in.put(ENDPOINT, json={**payload(), "online_version": "29.2.2-1"})
+    package = upload(signed_in).json()["uploaded_package_id"]
+    response = signed_in.put(ENDPOINT, json={"mode": "offline", "package_id": package, "online_version": "stale-selection"})
+    assert response.status_code == 200 and response.json()["ready"]
+    assert response.json()["online_version"] == ""
+    assert response.json()["packages"][0]["version"] == "29.2.2-1"
+    assert signed_in.app.state.db.fleetmanager_settings()["online_version"] == ""
+    assert signed_in.put(ENDPOINT, json={"mode": "online"}).json()["online_version"] == ""
 
 
 def test_offline_upload_selection_and_protected_management(signed_in):
