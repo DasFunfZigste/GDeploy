@@ -4,41 +4,38 @@ A dark, Docker-hosted control panel that creates VMs on **standalone VMware ESXi
 
 **Supported installer:** Ubuntu Server **24.04 LTS amd64 live-server** installation media. The generic OS ISO labels do not add support for other installers. GDeploy supports one administrator, one ESXi host and one VM per selected role per deployment. This is implementation-ready lab software; real ESXi deployment must be validated with your host, license, installation media and network before relying on it for production.
 
-## Quick start from source
+## Run on Ubuntu 24.04
 
-With Git, Docker Engine and **Docker Compose 2.24 or later** installed, run:
+Install Git and Docker on your Ubuntu Server 24.04 host. If Git and Docker with Compose already work, skip this block:
 
 ```sh
+sudo apt update
+sudo apt install -y git docker.io docker-compose-v2 docker-buildx
+sudo systemctl enable --now docker
+```
+
+Clone the public repository, build the image and start GDeploy:
+
+```sh
+cd ~
 git clone https://github.com/DasFunfZigste/GDeploy.git
 cd GDeploy
-docker compose up --build -d --wait
+sudo docker compose up -d --build --wait
 ```
 
-The private repository requires your existing GitHub access. Building from source does not require a GHCR login. Open **`http://SERVER_LAN_IP:8000`** from another computer, or **http://localhost:8000** on the Docker host, and sign in with **username `admin` and password `admin`** on a fresh installation. The first sign-in requires a new username and password before you can use the app. After saving them, sign in again with your new credentials. The default settings enable LAN access immediately; replace `SERVER_LAN_IP` with the Docker host's actual address.
+Open **`http://YOUR_SERVER_IP:8000`** using the Ubuntu server's LAN address. On a fresh installation, sign in with **`admin` / `admin`**, change the credentials when prompted, then sign in again and open **Setup**. Configure the ESXi connection and OS installation media before creating a deployment.
 
-On a fresh data volume, GDeploy creates the initial `admin`/`admin` account and a unique random encryption key automatically. Choose a username of 3–100 letters, digits, periods, underscores or hyphens, starting with a letter or digit; it cannot be `admin` in any capitalization. Choose a password of 12–1024 characters and enter it again to confirm. Completing setup signs out all sessions, and `admin`/`admin` no longer works. Open **Setup**, use the **ESXi connection** tab to configure your host, then select the **OS installation media** tab to choose an OS ISO. No initial `.env` file or separate configuration command is required.
+This builds from the current default branch. No GitHub credential linking, Docker registry login or initial `.env` file is required. LAN access is enabled by default on `0.0.0.0:8000`.
 
-### Default network access and optional restrictions
-
-Source and release Compose publish **`0.0.0.0:8000`** by default, so a fresh installation is available on every host IPv4 interface without creating `.env`. Browse to **`http://SERVER_LAN_IP:8000`** using the Docker host's LAN address.
-
-Existing explicit `GDEPLOY_BIND_IP` values in `.env` are still respected. To restrict access, edit that value to a specific LAN IPv4 address or `127.0.0.1` for local access/an SSH tunnel. `GDEPLOY_PORT` optionally changes port 8000. **Preserve other settings and encryption keys**, and keep one value per setting. Apply a changed binding without rebuilding the image:
+To update for testing, use the **same clone**:
 
 ```sh
-docker compose up -d --force-recreate --wait
-docker compose port gdeploy 8000
-```
-
-Keep `GDEPLOY_COOKIE_SECURE=false` for direct HTTP, or use `true` with an HTTPS reverse proxy. Docker-published ports can bypass UFW rules. The [installation guide](docs/INSTALL.md) includes the optional SSH tunnel and proxy setup.
-
-**Already cloned, but startup failed with `GDEPLOY_SECRET_KEY is required`?** Run these commands from your existing GDeploy checkout:
-
-```sh
+cd ~/GDeploy
 git pull --ff-only
-docker compose up --build -d --wait --force-recreate
+sudo docker compose up -d --build --wait
 ```
 
-Keep your existing `.env` and data volume. A fresh installation starts with `admin`/`admin` and the required account setup. Existing random or custom credentials remain valid when upgrading; they are not reset to the default. If an existing database has lost its original key, restore that key from backup; GDeploy refuses to replace it with a new one. The installation guide includes initial-password lookup for older installations.
+The rebuild preserves the existing data volume, account, settings and history. Keep your `.env` and `media/` directory, then refresh the browser. See the [short installation guide](docs/INSTALL.md) or the [operations reference](docs/OPERATIONS.md) for logs, network settings, backups and recovery.
 
 ## Included
 
@@ -61,11 +58,11 @@ Saved deployment profiles are outside this initial scope.
 
 ![GDeploy deployment dashboard](docs/overview.png)
 
-## Install a published release
+## Releases
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The [installation guide](docs/INSTALL.md) covers installing Docker on a fresh Ubuntu server, downloading the release, starting it with an existing Docker/Compose setup, and using plain `docker run`. The published image is `ghcr.io/dasfunfzigste/gdeploy:0.9.1` for `linux/amd64`. Repository and image access are private; the guide includes both registry authentication and an image-archive alternative.
+The current iteration is **v0.9.2**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.9.2` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -74,7 +71,7 @@ See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/REL
 1. Use a Docker host that can reach both ESXi and the guest network. Allow space for the OS ISO and several GiB more for temporary installation media.
 2. Open **Setup**, select the **ESXi connection** tab, and enter your ESXi hostname or IP. If its certificate is not already trusted, retrieve it, compare its SHA-256 fingerprint against a trusted ESXi source, and select **Trust certificate**. Then save your ESXi username/password and test the connection to load inventory.
 3. Select the **OS installation media** tab at the top of Setup. Choose **ESXi datastore** to browse your saved host's datastores and folders for an existing ISO, upload the supported live-server ISO from your computer, or select a `.iso` file from the GDeploy server's `media/` directory. Enter its publisher's verified **SHA-256 checksum**, then save the selection. ESXi ISOs are copied to GDeploy for verification and unattended-install preparation; the original datastore file is kept unchanged. Browser uploads and ESXi copies persist in `/data/media`; server files use the read-only `/media` mount. No environment edit or container restart is needed. Copying and hashing a large ISO can take several minutes.
-4. For Splunk, open **Setup → Software packages**. Upload your licensed **Splunk Enterprise Linux x86_64 `.tgz`**, or choose **GDeploy server** to select a `.tgz` already in `media/`; its vendor filename can remain unchanged. Enter the publisher's **SHA-512 checksum** (128 hexadecimal characters), or an existing verified **SHA-256 checksum** (64 characters), then select **Upload & use package** or **Use selected package**. Splunk supplies SHA-512 at the installer's official download URL with `.sha512` appended; the [package walkthrough](docs/INSTALL.md#configure-the-splunk-package) explains where to copy it. GDeploy calculates and verifies the checksum for you, validates the archive and saves the choice without an environment edit or container restart. It does not download Splunk or supply a license. Server-mounted files must be readable by container UID 10001: use directory mode 0755 and file mode 0644, or equivalent ACLs. Keep secrets out of `media/`.
+4. For Splunk, open **Setup → Software packages**. Upload your licensed **Splunk Enterprise Linux x86_64 `.tgz`**, or choose **GDeploy server** to select a `.tgz` already in `media/`; its vendor filename can remain unchanged. Enter the publisher's **SHA-512 checksum** (128 hexadecimal characters), or an existing verified **SHA-256 checksum** (64 characters), then select **Upload & use package** or **Use selected package**. Splunk supplies SHA-512 at the installer's official download URL with `.sha512` appended; the [package walkthrough](docs/OPERATIONS.md#configure-the-splunk-package) explains where to copy it. GDeploy calculates and verifies the checksum for you, validates the archive and saves the choice without an environment edit or container restart. It does not download Splunk or supply a license. Server-mounted files must be readable by container UID 10001: use directory mode 0755 and file mode 0644, or equivalent ACLs. Keep secrets out of `media/`.
 5. Select **New deployment**, give the deployment a label and choose application roles. In **Configure VMs**, fill in the separate section for each role: its VM name, CPU, RAM, disk, datastore, port group and network settings. Selecting Elasticsearch and Kibana displays two VM sections; the deployment label does not replace either VM name. FleetManager defaults to 2 vCPUs, 8 GiB RAM and an 80 GiB disk.
 6. If FleetManager is selected, the next step is **FleetManager configuration**. Choose **Online repository** or **Offline package**, supply or reuse the saved community string and product identity `.pem`, then select **Save & continue**. Online mode needs the Corelight customer repository token. Offline mode needs a `corelight-fleet` amd64 `.deb` and any missing dependency packages; it does not fetch repository packages. Setup remains available for defaults and package management. See the [FleetManager walkthrough](docs/FLEETMANAGER.md) for preparation and ISO requirements.
 7. In **Review & deploy**, explicitly run preflight, review the results and deploy. Saving FleetManager configuration does not start a job. Deployments without FleetManager go directly from **Configure VMs** to **Review & deploy**, retaining the three-step wizard. Open the resulting deployment for progress, logs, endpoints and **Credentials**.
@@ -83,20 +80,9 @@ ESXi imports and browser uploads support ISOs up to **16 GiB**. The GDeploy host
 
 The saved OS ISO and checksum are used for future deployments. Each queued deployment retains its selected local ISO and checksum, so later Setup changes do not switch its source media. Keep that local file available and unchanged until the deployment finishes. An imported ESXi copy can be reused without downloading the original again; changes to the original after a completed import do not change that copy. Existing environment configuration still works when no selection has been saved in Setup: use `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256`, or the compatible legacy `GDEPLOY_UBUNTU_ISO` and `GDEPLOY_UBUNTU_SHA256` names.
 
-Splunk uploads accept packages up to **4 GiB** and persist in `/data/packages`. Each new Splunk job captures its package choice so later Setup edits cannot switch it. If preflight reports a missing package, select **Configure Splunk package**, finish Setup, then **Return to deployment** and rerun preflight; the VM choices are kept in the open browser's draft. Existing environment package settings remain a fallback when no choice is saved. See the [Splunk package walkthrough](docs/INSTALL.md#configure-the-splunk-package) for selection, cleanup and legacy configuration.
+Splunk uploads accept packages up to **4 GiB** and persist in `/data/packages`. Each new Splunk job captures its package choice so later Setup edits cannot switch it. If preflight reports a missing package, select **Configure Splunk package**, finish Setup, then **Return to deployment** and rerun preflight; the VM choices are kept in the open browser's draft. Existing environment package settings remain a fallback when no choice is saved. See the [Splunk package walkthrough](docs/OPERATIONS.md#configure-the-splunk-package) for selection, cleanup and legacy configuration.
 
-To update a source installation for testing, run these commands in the same checkout:
-
-```sh
-git pull --ff-only
-docker compose up -d --build --wait
-```
-
-Keep the existing `.env`, `media/` directory and data volume. This rebuilds the image and replaces the app container while preserving your account, ESXi trust, ISO/package selections, uploaded packages, uploaded/imported media and history. Refresh the browser and check **v0.9.1** in the app footer. Open **Setup → Software packages** to configure Splunk or FleetManager; FleetManager is directly available at `http://SERVER_LAN_IP:8000/#settings/packages/fleetmanager`.
-
-If you prefer to supply credentials through environment files, run `python3 scripts/configure.py` with Python 3.12 or later **before the first start on a fresh volume**. This optional method creates `.env`, `docker.env` and a host-side `bootstrap-credentials.txt`, with the same initial `admin`/`admin` login and a unique random encryption key; the [installation guide](docs/INSTALL.md) also shows how to run it inside Docker. Existing manually configured installations retain their original credentials, `.env` and encryption key. Do not run the generator after automatic setup or as an upgrade step.
-
-The default Compose binding is `0.0.0.0:8000`. You can optionally restrict the bind address as described above or add an HTTPS reverse proxy. For a proxy, forward the original `Host` and `X-Forwarded-Proto`, set `GDEPLOY_COOKIE_SECURE=true`, and set `FORWARDED_ALLOW_IPS` to the actual proxy address or trusted proxy network as seen by the container. Keep the app port private to that proxy; the cookie setting must match how the browser accesses the application.
+Use the update commands at the top of this README from your existing clone. Optional environment-file credentials, network restrictions, plain Docker and release-image loading are covered in the [operations reference](docs/OPERATIONS.md).
 
 ## ESXi and network preparation
 
@@ -120,7 +106,7 @@ As an optional alternative for a private CA, make a PEM bundle containing the no
 
 ## Credentials and application behavior
 
-- Open **Setup → SSH access** to save one or multiple OpenSSH public keys, one per line. GDeploy installs the saved keys for the `gdeploy` user on every VM in newly queued deployments, alongside its separate automation key. You can review fingerprints and edit or clear the saved list. Ed25519, RSA (2048 bits or larger) and ECDSA are supported, with up to 50 keys; duplicate key material is saved once. Keep private keys on your own workstation. See the [SSH setup instructions](docs/INSTALL.md#configure-ssh-access-for-new-vms) for key creation and login examples.
+- Open **Setup → SSH access** to save one or multiple OpenSSH public keys, one per line. GDeploy installs the saved keys for the `gdeploy` user on every VM in newly queued deployments, alongside its separate automation key. You can review fingerprints and edit or clear the saved list. Ed25519, RSA (2048 bits or larger) and ECDSA are supported, with up to 50 keys; duplicate key material is saved once. Keep private keys on your own workstation. See the [SSH setup instructions](docs/OPERATIONS.md#configure-ssh-access-for-new-vms) for key creation and login examples.
 - Each queued deployment captures its key list. Later Setup edits do not change queued jobs or existing VMs, and removing a saved key does not revoke access on an existing VM. A new delete-and-redeploy job uses the latest saved keys. Older queued jobs with no saved-key snapshot keep their original automation key only.
 - The chosen web-app username and password hash are stored in the database and survive container rebuilds. The initial `bootstrap-credentials.txt` is not updated after account setup; save your chosen credentials in your password manager. Account setup leaves the encryption key and bootstrap/environment files unchanged.
 - Each VM receives the OS administrator **`gdeploy`**, a different random password, and a separate automation SSH key. VM names remain hostnames; they are not passwords.
@@ -141,7 +127,7 @@ Hiding preserves the VMs, original job status, logs, credentials and resource re
 
 Version **0.7.1** repairs two cloud-init readiness failures: stderr warnings no longer corrupt JSON status parsing, and Ubuntu's clean `disabled-by-marker-file` state can pass when independent first-boot, installer, root-filesystem, sudo, SSH and VMware Tools checks confirm readiness. Reported cloud-init errors still block progress. Transient first-boot states receive bounded retries, with sanitized details in **Deployment logs**. The fix uses the same verified OS ISO; no replacement upload is needed for `ubuntu-24.04.5-live-server-amd64.iso`.
 
-Updating does not resume an already failed deployment or change its recorded status. Preserve a working VM and review any unfinished software installation or media cleanup separately. The [readiness troubleshooting guide](docs/INSTALL.md#check-ubuntu-readiness-after-a-deployment-error) explains what follows the OS check and how to inspect an existing guest.
+Updating does not resume an already failed deployment or change its recorded status. Preserve a working VM and review any unfinished software installation or media cleanup separately. The [readiness troubleshooting guide](docs/OPERATIONS.md#check-ubuntu-readiness-after-a-deployment-error) explains what follows the OS check and how to inspect an existing guest.
 
 When a stage fails, select **View deployment logs** in its error banner, or **View logs** in the **Deployment logs** card. Expand and copy the sanitized diagnostics to identify the failing step; older entries can show only the detail recorded at the time. Check the ESXi console before selecting **Delete & redeploy**. Type the deployment name to confirm permanent deletion of that deployment's VMs and virtual disks, including any data already written. A fresh deployment uses the saved VM choices, the current OS ISO selection and new credentials.
 
@@ -157,7 +143,7 @@ The Compose data volume mounted at `/data` contains the SQLite administrator acc
 
 Open **Setup → OS installation media → Storage & saved ISOs** to check capacity and remove unused copies. The displayed capacity belongs to the filesystem backing `/data` as seen inside the container; it is not a whole-host disk inventory. The default volume has no GDeploy storage quota and uses available space on that filesystem. The separate 256 MiB `/tmp` mount is not the ISO workspace limit. You can also check with `docker compose exec gdeploy df -h /data /tmp`.
 
-Select **Delete** beside an unused upload or ESXi copy, then confirm **Delete ISO**. Selected media and files referenced by queued, running or cleaning deployments are protected. To remove the current default, select **Clear saved selection** or choose another ISO first. Clearing does not delete the file; existing environment media settings become the fallback. This lets you clear and delete your only unused copy without needing room for a replacement upload. Active deployments keep their original source and protection. Deletion removes only GDeploy's saved copy and leaves original ESXi files and the read-only server media mount untouched. The [storage walkthrough](docs/INSTALL.md#manage-storage-and-saved-isos) explains capacity limits, cleanup and expanding the backing storage when needed.
+Select **Delete** beside an unused upload or ESXi copy, then confirm **Delete ISO**. Selected media and files referenced by queued, running or cleaning deployments are protected. To remove the current default, select **Clear saved selection** or choose another ISO first. Clearing does not delete the file; existing environment media settings become the fallback. This lets you clear and delete your only unused copy without needing room for a replacement upload. Active deployments keep their original source and protection. Deletion removes only GDeploy's saved copy and leaves original ESXi files and the read-only server media mount untouched. The [storage walkthrough](docs/OPERATIONS.md#manage-storage-and-saved-isos) explains capacity limits, cleanup and expanding the backing storage when needed.
 
 Manage uploaded Splunk packages in **Setup → Software packages**. Clear the saved default or select another package before deleting an unused upload, then confirm **Delete package**. Active-job references remain protected even after clearing the default. Server-mounted packages remain outside the app's deletion controls; package deletion does not uninstall Splunk from an existing VM.
 

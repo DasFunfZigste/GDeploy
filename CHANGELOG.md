@@ -4,6 +4,19 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-07
+
+### Changed
+
+- Make the public-repository source build the default installation path: install Git and Docker from Ubuntu 24.04 packages, clone GDeploy, then run `sudo docker compose up -d --build --wait`. Existing Docker/Git users can skip package installation. This path requires no GitHub credential linking or Docker registry login.
+- Replace the primary installation guide with a short setup/update walkthrough and put that guide first on new release pages. Preserve detailed media, software, networking, storage, account recovery and backup instructions in `docs/OPERATIONS.md`.
+- Keep optional release image archives available for local loading without a registry pull. Public repository/release access does not imply that the GHCR package is public. Published historical releases and tags are unchanged.
+
+### Installation and compatibility
+
+- From the same existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. These commands track the current default branch and rebuild the app locally.
+- Preserve the data volume, `.env`, media directory, encryption key, credentials and deployment history. This release changes documentation and release presentation; application behavior, saved settings, queued jobs and existing VMs are unchanged.
+
 ## [0.9.1] - 2026-10-06
 
 ### Fixed

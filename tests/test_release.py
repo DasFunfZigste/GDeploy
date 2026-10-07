@@ -45,6 +45,12 @@ def release_source(tmp_path):
         "## Upgrades\n\nPreserve the existing configuration and data volume.\n"
     )
     (root / "docs" / "RELEASING.md").write_text("# Maintainer release process\n")
+    (root / "docs" / "OPERATIONS.md").write_text(
+        "# Optional image archive\n\n"
+        "tar -xzf gdeploy-0.1.0-deploy.tar.gz\n"
+        "sudo docker load --input gdeploy-0.1.0-linux-amd64.image.tar.gz\n"
+        "sudo docker compose up -d --wait --pull never\n"
+    )
     (root / "media" / ".gitkeep").write_bytes(b"")
     return root
 
@@ -113,6 +119,12 @@ def test_build_bundle_is_allowlisted_and_excludes_secrets_and_real_media(release
         assert not set(secret_paths) & set(archive.getnames())
         assert all(member.isfile() and member.mode == 0o644 for member in archive.getmembers())
         assert b"ghcr.io/dasfunfzigste/gdeploy:1.2.3" in archive.extractfile("compose.yaml").read()
+        assert "docs/OPERATIONS.md" in archive.getnames()
+        assert "Dockerfile" not in archive.getnames()
+        operations = archive.extractfile("docs/OPERATIONS.md").read()
+        assert b"gdeploy-1.2.3-deploy.tar.gz" in operations
+        assert b"gdeploy-1.2.3-linux-amd64.image.tar.gz" in operations
+        assert b"0.1.0" not in operations
         assert archive.extractfile("INSTALL.md").read() == archive.extractfile("docs/INSTALL.md").read()
         assert archive.extractfile("release.json").read() == artifacts["release.json"].read_bytes()
 
@@ -128,7 +140,7 @@ def test_build_bundle_is_allowlisted_and_excludes_secrets_and_real_media(release
         assert hashlib.sha256((release_output / name).read_bytes()).hexdigest() == digest
 
 
-def test_future_release_notes_include_complete_pinned_installation_walkthrough(release_source, release_output):
+def test_future_release_notes_lead_with_source_installation_and_updates(release_source, release_output):
     # Exercise the real user-facing walkthrough, including commands near its end.
     actual_guide = Path(__file__).resolve().parents[1] / "docs" / "INSTALL.md"
     (release_source / "docs" / "INSTALL.md").write_bytes(actual_guide.read_bytes())
@@ -137,7 +149,6 @@ def test_future_release_notes_include_complete_pinned_installation_walkthrough(r
     notes = artifacts["RELEASE_NOTES.md"].read_text()
     assert "0.1.0" not in guide
     assert "0.1.0" not in notes
-    assert "GDEPLOY_VERSION=1.2.3" in guide
     assert "ghcr.io/dasfunfzigste/gdeploy:1.2.3" in notes
     assert release.IMAGE + "@" + DIGEST in notes
     assert release.REPOSITORY + "/commit/" + COMMIT in notes
@@ -145,9 +156,25 @@ def test_future_release_notes_include_complete_pinned_installation_walkthrough(r
     assert "Historical release entry." not in notes
     assert "Future work" not in notes
     assert release.installation_for_release_notes(guide, TAG).strip() in notes
-    for heading in ["Install Docker on a new Ubuntu server", "docker run", "Upgrade"]:
-        assert heading.lower() in notes.lower()
-    assert f"{release.REPOSITORY}/blob/{TAG}/docs/LAB_VALIDATION.md" in notes
+    for command in [
+        "sudo apt install -y git docker.io docker-compose-v2 docker-buildx",
+        "sudo systemctl enable --now docker",
+        f"git clone {release.REPOSITORY}.git",
+        "sudo docker compose up -d --build --wait",
+        "git pull --ff-only",
+    ]:
+        assert command in guide
+        assert command in notes
+    assert notes.index("git clone ") < notes.index("## Changelog")
+    for old_command in ["gh auth login", "docker login", "gh release download", "docker pull"]:
+        assert old_command not in guide
+    assert "http://YOUR_SERVER_IP:8000" in guide
+    assert "`admin`" in guide
+    assert "default branch" in guide
+    assert "repository and image are private" not in notes
+    assert f"{release.REPOSITORY}/blob/{TAG}/docs/OPERATIONS.md" in notes
+    assert f"{release.REPOSITORY}/blob/{TAG}/docs/OPERATIONS.md" in guide
+    assert "optional prebuilt image" in notes
     for name in ["gdeploy-1.2.3-deploy.tar.gz", "gdeploy-1.2.3-linux-amd64.image.tar.gz", "SHA256SUMS"]:
         assert f"{release.REPOSITORY}/releases/download/{TAG}/{name}" in notes
 

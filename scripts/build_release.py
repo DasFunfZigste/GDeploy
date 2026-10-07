@@ -30,6 +30,7 @@ DEPLOYMENT_FILES = (
     ("CHANGELOG.md", "CHANGELOG.md"),
     ("docs/INSTALL.md", "INSTALL.md"),
     ("docs/INSTALL.md", "docs/INSTALL.md"),
+    ("docs/OPERATIONS.md", "docs/OPERATIONS.md"),
     ("docs/LAB_VALIDATION.md", "docs/LAB_VALIDATION.md"),
     ("docs/FLEETMANAGER.md", "docs/FLEETMANAGER.md"),
     ("docs/ARCHITECTURE.md", "docs/ARCHITECTURE.md"),
@@ -131,6 +132,11 @@ def render_version(text: str, version: str) -> str:
     text = re.sub(r"\bGDEPLOY_VERSION=" + VERSION_PATTERN + r"(?![0-9A-Za-z_.-])", "GDEPLOY_VERSION=" + version, text)
     text = re.sub(re.escape(IMAGE) + ":" + VERSION_PATTERN + r"(?![0-9A-Za-z_.-])", IMAGE + ":" + version, text)
     text = re.sub(r"\bGDeploy " + VERSION_PATTERN + r"(?![0-9A-Za-z_.-])", "GDeploy " + version, text)
+    text = re.sub(
+        r"\bgdeploy-" + VERSION_PATTERN + r"(?=-(?:deploy|linux-amd64\.image)\.tar\.gz\b)",
+        "gdeploy-" + version,
+        text,
+    )
     return re.sub(
         re.escape(REPOSITORY) + r"/(blob|tree|releases/tag|releases/download)/v" + VERSION_PATTERN + r"(?=/|[\s)#]|$)",
         lambda match: REPOSITORY + "/" + match.group(1) + "/v" + version,
@@ -216,15 +222,17 @@ def release_notes(info: ReleaseInfo, metadata: dict, guide: str, asset_names: li
         f"| Image pinned by digest | `{metadata['image_by_digest']}` |\n"
         "| Docker host platform | `linux/amd64` |\n"
         f"| Source | [{metadata['source_commit'][:12]}]({REPOSITORY}/commit/{metadata['source_commit']}) |\n\n"
-        "The repository and image are private; download and registry authentication steps are included below. "
-        "The Docker image archive provides an alternative to a registry pull.\n\n"
-        f"## Changelog\n\n{info.changes}\n\n"
-        f"## Download assets\n\n{downloads}\n\n"
-        "Verify downloaded files against `SHA256SUMS` before using them. "
-        "The deployment bundle contains configuration templates and documentation; "
-        "Operating-system media, licensed software installers and product licenses are supplied separately.\n\n"
+        "Install from this public repository using the clone-and-build instructions below. "
+        "No GitHub or Docker registry login is required.\n\n"
         + installation_for_release_notes(guide, info.tag).rstrip()
-        + "\n"
+        + "\n\n"
+        f"## Changelog\n\n{info.changes}\n\n"
+        f"## Optional release assets\n\n{downloads}\n\n"
+        "Verify downloaded files against `SHA256SUMS` before using them. "
+        "The deployment bundle contains configuration templates and documentation for the optional prebuilt image; "
+        "use it with the Docker image archive, or use a Git clone for the source-build method above. "
+        f"See the [operations guide]({REPOSITORY}/blob/{info.tag}/docs/OPERATIONS.md) for the optional archive method. "
+        "Operating-system media, licensed software installers and product licenses are supplied separately.\n"
     )
 
 
