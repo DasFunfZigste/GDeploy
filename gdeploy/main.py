@@ -26,6 +26,7 @@ from .models import (
     DeploymentSpec,
     ESXiMediaSelection,
     FleetManagerSettings,
+    FleetManagerVersionLookup,
     Login,
     MediaSelection,
     RedeployRequest,
@@ -274,6 +275,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.delete("/api/settings/fleetmanager")
     def clear_fleetmanager_settings(request: Request, current=Depends(authenticated)):
         return request.app.state.fleetmanager.clear()
+
+    @app.post("/api/settings/fleetmanager/versions")
+    def fleetmanager_versions(payload: FleetManagerVersionLookup, request: Request, current=Depends(authenticated)):
+        return request.app.state.fleetmanager.repository_versions(payload.repository_token)
 
     @app.post("/api/settings/fleetmanager/packages/upload")
     async def upload_fleetmanager_package(

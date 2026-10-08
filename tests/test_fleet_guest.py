@@ -264,6 +264,7 @@ def signing_transport(monkeypatch):
         class Opener:
             def open(self, request, timeout):
                 assert 0 < timeout <= 60
+                request.timeout = timeout
                 calls.append(request)
                 event = next(pending)
                 if isinstance(event, Exception):
@@ -362,6 +363,7 @@ def test_key_http_errors_identify_stage_without_exposing_url_headers_or_body(sig
     with pytest.raises(fleet.FleetInstallError, match=f"HTTP {status}") as error:
         fleet.download_signing_key("private-token")
     message = str(error.value)
+    assert isinstance(error.value, fleet.RepositoryDownloadError) and error.value.status_code == status
     if redirected:
         assert "redirected" in message
     elif status == 401:
@@ -413,7 +415,85 @@ def test_key_transport_failures_never_include_raw_exception_data(signing_transpo
     with pytest.raises(fleet.FleetInstallError, match="verified TLS") as error:
         fleet.download_signing_key("private-token")
     assert "private" not in str(error.value) and "cdn.invalid" not in str(error.value)
+    assert isinstance(error.value, fleet.RepositoryDownloadError) and error.value.status_code is None
     assert capsys.readouterr() == ("", "")
+
+
+def test_metadata_download_uses_relative_repository_path_and_its_own_size_and_time_limits(signing_transport):
+    data = b"x" * (1024 * 1024 + 1)
+    response = KeyResponse(data)
+    calls = signing_transport(response)
+    path = "any/dists/any/main/binary-amd64/Packages.gz"
+    assert fleet.download_repository_file(
+        "private-token", path, max_bytes=2 * 1024 * 1024, timeout=15, resource="package metadata",
+    ) == data
+    assert calls[0].full_url == fleet.REPOSITORY + path
+    assert calls[0].has_header("Authorization") and 0 < calls[0].timeout <= 15
+    assert response.closed
+
+
+@pytest.mark.parametrize("path", [
+    "https://evil.invalid/Packages.gz", "//evil.invalid/Packages.gz", "/Packages.gz", "../Packages.gz",
+    "any/../Packages.gz", "any/./Packages.gz", "any/%2e%2e/Packages.gz", "Packages.gz?token=private-token",
+    "Packages.gz#fragment", "any\\Packages.gz", "Packages.gz\n", "", None,
+])
+def test_repository_initial_path_cannot_choose_an_origin_or_escape_repository(signing_transport, path):
+    calls = signing_transport()
+    with pytest.raises(fleet.RepositoryDownloadError, match="within the configured") as error:
+        fleet.download_repository_file("private-token", path, resource="package metadata")
+    assert calls == [] and error.value.status_code is None
+    assert "private-token" not in str(error.value) and "evil.invalid" not in str(error.value)
+
+
+@pytest.mark.parametrize("options", [
+    {"max_bytes": 0}, {"max_bytes": -1}, {"max_bytes": True}, {"max_bytes": 33 * 1024 * 1024},
+    {"timeout": 0}, {"timeout": -1}, {"timeout": 61}, {"timeout": True}, {"timeout": float("nan")},
+    {"timeout": float("inf")}, {"resource": "private-token"}, {"resource": []},
+])
+def test_repository_fetch_rejects_invalid_limits_and_resource_labels_before_requests(signing_transport, options):
+    calls = signing_transport()
+    with pytest.raises(fleet.RepositoryDownloadError) as error:
+        fleet.download_repository_file("private-token", "Packages.gz", **options)
+    assert calls == [] and error.value.status_code is None
+    assert "private-token" not in str(error.value)
+
+
+@pytest.mark.parametrize("token", ["", None, 123, "user:password", "private token", "token\n", "☃"])
+def test_repository_fetch_rejects_invalid_tokens_before_requests(signing_transport, token):
+    calls = signing_transport()
+    with pytest.raises(fleet.RepositoryDownloadError, match="valid Fleet Manager customer repository token"):
+        fleet.download_repository_file(token, "Packages.gz", resource="package metadata")
+    assert calls == []
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+def test_metadata_http_failures_expose_status_without_guest_or_saved_job_advice(signing_transport, capsys, status):
+    failure = key_http_error(status)
+    signing_transport(failure)
+    with pytest.raises(fleet.RepositoryDownloadError) as error:
+        fleet.download_repository_file("private-token", "Packages.gz", resource="package metadata")
+    message = str(error.value)
+    assert error.value.status_code == status
+    assert all(word not in message for word in ("guest", "signing key", "save", "deployment", "private-"))
+    assert failure.fp.closed and capsys.readouterr() == ("", "")
+
+
+def test_metadata_network_error_refers_to_gdeploy_host_and_is_not_http_fallback(signing_transport):
+    signing_transport(urllib.error.URLError("https://private.invalid?private=private-token"))
+    with pytest.raises(fleet.RepositoryDownloadError) as error:
+        fleet.download_repository_file("private-token", "Packages.gz", resource="package metadata")
+    assert error.value.status_code is None
+    assert "GDeploy host network access" in str(error.value)
+    assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize("body", [b"", b"x" * 17])
+def test_metadata_body_limit_is_enforced_and_reported_without_key_specific_error(signing_transport, body):
+    response = KeyResponse(body)
+    signing_transport(response)
+    with pytest.raises(fleet.RepositoryDownloadError, match="empty or oversized package metadata") as error:
+        fleet.download_repository_file("private-token", "Packages.gz", max_bytes=16, resource="package metadata")
+    assert error.value.status_code is None and response.closed
 
 
 def test_invalid_key_parser_output_is_private_and_cannot_create_trust_files(payload, tmp_path, monkeypatch, capsys):

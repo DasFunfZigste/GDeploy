@@ -126,7 +126,7 @@
     } catch { throw new Error('Unable to reach GDeploy. Check your connection and try again.'); }
     const data = response.status === 204 ? null : await response.json().catch(() => null);
     if (!response.ok) {
-      if (response.status === 401 && path !== '/api/login') showLogin('Your session has expired. Sign in to continue.');
+      if (response.status === 401 && path !== '/api/login' && state.session === requestSession) showLogin('Your session has expired. Sign in to continue.');
       if (response.status === 403 && data?.detail?.code === 'credentials_change_required' && state.session && state.session === requestSession) {
         showSetup({...state.session, must_change_credentials: true}, data.detail.message);
       }
@@ -141,6 +141,34 @@
     $('#toast').textContent = message;
     $('#toast').hidden = false;
     state.toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 5000);
+  }
+  function copyTextFallback(text) {
+    const focused = document.activeElement;
+    const selection = window.getSelection();
+    const ranges = selection ? Array.from({length: selection.rangeCount}, (_, index) => selection.getRangeAt(index).cloneRange()) : [];
+    const inputSelection = focused && typeof focused.selectionStart === 'number' ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
+    const temporary = el('textarea', {readOnly: true, tabindex: '-1', 'aria-label': 'Text to copy', value: text});
+    temporary.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;';
+    (focused?.closest('dialog[open]') || document.body).append(temporary);
+    try {
+      temporary.focus({preventScroll: true}); temporary.select(); temporary.setSelectionRange(0, text.length);
+      return document.execCommand('copy') === true;
+    } catch { return false; }
+    finally {
+      temporary.remove();
+      if (focused?.isConnected) focused.focus({preventScroll: true});
+      if (inputSelection && focused?.isConnected) focused.setSelectionRange(...inputSelection);
+      if (selection) {
+        selection.removeAllRanges();
+        for (const range of ranges) if (range.commonAncestorContainer.isConnected) selection.addRange(range);
+      }
+    }
+  }
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; }
+    } catch { /* Browsers may expose the API but deny clipboard permission. */ }
+    return copyTextFallback(text);
   }
   function globalError(message) {
     const alert = $('#global-alert');
@@ -866,6 +894,7 @@
   function createFleetManagerPanel(onChange, onBusy, options = {}) {
     const viewEpoch = state.routeEpoch, endpoint = '/api/settings/fleetmanager';
     let catalog = null, mode = 'online', packageId = '', dependencyIds = new Set(), busy = '', externalBusy = false;
+    let versions = [], versionsLoaded = false, versionRequest = 0, versionsPending = false;
     const currentView = () => panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
     const changed = () => { successBox.hidden = true; options.onDirty?.(); };
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
@@ -876,13 +905,16 @@
     const communityHelp = el('small');
     const token = el('input', {id: 'fleetmanager-token', type: 'password', maxlength: 4096, autocomplete: 'new-password', spellcheck: 'false'});
     const tokenHelp = el('small');
-    const onlineVersion = el('input', {id: 'fleetmanager-online-version', type: 'text', maxlength: 128, pattern: '(?:[0-9]+:)?[0-9][A-Za-z0-9.+~\\-]*', placeholder: 'Latest available', autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'fleetmanager-online-version-help', title: 'Enter the complete Debian package version, such as 29.2.2-1, or leave blank for the latest available version.'});
-    const onlineVersionHelp = el('small', {id: 'fleetmanager-online-version-help'}, 'Leave blank for the latest available version. Otherwise, enter the complete Debian version, including any revision or epoch (for example, 29.2.2-1). Version availability is checked on the VM during installation.');
+    const onlineVersion = el('select', {id: 'fleetmanager-online-version', 'aria-describedby': 'fleetmanager-online-version-help fleetmanager-versions-status'}, el('option', {value: ''}, 'Latest available'));
+    const onlineVersionHelp = el('small', {id: 'fleetmanager-online-version-help'}, 'Choose Latest available or an exact version from the repository. Availability is checked again when installing on the VM. Loading versions does not save your token or other setup changes.');
+    const versionsStatus = el('p', {id: 'fleetmanager-versions-status', class: 'media-help', role: 'status', 'aria-live': 'polite'}, 'Enter or reuse a saved repository token, then load available versions.');
+    const versionsError = el('div', {id: 'fleetmanager-versions-error', class: 'alert alert-warning', role: 'alert', hidden: true});
+    const refreshVersions = button('Load versions', 'button-small', loadVersions, 'refresh'); refreshVersions.id = 'fleetmanager-load-versions';
     const license = el('input', {id: 'fleetmanager-license', type: 'file', accept: '.pem', 'aria-describedby': 'fleetmanager-license-help'});
     const licenseHelp = el('small', {id: 'fleetmanager-license-help'});
     const sourceRadio = value => el('input', {type: 'radio', name: 'fleetmanager-mode', value, checked: mode === value, onChange: () => { mode = value; changed(); inlineError(errorBox, ''); syncControls(); }});
     const onlineRadio = sourceRadio('online'), offlineRadio = sourceRadio('offline');
-    const onlineFields = el('div', {class: 'media-source-fields'}, field('Repository access token', token, tokenHelp), el('p', {class: 'media-help'}, 'Find your token under Downloads → Fleet Manager in the ', el('a', {href: 'https://my.corelight.cloud/', target: '_blank', rel: 'noopener noreferrer'}, 'Corelight customer portal', icon('link')), '. The VM needs internet access to the vendor repository and Ubuntu package repositories. The vendor repository remains configured for future updates.'), field('Version to install · optional', onlineVersion, onlineVersionHelp));
+    const onlineFields = el('div', {class: 'media-source-fields'}, field('Repository access token', token, tokenHelp), el('p', {class: 'media-help'}, 'Find your token under Downloads → Fleet Manager in the ', el('a', {href: 'https://my.corelight.cloud/', target: '_blank', rel: 'noopener noreferrer'}, 'Corelight customer portal', icon('link')), '. The VM needs internet access to the vendor repository and Ubuntu package repositories. The vendor repository remains configured for future updates.'), field('Version to install', onlineVersion, onlineVersionHelp), refreshVersions, versionsStatus, versionsError);
     const packageSelect = el('select', {id: 'fleetmanager-package', 'aria-describedby': 'fleetmanager-package-help'});
     const dependencyList = el('div', {class: 'fleet-dependencies', id: 'fleetmanager-dependencies'});
     const offlineFields = el('div', {class: 'media-source-fields', hidden: true}, field('FleetManager .deb package', packageSelect, el('span', {id: 'fleetmanager-package-help'}, 'Choose a corelight-fleet package for amd64. Upload it below or place it in the server media folder and refresh.')), el('fieldset', {class: 'fleet-dependency-fieldset'}, el('legend', {}, 'Additional dependency packages'), el('p', {class: 'media-help'}, 'Optional .deb files for dependencies absent from the Ubuntu VM. Supply the full set required by your FleetManager version. Package installation does not fall back to internet repositories.'), dependencyList));
@@ -903,6 +935,8 @@
       community.disabled = locked; community.required = !catalog?.community_string_configured;
       token.disabled = locked || mode !== 'online'; token.required = mode === 'online' && !catalog?.repository_token_configured;
       onlineVersion.disabled = locked || mode !== 'online';
+      refreshVersions.disabled = locked || mode !== 'online';
+      if (busy !== 'versions') refreshVersions.replaceChildren(icon('refresh'), versionsLoaded ? 'Refresh versions' : 'Load versions');
       license.disabled = locked; license.required = !catalog?.license;
       packageSelect.disabled = locked || mode !== 'offline'; packageSelect.required = mode === 'offline';
       for (const input of dependencyList.querySelectorAll('input')) input.disabled = locked || mode !== 'offline';
@@ -914,9 +948,42 @@
       if (!busy) { save.replaceChildren(icon('check'), 'Save FleetManager setup'); upload.replaceChildren(icon('plus'), 'Upload packages'); }
       panel.setAttribute('aria-busy', busy ? 'true' : 'false');
     }
+    function renderVersions(selected = onlineVersion.value) {
+      const choices = [el('option', {value: ''}, 'Latest available'), ...versions.map(version => el('option', {value: version}, version))];
+      if (selected && !versions.includes(selected)) choices.push(el('option', {value: selected}, `${selected} · ${versionsLoaded ? 'selected version not in refreshed list' : 'saved selection · not refreshed'}`));
+      onlineVersion.replaceChildren(...choices); onlineVersion.value = selected;
+    }
+    async function loadVersions() {
+      if (!currentView() || busy || externalBusy || !catalog || mode !== 'online') return;
+      versionsPending = false;
+      const draftToken = token.value, session = state.session, request = ++versionRequest;
+      if (!draftToken && !catalog.repository_token_configured) {
+        inlineError(versionsError, 'Enter a repository access token to load versions. You can provide the community string and license afterward.'); token.focus(); return;
+      }
+      if (draftToken && /[^\x21-\x7e]|:/.test(draftToken)) {
+        inlineError(versionsError, 'The repository access token must use ASCII characters without whitespace or colons.'); token.focus(); return;
+      }
+      const currentRequest = () => currentView() && state.session === session && request === versionRequest && mode === 'online' && token.value === draftToken;
+      busy = 'versions'; if (options.wizard) onBusy(true); inlineError(versionsError, ''); delete versionsError.dataset.missingVersion; setBusy(refreshVersions, 'Loading versions…'); syncControls();
+      try {
+        const result = await api(`${endpoint}/versions`, {method: 'POST', body: {repository_token: draftToken}});
+        if (!currentRequest()) return;
+        if (!Array.isArray(result?.versions) || result.versions.some(version => typeof version !== 'string' || version.length > 128 || !/^(?:[0-9]+:)?[0-9][A-Za-z0-9.+~\-]*$/.test(version))) throw new Error('The repository returned an invalid version list.');
+        versions = [...new Set(result.versions)]; versionsLoaded = true; renderVersions();
+        versionsStatus.textContent = versions.length ? `${versions.length} repository ${versions.length === 1 ? 'version' : 'versions'} available, newest first.` : 'No exact versions were returned. Latest available and your existing selection are still available.';
+        if (onlineVersion.value && !versions.includes(onlineVersion.value)) { versionsError.dataset.missingVersion = 'true'; inlineError(versionsError, 'Your selected version is not in the refreshed repository list. It has been kept; choose an available version or Latest available before deployment.'); }
+      } catch (error) {
+        if (currentRequest()) { versionsStatus.textContent = versions.length ? 'The version list could not be refreshed. Existing choices may be outdated.' : 'The version list is unavailable. Latest available and your existing selection are still available.'; inlineError(versionsError, `${error.message} Your current selection has been kept. Retry loading versions, or continue with that selection or Latest available.`); }
+      } finally {
+        if (currentView() && busy === 'versions') { busy = ''; if (options.wizard) onBusy(false); syncControls(); }
+      }
+    }
+    function loadPendingVersions() {
+      if (versionsPending && currentView() && !panel.closest('[hidden]') && !busy && !externalBusy && mode === 'online') return loadVersions();
+    }
     function renderCatalog(next, resetDraft = false) {
       catalog = next;
-      if (resetDraft) { mode = next.mode || 'online'; onlineVersion.value = next.online_version || ''; packageId = next.package_id || ''; dependencyIds = new Set(next.dependency_ids || []); }
+      if (resetDraft) { mode = next.mode || 'online'; renderVersions(next.online_version || ''); packageId = next.package_id || ''; dependencyIds = new Set(next.dependency_ids || []); }
       badge.className = next.ready ? 'status status-completed' : 'status'; badge.textContent = next.ready ? 'Ready for preflight' : 'Setup required';
       community.placeholder = next.community_string_configured ? 'Leave blank to keep the saved community string' : 'Community string for your sensor connections';
       communityHelp.textContent = next.community_string_configured ? 'Community string saved. Enter a value only to replace it.' : 'Required for both installation methods. Use printable characters without quotation marks.';
@@ -948,10 +1015,12 @@
     }
     async function load() {
       if (!currentView() || busy || externalBusy) return;
+      let loaded = false;
       busy = 'load'; if (options.wizard) onBusy(true); inlineError(errorBox, ''); setBusy(refresh, 'Refreshing…'); syncControls();
-      try { const next = await api(endpoint); if (currentView()) renderCatalog(next, !catalog); }
+      try { const next = await api(endpoint); if (currentView()) { renderCatalog(next, !catalog); loaded = true; } }
       catch (error) { if (currentView()) { inlineError(errorBox, error.message); badge.textContent = 'Couldn’t load setup'; } }
       finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh'); if (options.wizard) onBusy(false); syncControls(); } }
+      if (loaded && mode === 'online' && (token.value || catalog?.repository_token_configured)) { versionsPending = true; await loadPendingVersions(); }
     }
     function confirmRemoval(item = null) {
       if (!currentView() || busy || externalBusy || (item && !item.can_delete)) return;
@@ -965,7 +1034,7 @@
           const next = await api(item ? `${endpoint}/packages/${encodeURIComponent(item.id)}` : endpoint, {method: 'DELETE'});
           if (!currentView()) return;
           if (item) { if (packageId === item.id) packageId = ''; dependencyIds.delete(item.id); }
-          else { community.value = ''; token.value = ''; license.value = ''; }
+          else { community.value = ''; token.value = ''; license.value = ''; versions = []; versionsLoaded = false; versionsPending = false; versionRequest++; inlineError(versionsError, ''); versionsStatus.textContent = 'Enter or reuse a saved repository token, then load available versions.'; }
           renderCatalog(next, !item); dialog.close(); successBox.textContent = item ? `${item.name} deleted.` : 'FleetManager setup cleared. Uploaded packages and existing deployments are preserved.'; successBox.hidden = false;
         } catch (failure) { if (currentView()) inlineError(error, failure.message); }
         finally { delete dialog.dataset.busy; dismiss.disabled = false; remove.disabled = false; remove.replaceChildren(item ? 'Delete package' : 'Clear setup'); if (currentView()) { busy = ''; onBusy(false); syncControls(); } }
@@ -1024,8 +1093,10 @@
     const panel = el('section', {class: 'surface', id: 'fleetmanager-panel', 'aria-labelledby': 'fleetmanager-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'fleetmanager-title'}, 'FleetManager'), el('p', {}, 'Configure Corelight FleetManager installation and sensor access.')), badge, refresh), form, uploads);
     packageSelect.addEventListener('change', () => { packageId = packageSelect.value; changed(); });
     uploadFiles.addEventListener('change', () => { checksum.value = ''; syncControls(); });
-    for (const input of [community, token, onlineVersion, license]) input.addEventListener('input', () => { changed(); inlineError(errorBox, ''); });
-    return {panel, load, save: saveSettings, canSave: () => Boolean(catalog && !busy && !externalBusy), setExternalBusy(value) { externalBusy = value; syncControls(); }};
+    onlineVersion.addEventListener('change', () => { changed(); inlineError(errorBox, ''); if (versionsError.dataset.missingVersion && (!onlineVersion.value || versions.includes(onlineVersion.value))) { inlineError(versionsError, ''); delete versionsError.dataset.missingVersion; } });
+    token.addEventListener('input', () => { versionRequest++; versions = []; versionsLoaded = false; renderVersions(); inlineError(versionsError, ''); versionsStatus.textContent = 'Repository token changed. Load versions to refresh the choices for this token.'; syncControls(); });
+    for (const input of [community, token, license]) input.addEventListener('input', () => { changed(); inlineError(errorBox, ''); });
+    return {panel, load, save: saveSettings, activate() { if (versionsPending) queueMicrotask(loadPendingVersions); }, canSave: () => Boolean(catalog && !busy && !externalBusy), setExternalBusy(value) { externalBusy = value; syncControls(); if (!value && versionsPending) queueMicrotask(loadPendingVersions); }};
   }
   function createSSHAccessPanel(onSaved, onBusy, initialDraft) {
     const viewEpoch = state.routeEpoch;
@@ -1344,6 +1415,7 @@
       }
       if (updateHash) history.replaceState(history.state, '', `#settings/${key}${key === 'packages' && state.packageTab !== 'splunk' ? `/${state.packageTab}` : ''}`);
       if (focus) tabs[key].button.focus();
+      fleetControls?.activate();
     }
     function createSetupTab(key, number, title) {
       const marker = el('span', {class: 'setup-step-number', 'aria-hidden': 'true'}, number);
@@ -1396,6 +1468,7 @@
       }
       if (updateHash) history.replaceState(history.state, '', `#settings/packages${key === 'splunk' ? '' : `/${key}`}`);
       if (focus) softwareButtons[key].focus();
+      fleetControls.activate();
     }
     for (const [key, label, content] of [['splunk', 'Splunk Enterprise', packagesControls.panel], ['fleetmanager', 'FleetManager', fleetControls.panel]]) {
       softwareButtons[key] = el('button', {type: 'button', id: `software-tab-${key}`, role: 'tab', 'aria-controls': `software-panel-${key}`, onClick: () => selectSoftware(key), onKeydown: event => {
@@ -1434,25 +1507,31 @@
       logList.append(el('li', {class: `log-item ${severity}`}, el('div', {class: 'log-meta'}, el('time', {datetime: event.at || '', title: date(event.at, true)}, eventTime(event.at)), el('span', {class: 'log-level'}, severity.toUpperCase())), el('span', {class: 'log-message'}, event.message)));
     }
     const logBody = el('div', {class: 'deployment-log-body', id: 'deployment-log-body', tabindex: '0', 'aria-label': 'Recorded deployment logs'}, data.events?.length ? logList : el('p', {class: 'no-events'}, 'No events recorded yet.'));
+    const manualText = el('textarea', {id: 'deployment-log-manual-text', rows: 14, readOnly: true, spellcheck: 'false', 'aria-describedby': 'deployment-log-manual-help'});
+    const manualDone = button('Done copying', 'button-small', () => { manualCopy.hidden = true; manualText.value = ''; logCopy.focus({preventScroll: true}); refreshDetail(); });
+    manualDone.id = 'deployment-log-manual-done';
+    const manualCopy = el('div', {id: 'deployment-log-manual-copy', class: 'log-manual-copy', hidden: true}, el('p', {id: 'deployment-log-manual-help', role: 'status'}, 'Automatic copying is blocked by your browser. Copy the selected text with Ctrl+C (⌘C on Mac), or use your browser’s Copy command. This log snapshot stays in place until you finish.'), field('Full deployment log', manualText), manualDone);
     const logCopy = button('Copy logs', 'button-small', async () => {
       const text = [`Deployment: ${data.name}`, `Status: ${statusNames[data.status] || data.status}`, ...(data.error ? [`Error: ${data.error}`] : []), '', ...(data.events || []).map(event => `${event.at || 'Time unavailable'} [${String(event.level || 'info').toUpperCase()}] ${event.message}`)].join('\n');
+      const session = state.session, epoch = state.routeEpoch;
+      logCopy.disabled = true; logCopy.dataset.copying = 'true';
       try {
-        if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
-        await navigator.clipboard.writeText(text);
-        notify('Deployment logs copied.');
-      } catch {
-        const range = document.createRange();
-        range.selectNodeContents(logBody);
-        const selection = window.getSelection();
-        selection?.removeAllRanges(); selection?.addRange(range);
-        logBody.focus({preventScroll: true});
-        notify('Logs selected. Use your browser’s Copy command to copy them.');
-      }
+        const copied = await copyText(text);
+        if (!logCopy.isConnected || state.session !== session || state.routeEpoch !== epoch) return;
+        if (copied) notify('Deployment logs copied.');
+        else {
+          if (!state.openLogs.has(data.id)) { notify('Automatic copying is blocked. Open the deployment logs and try again for manual copying.'); return; }
+          manualText.value = text; manualCopy.hidden = false;
+          manualText.focus({preventScroll: true}); manualText.select(); manualCopy.scrollIntoView({block: 'nearest'});
+          notify('Automatic copying is blocked. Use the selected log text below.');
+        }
+      } finally { delete logCopy.dataset.copying; if (logCopy.isConnected) logCopy.disabled = false; }
     }, 'copy');
     logCopy.id = 'deployment-log-copy'; logCopy.disabled = !data.events?.length;
-    const logContents = el('div', {id: 'deployment-log-contents'}, el('div', {class: 'log-toolbar'}, el('p', {}, 'Recorded events and installation-media diagnostics. Earlier releases may only have saved a summary; additional detail appears on a new attempt.'), logCopy), logBody);
+    const logContents = el('div', {id: 'deployment-log-contents'}, el('div', {class: 'log-toolbar'}, el('p', {}, 'Recorded events and installation-media diagnostics. Earlier releases may only have saved a summary; additional detail appears on a new attempt.'), logCopy), manualCopy, logBody);
     function setLogsOpen(open, focus = false) {
       if (open) state.openLogs.add(data.id); else state.openLogs.delete(data.id);
+      if (!open) { manualCopy.hidden = true; manualText.value = ''; }
       logContents.hidden = !open;
       logToggle.setAttribute('aria-expanded', String(open));
       logToggle.replaceChildren(icon('terminal'), open ? 'Hide logs' : 'View logs');
@@ -1572,8 +1651,9 @@
       const data = await api(`/api/deployments/${encodeURIComponent(id)}`);
       if (id !== state.detailId || epoch !== state.routeEpoch || revision !== state.historyRevision || state.visibilityBusy.has(id)) return;
       const selection = window.getSelection();
-      const selectingLogs = selection && !selection.isCollapsed && $('#deployment-logs')?.contains(selection.anchorNode);
-      if (JSON.stringify(data) !== JSON.stringify(state.detail) && !selectingLogs) { state.detail = data; renderDetail(data); }
+      const selectingLogs = state.openLogs.has(id) && selection && !selection.isCollapsed && $('#deployment-logs')?.contains(selection.anchorNode);
+      const copyingLogs = $('#deployment-log-copy')?.dataset.copying === 'true' || $('#deployment-log-manual-copy')?.hidden === false;
+      if (JSON.stringify(data) !== JSON.stringify(state.detail) && !selectingLogs && !copyingLogs) { state.detail = data; renderDetail(data); }
       if (manual) notify('Deployment details refreshed.');
     } catch (error) { if (manual || epoch === state.routeEpoch) globalError(error.message); }
   }
@@ -1614,7 +1694,7 @@
       state.wizard.fleetControls = null; state.wizard.fleetValidated = false;
       if (state.wizard.selected.has('fleetmanager') && state.wizard.step > 2) state.wizard.step = 2;
     }
-    else state.wizard = {step: 0, name: '', selected: new Set(['elasticsearch', 'kibana']), vms: {}, accepted: false, preflight: null, busy: true, error: ''};
+    else state.wizard = {step: 0, name: '', selected: new Set(), vms: {}, accepted: false, autoDeploy: false, preflight: null, busy: true, error: ''};
     dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), loading('Loading ESXi datastores and networks…')));
     dialog.showModal();
     const wizard = state.wizard;
@@ -1667,7 +1747,7 @@
   }
   function renderFleetConfiguration(content) {
     const wizard = state.wizard;
-    content.append(el('h3', {}, 'FleetManager configuration'), el('p', {class: 'muted'}, 'Choose how to install FleetManager, select an optional online version, and provide its community string, license, and repository token or offline packages. Saved values can be reused. Complete this step before running preflight.'));
+    content.append(el('h3', {}, 'FleetManager configuration'), el('p', {class: 'muted'}, 'Choose how to install FleetManager, select an online version from the repository, and provide its community string, license, and repository token or offline packages. Saved values can be reused. Complete this step before running preflight.'));
     if (!wizard.fleetControls) {
       wizard.fleetControls = createFleetManagerPanel(catalog => {
         if (state.wizard !== wizard) return;
@@ -1716,8 +1796,9 @@
     const actions = el('div', {class: 'wizard-footer-actions'});
     if (wizard.step > 0) actions.append(button('Back', 'button-ghost', () => { if (wizard.busy) return; wizard.step--; renderWizard(); }));
     else actions.append(button('Cancel', 'button-ghost', closeWizard));
-    const nextLabel = isFleetStep() ? 'Save & continue' : wizard.step < reviewStep ? 'Continue' : wizard.preflight?.ok ? `Deploy ${selectedRoles().length} ${selectedRoles().length === 1 ? 'VM' : 'VMs'}` : 'Run preflight';
+    const nextLabel = isFleetStep() ? 'Save & continue' : wizard.step < reviewStep ? 'Continue' : wizard.preflight?.ok ? `Deploy ${selectedRoles().length} ${selectedRoles().length === 1 ? 'VM' : 'VMs'}` : wizard.autoDeploy ? 'Run preflight & deploy' : 'Run preflight';
     const next = button(nextLabel, 'button-primary', wizardNext, wizard.step < reviewStep ? 'arrow' : wizard.preflight?.ok ? 'plus' : 'shield'); next.id = 'wizard-next';
+    next.disabled = wizard.busy || (wizard.step === 0 && !wizard.selected.size);
     if (wizard.busy) setBusy(next, wizard.preflight?.ok ? 'Queuing deployment…' : 'Checking prerequisites…');
     for (const action of actions.children) action.disabled = wizard.busy;
     actions.append(next); footer.append(actions);
@@ -1731,6 +1812,7 @@
     content.append(el('h3', {}, 'What are we deploying?'), el('p', {class: 'muted'}, 'Name your environment, then choose the software to provision. You can adjust every VM in the next step.'));
     const name = el('input', {id: 'deployment-name', type: 'text', value: wizard.name, required: true, maxlength: 63, pattern: '[a-z](?:(?:[a-z0-9]|-)*[a-z0-9])?', placeholder: 'e.g. observability-lab', autocomplete: 'off', spellcheck: 'false', onInput: event => {
       const previous = wizard.name;
+      if (wizard.busy) return;
       wizard.name = event.target.value; invalidatePreflight();
       for (const role of Object.keys(wizard.vms)) if (wizard.vms[role].name === defaultVMName(previous, role)) wizard.vms[role].name = defaultVMName(wizard.name, role);
     }});
@@ -1738,6 +1820,7 @@
     const grid = el('div', {class: 'role-grid'});
     for (const [role, config] of Object.entries(roles)) {
       const checkbox = el('input', {id: `role-${role}`, type: 'checkbox', checked: wizard.selected.has(role), 'aria-label': config.name, onChange: event => {
+        if (wizard.busy) return;
         if (event.target.checked) wizard.selected.add(role); else wizard.selected.delete(role);
         if (role === 'kibana' && event.target.checked) wizard.selected.add('elasticsearch');
         if (role === 'elasticsearch' && !event.target.checked) wizard.selected.delete('kibana');
@@ -1798,8 +1881,9 @@
       const installation = fleet.mode === 'offline' ? 'Offline .deb packages. Package installation uses only the supplied files and installed dependencies.' : 'Online vendor repository. The VM needs internet access; the repository remains configured for future updates. Version availability is checked on the VM during installation.';
       content.append(el('div', {class: 'wizard-callout', id: 'fleetmanager-review'}, icon('server'), el('span', {}, `FleetManager installation: ${installation} ${fleetManagerVersionSummary(fleet)} Saved community string and license are applied during installation.`)));
     }
-    if (wizard.selected.has('splunk')) content.append(el('div', {class: 'license-box'}, el('label', {class: 'check-label'}, el('input', {type: 'checkbox', checked: wizard.accepted, onChange: event => { wizard.accepted = event.target.checked; invalidatePreflight(); renderWizard(); }}), el('span', {}, 'I have reviewed and accept the Splunk license terms applicable to the supplied package, and I authorize unattended acceptance during installation.'))));
+    if (wizard.selected.has('splunk')) content.append(el('div', {class: 'license-box'}, el('label', {class: 'check-label'}, el('input', {type: 'checkbox', checked: wizard.accepted, disabled: wizard.busy, onChange: event => { if (wizard.busy) return; wizard.accepted = event.target.checked; invalidatePreflight(); renderWizard(); }}), el('span', {}, 'I have reviewed and accept the Splunk license terms applicable to the supplied package, and I authorize unattended acceptance during installation.'))));
     content.append(el('div', {class: 'wizard-callout'}, icon('key'), el('span', {}, 'Linux and application credentials are generated during provisioning. Reveal them from the Credentials panel on the deployment page.')));
+    content.append(el('div', {class: 'license-box'}, el('label', {class: 'check-label'}, el('input', {id: 'wizard-auto-deploy', type: 'checkbox', checked: wizard.autoDeploy, disabled: wizard.busy, onChange: event => { if (wizard.busy) return; wizard.autoDeploy = event.target.checked; invalidatePreflight(); renderWizard(); }}), el('span', {}, 'Start deployment automatically when preflight passes')), el('p', {class: 'media-help'}, 'When selected, Run preflight & deploy queues this deployment as soon as all checks pass. Failed checks stop the process.')));
     const preflight = el('div', {class: 'preflight-box'}, el('div', {class: 'preflight-title'}, el('h4', {}, 'Preflight checks'), el('span', {}, wizard.preflight ? wizard.preflight.ok ? 'All checks passed' : 'Resolve failed checks' : 'Not run yet')));
     if (wizard.preflight) {
       const checks = el('div', {}, (wizard.preflight.checks || []).map(check => {
@@ -1841,7 +1925,7 @@
     return null;
   }
   async function wizardNext() {
-    const wizard = state.wizard; if (!wizard || wizard.busy) return;
+    const wizard = state.wizard; if (!wizard || wizard.busy || !state.session || setupRequired()) return;
     wizard.error = ''; wizard.vmError = null;
     if (wizard.step === 0) {
       wizard.name = wizard.name.trim();
@@ -1873,22 +1957,28 @@
       wizard.step = 2; renderWizard(); return;
     }
     if (wizard.selected.has('splunk') && !wizard.accepted) { wizard.error = 'Accept the license terms for the supplied Splunk package before running preflight.'; renderWizard(); return; }
-    const deploy = Boolean(wizard.preflight?.ok);
+    const session = state.session, epoch = state.routeEpoch;
+    const currentRequest = () => state.wizard === wizard && state.session === session && state.routeEpoch === epoch && !wizard.suspended && $('#wizard-dialog').open;
+    const autoDeploy = wizard.autoDeploy;
+    let submitting = Boolean(wizard.preflight?.ok);
     const spec = getSpec();
     wizard.busy = true; renderWizard();
     try {
-      if (deploy) {
-        const result = await api('/api/deployments', {method: 'POST', body: spec});
-        wizard.busy = false; closeWizard();
-        notify('Deployment queued. Follow its progress here.');
-        goDetail(result.id);
-        return;
+      if (!submitting) {
+        const result = await api('/api/preflight', {method: 'POST', body: spec});
+        if (!currentRequest()) return;
+        wizard.preflight = result;
+        if (!result.ok) { wizard.error = 'Some checks need attention. Review the results below, update the configuration, and run preflight again.'; return; }
+        if (!autoDeploy) return;
+        submitting = true; renderWizard();
       }
-      const result = await api('/api/preflight', {method: 'POST', body: spec});
-      if (state.wizard !== wizard) return;
-      wizard.preflight = result;
-      if (!result.ok) wizard.error = 'Some checks need attention. Review the results below, update the configuration, and run preflight again.';
-    } catch (error) { wizard.error = error.message; if (deploy) wizard.preflight = null; }
+      if (!currentRequest()) return;
+      const result = await api('/api/deployments', {method: 'POST', body: spec});
+      if (!currentRequest()) return;
+      wizard.busy = false; closeWizard();
+      notify('Deployment queued. Follow its progress here.');
+      goDetail(result.id);
+    } catch (error) { if (currentRequest()) { wizard.error = error.message; if (submitting) wizard.preflight = null; } }
     finally { if (state.wizard === wizard) { wizard.busy = false; renderWizard(); $('#wizard-content')?.scrollTo({top: 0}); } }
   }
   async function poll() {

@@ -2081,6 +2081,25 @@ td {
   scrollbar-gutter:stable;
   user-select:text
 }
+.log-manual-copy {
+  padding:18px 20px;
+  border-bottom:1px solid var(--border)
+}
+.log-manual-copy>p {
+  color:var(--dim);
+  font-size:11px;
+  line-height:1.7;
+  margin:0 0 14px
+}
+.log-manual-copy textarea {
+  resize:vertical;
+  font-family:var(--font-mono,monospace);
+  font-size:11px;
+  line-height:1.6
+}
+.log-manual-copy>button {
+  margin-top:12px
+}
 .log-toolbar {
   padding:15px 20px;
   display:flex;

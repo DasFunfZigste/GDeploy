@@ -39,6 +39,14 @@ class FleetInstallError(Exception):
     """A safe, actionable installer error, containing no raw command arguments."""
 
 
+class RepositoryDownloadError(FleetInstallError):
+    """A redacted download failure with an optional HTTP status for safe fallback."""
+
+    def __init__(self, message, *, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def secret_values(snapshot):
     result = set()
     values = [snapshot.get(key) for key in ("community_string", "repository_token", "license_pem")]
@@ -233,10 +241,10 @@ class NoKeyRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _key_url_origin(url):
-    """Validate a signing-key URL without including it in an error message."""
+def _repository_url_origin(url, label):
+    """Validate a repository URL without including it in an error message."""
     if not isinstance(url, str) or not url or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url):
-        raise FleetInstallError("The Fleet Manager signing-key repository returned an invalid redirect address.")
+        raise RepositoryDownloadError(f"The Fleet Manager {label} repository returned an invalid redirect address.")
     try:
         parsed = urllib.parse.urlsplit(url)
         host = parsed.hostname
@@ -251,92 +259,126 @@ def _key_url_origin(url):
         ):
             raise ValueError
     except (ValueError, UnicodeError):
-        raise FleetInstallError(
-            "Fleet Manager signing-key downloads require a valid HTTPS address without embedded credentials."
+        raise RepositoryDownloadError(
+            f"Fleet Manager {label} downloads require a valid HTTPS address without embedded credentials."
         ) from None
     return parsed.scheme, host, port
 
 
-def download_signing_key(token):
-    """Retrieve the key over verified HTTPS, without exposing redirect secrets."""
-    current = REPOSITORY + "gpgkey"
-    original_origin = _key_url_origin(current)
+def download_repository_file(token, relative_path, *, max_bytes=1024 * 1024, timeout=60, resource="signing key"):
+    """Fetch a fixed-repository resource with bounded, credential-safe redirects.
+
+    Initial paths cannot choose a host, escape the repository, or contain a query.
+    HTTPS redirects chosen by the repository may contain signed query strings.
+    """
+    if not isinstance(resource, str) or resource not in {"signing key", "package metadata"}:
+        raise RepositoryDownloadError("Choose a supported Fleet Manager repository resource.")
+    if (
+        not isinstance(relative_path, str) or len(relative_path) > 1024
+        or not re.fullmatch(r"[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*", relative_path)
+        or any(part in {".", ".."} for part in relative_path.split("/"))
+    ):
+        raise RepositoryDownloadError("Choose a file within the configured Fleet Manager repository.")
+    if (
+        not isinstance(token, str) or not token or len(token) > 4096 or not token.isascii()
+        or not token.isprintable() or any(char.isspace() or char == ":" for char in token)
+    ):
+        raise RepositoryDownloadError("Enter a valid Fleet Manager customer repository token.")
+    if type(max_bytes) is not int or not 0 < max_bytes <= 32 * 1024 * 1024 or type(timeout) not in {int, float} or not 0 < timeout <= 60:
+        raise RepositoryDownloadError("Fleet Manager repository downloads require valid size and timeout limits.")
+    signing_key = resource == "signing key"
+    label = "signing-key" if signing_key else resource
+    network = "guest" if signing_key else "GDeploy host"
+    invalid_body = (
+        "The Fleet Manager repository returned an invalid signing key." if signing_key
+        else "The Fleet Manager repository returned empty or oversized package metadata."
+    )
+    current = REPOSITORY + relative_path
+    original_origin = _repository_url_origin(current, label)
     may_authenticate = True
     authorization = "Basic " + base64.b64encode((token + ":").encode()).decode()
     opener = urllib.request.build_opener(NoKeyRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-    deadline = time.monotonic() + 60
-    maximum_bytes = 1024 * 1024
+    deadline = time.monotonic() + timeout
     for hop in range(6):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise FleetInstallError("The Fleet Manager signing-key download timed out; check guest network access.")
+            raise RepositoryDownloadError(f"The Fleet Manager {label} download timed out; check {network} network access.")
         # Fresh requests avoid carrying cookies or credentials through redirects.
         request = urllib.request.Request(current, headers={"Authorization": authorization} if may_authenticate else {})
         try:
             with opener.open(request, timeout=remaining) as response:
                 if response.status != 200:
-                    raise FleetInstallError("The Fleet Manager signing-key server returned an unexpected response.")
+                    raise RepositoryDownloadError(f"The Fleet Manager {label} server returned an unexpected response.", status_code=response.status)
                 chunks = []
                 size = 0
                 while True:
                     if time.monotonic() >= deadline:
-                        raise FleetInstallError("The Fleet Manager signing-key download timed out; check guest network access.")
+                        raise RepositoryDownloadError(f"The Fleet Manager {label} download timed out; check {network} network access.")
                     # read1 performs at most one buffered/socket read, allowing a
                     # deadline check between chunks even when data trickles in.
-                    chunk = response.read1(min(64 * 1024, maximum_bytes + 1 - size))
+                    chunk = response.read1(min(64 * 1024, max_bytes + 1 - size))
                     if not chunk:
                         break
                     chunks.append(chunk)
                     size += len(chunk)
-                    if size > maximum_bytes:
-                        raise FleetInstallError("The Fleet Manager repository returned an invalid signing key.")
-                key = b"".join(chunks)
+                    if size > max_bytes:
+                        raise RepositoryDownloadError(invalid_body)
+                data = b"".join(chunks)
         except urllib.error.HTTPError as error:
             try:
                 if error.code in {301, 302, 303, 307, 308}:
                     if hop == 5:
-                        raise FleetInstallError("The Fleet Manager signing-key download exceeded its redirect limit; check the repository service.")
+                        raise RepositoryDownloadError(f"The Fleet Manager {label} download exceeded its redirect limit; check the repository service.")
                     location = error.headers.get("Location") if error.headers is not None else None
                     if not isinstance(location, str) or not location or any(
                         char.isspace() or ord(char) < 32 or ord(char) == 127 for char in location
                     ):
-                        raise FleetInstallError("The Fleet Manager signing-key repository returned an invalid redirect address.")
+                        raise RepositoryDownloadError(f"The Fleet Manager {label} repository returned an invalid redirect address.")
                     try:
                         if urllib.parse.urlsplit(location).scheme:
-                            _key_url_origin(location)
+                            _repository_url_origin(location, label)
                         target = urllib.parse.urljoin(current, location)
                     except (ValueError, UnicodeError):
-                        raise FleetInstallError("The Fleet Manager signing-key repository returned an invalid redirect address.") from None
-                    target_origin = _key_url_origin(target)
+                        raise RepositoryDownloadError(f"The Fleet Manager {label} repository returned an invalid redirect address.") from None
+                    target_origin = _repository_url_origin(target, label)
                     # Once the repository delegates to another origin, never
                     # restore its credential, even if a later hop returns there.
                     may_authenticate = may_authenticate and target_origin == original_origin
                     current = target
                     continue
                 if error.code == 401 and hop == 0:
-                    raise FleetInstallError(
-                        "The Fleet Manager repository rejected authentication (HTTP 401); "
+                    advice = (
                         "check the saved customer repository token and repository entitlement, then save it before creating a new deployment."
+                        if signing_key else "check the customer repository token and repository entitlement."
+                    )
+                    raise RepositoryDownloadError(
+                        "The Fleet Manager repository rejected authentication (HTTP 401); "
+                        + advice, status_code=error.code,
                     ) from None
                 if hop:
-                    raise FleetInstallError(
-                        f"The redirected Fleet Manager signing-key download failed (HTTP {error.code}); "
-                        "check repository access or contact Corelight support."
+                    raise RepositoryDownloadError(
+                        f"The redirected Fleet Manager {label} download failed (HTTP {error.code}); "
+                        "check repository access or contact Corelight support.", status_code=error.code,
                     ) from None
-                raise FleetInstallError(
-                    f"Could not download the Fleet Manager signing key (HTTP {error.code}); "
-                    "check the customer repository token and repository access."
+                raise RepositoryDownloadError(
+                    f"Could not download the Fleet Manager {resource} (HTTP {error.code}); "
+                    "check the customer repository token and repository access.", status_code=error.code,
                 ) from None
             finally:
                 error.close()
         except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError, UnicodeError):
-            raise FleetInstallError(
-                "Could not download the Fleet Manager signing key over verified TLS; "
-                "check guest network access and trusted CA certificates."
+            raise RepositoryDownloadError(
+                f"Could not download the Fleet Manager {resource} over verified TLS; "
+                f"check {network} network access and trusted CA certificates."
             ) from None
-        if not key:
-            raise FleetInstallError("The Fleet Manager repository returned an invalid signing key.")
-        return key
+        if not data:
+            raise RepositoryDownloadError(invalid_body)
+        return data
+
+
+def download_signing_key(token):
+    """Retrieve the key over verified HTTPS, without exposing redirect secrets."""
+    return download_repository_file(token, "gpgkey")
 
 
 def configure_online_repository(snapshot):

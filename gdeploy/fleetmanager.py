@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -124,6 +125,7 @@ class FleetManager:
         self.server_dir = config.ubuntu_iso.parent.resolve()
         self.upload_dir = config.data_dir.resolve() / "fleetmanager-packages"
         self._server_cache = {}
+        self._version_lookup_lock = threading.Lock()
 
     @staticmethod
     def _server_id(path):
@@ -261,6 +263,23 @@ class FleetManager:
 
     def selected(self):
         return self.db.fleetmanager_settings()
+
+    def repository_versions(self, repository_token=""):
+        from .fleet_repository import FleetRepositoryError, available_versions
+
+        token = repository_token or (self.selected() or {}).get("repository_token", "")
+        if not token:
+            raise FleetManagerError("Enter a Fleet Manager repository token to load available versions. You can load versions before saving Setup.")
+        if not isinstance(token, str) or len(token) > 4096 or not token.isascii() or not token.isprintable() or any(char.isspace() or char == ":" for char in token):
+            raise FleetManagerError("The repository token must contain at most 4096 ASCII characters without whitespace, controls or colons.")
+        if not self._version_lookup_lock.acquire(blocking=False):
+            raise FleetManagerError("A Fleet Manager version lookup is already running. Wait for it to finish, then try again.", 409)
+        try:
+            return {"versions": available_versions(token)}
+        except FleetRepositoryError as error:
+            raise FleetManagerError(str(error), 502) from None
+        finally:
+            self._version_lookup_lock.release()
 
     def validate_snapshot(self, snapshot):
         if snapshot is None:

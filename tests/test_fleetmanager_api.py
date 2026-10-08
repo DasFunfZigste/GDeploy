@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from gdeploy.main import create_app
+from gdeploy.fleet_repository import FleetRepositoryError
 from test_fleetmanager import fake_metadata, license_pem, package_bytes
 
 
@@ -12,6 +13,7 @@ ENDPOINT = "/api/settings/fleetmanager"
 ENDPOINTS = [
     ("GET", ENDPOINT), ("PUT", ENDPOINT), ("DELETE", ENDPOINT),
     ("POST", ENDPOINT + "/packages/upload?filename=fleet.deb"),
+    ("POST", ENDPOINT + "/versions"),
     ("DELETE", ENDPOINT + "/packages/upload_" + "0" * 32),
 ]
 
@@ -175,3 +177,84 @@ def test_startup_recovers_partial_uploads_but_retains_registered_files(signed_in
     with signed_in.app.state.db.connect() as connection:
         audit = json.dumps([tuple(row) for row in connection.execute("SELECT * FROM audit")])
     assert "PRIVATE KEY" not in audit and "private-community" not in audit
+
+
+def test_version_lookup_uses_unsaved_draft_token_without_requiring_or_saving_fleet_setup(signed_in, monkeypatch):
+    calls = []
+
+    def versions(token):
+        calls.append(token)
+        return ["1:30.0-1", "29.2.2-1"]
+
+    monkeypatch.setattr("gdeploy.fleet_repository.available_versions", versions)
+    response = signed_in.post(ENDPOINT + "/versions", json={"repository_token": "draft-only-token"})
+    assert response.status_code == 200 and response.json() == {"versions": ["1:30.0-1", "29.2.2-1"]}
+    assert calls == ["draft-only-token"]
+    assert signed_in.app.state.db.fleetmanager_settings() is None
+    assert "draft-only-token" not in response.text
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("request_values", [{}, {"repository_token": ""}, {"repository_token": "draft-only-token"}])
+def test_version_lookup_uses_saved_or_draft_token_without_changing_any_saved_value(signed_in, monkeypatch, request_values):
+    original = {**payload(), "online_version": "29.2.2-1"}
+    saved = signed_in.put(ENDPOINT, json=original).json()
+    snapshot = signed_in.app.state.db.fleetmanager_settings()
+    calls = []
+
+    def versions(token):
+        calls.append(token)
+        return ["30.0-1", "29.2.2-1"]
+
+    monkeypatch.setattr("gdeploy.fleet_repository.available_versions", versions)
+    response = signed_in.post(ENDPOINT + "/versions", json=request_values)
+    assert response.status_code == 200
+    assert calls == [request_values.get("repository_token") or original["repository_token"]]
+    assert signed_in.app.state.db.fleetmanager_settings() == snapshot
+    assert signed_in.get(ENDPOINT).json() == saved
+
+
+def test_version_lookup_errors_preserve_settings_and_allow_retry(signed_in, monkeypatch):
+    signed_in.put(ENDPOINT, json=payload())
+    before = signed_in.app.state.db.fleetmanager_settings()
+
+    def fail(token):
+        raise FleetRepositoryError("Repository access failed; check your token and entitlement.")
+
+    monkeypatch.setattr("gdeploy.fleet_repository.available_versions", fail)
+    response = signed_in.post(ENDPOINT + "/versions", json={"repository_token": "draft-only-token"})
+    assert response.status_code == 502 and "check your token" in response.json()["detail"]
+    assert "draft-only-token" not in response.text and before["repository_token"] not in response.text
+    assert signed_in.app.state.db.fleetmanager_settings() == before
+    monkeypatch.setattr("gdeploy.fleet_repository.available_versions", lambda token: ["29.2.2-1"])
+    assert signed_in.post(ENDPOINT + "/versions", json={}).status_code == 200
+
+
+def test_version_lookup_requires_token_and_rejects_parallel_lookup_without_network(signed_in, monkeypatch):
+    monkeypatch.setattr("gdeploy.fleet_repository.available_versions", lambda token: pytest.fail("Lookup must not run"))
+    missing = signed_in.post(ENDPOINT + "/versions", json={})
+    assert missing.status_code == 400 and "Enter a Fleet Manager repository token" in missing.json()["detail"]
+    manager = signed_in.app.state.fleetmanager
+    assert manager._version_lookup_lock.acquire(blocking=False)
+    try:
+        busy = signed_in.post(ENDPOINT + "/versions", json={"repository_token": "draft-token"})
+        assert busy.status_code == 409 and "already running" in busy.json()["detail"]
+    finally:
+        manager._version_lookup_lock.release()
+
+
+@pytest.mark.parametrize("token", [None, 1, True, [], "private token", "private:token", "private\nvalue", "privateé", "x" * 4097])
+def test_version_lookup_token_validation_never_echoes_values_or_calls_repository(signed_in, monkeypatch, token):
+    monkeypatch.setattr("gdeploy.fleet_repository.available_versions", lambda token: pytest.fail("Lookup must not run"))
+    response = signed_in.post(ENDPOINT + "/versions", json={"repository_token": token})
+    assert response.status_code == 422
+    if isinstance(token, str):
+        assert token not in response.text
+    assert signed_in.app.state.db.fleetmanager_settings() is None
+
+
+def test_version_lookup_does_not_accept_custom_repository_urls(signed_in, monkeypatch):
+    monkeypatch.setattr("gdeploy.fleet_repository.available_versions", lambda token: pytest.fail("Lookup must not run"))
+    response = signed_in.post(ENDPOINT + "/versions", json={"repository_token": "draft-token", "url": "https://example.test/private"})
+    assert response.status_code == 422
+    assert "example.test" not in response.text and "draft-token" not in response.text

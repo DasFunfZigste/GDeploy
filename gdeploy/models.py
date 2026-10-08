@@ -119,6 +119,18 @@ class FleetManagerSettings(StrictModel):
         return self
 
 
+class FleetManagerVersionLookup(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False, strict=True)
+    repository_token: str = Field(default="", max_length=4096)
+
+    @field_validator("repository_token")
+    @classmethod
+    def validate_token(cls, value):
+        if value and (not value.isascii() or not value.isprintable() or any(char.isspace() or char == ":" for char in value)):
+            raise ValueError("The repository token must contain ASCII characters without whitespace, controls or colons.")
+        return value
+
+
 class VMSpec(StrictModel):
     role: Literal["ubuntu", "splunk", "elasticsearch", "kibana", "fleetmanager"]
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$")

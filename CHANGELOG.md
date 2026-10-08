@@ -4,6 +4,24 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-08
+
+### Added
+
+- Choose FleetManager online versions from a repository-backed dropdown in Setup and the deployment wizard. Use the entered token or saved token to load available `corelight-fleet` versions before preflight; the lookup does not save draft credentials. Keep **Latest available** as an option and preserve existing saved version choices when a lookup fails. Offline mode uses the selected `.deb` package version.
+- Add an optional **Start deployment automatically when preflight passes** checkbox to review. With this option selected, explicitly running preflight queues the deployment when all checks pass, without another confirmation. It starts unchecked for each new job. Failed checks stop the flow, and server-side checks still run before queueing.
+
+### Fixed
+
+- Start each new deployment with no software roles selected. Select the desired roles before continuing; explicitly choosing Kibana still includes its required Elasticsearch VM. Back navigation and returning from Setup retain intentional choices.
+- Make **Copy logs** work on LAN HTTP through a browser-compatible copy fallback. Report success only when a copy operation succeeds; if the browser blocks copying, provide the full formatted logs for manual copying.
+
+### Installation and compatibility
+
+- From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the data volume, encryption key, environment files, credentials, licenses and media. No database migration is required, and existing queued jobs keep their captured settings.
+- Version discovery requires outbound HTTPS from the GDeploy container to Corelight's repository and its metadata download destinations, using the customer's repository entitlement. A displayed version is not proof of guest compatibility or installability; the guest still verifies signed repository data and installs the exact chosen version. The guest's existing repository/network requirements continue to apply.
+- Automated tests use synthetic repository data and local TLS servers. Live Corelight repository listings and licensed installations remain lab acceptance checks.
+
 ## [0.10.1] - 2026-10-07
 
 ### Fixed

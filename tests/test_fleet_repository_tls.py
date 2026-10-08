@@ -237,3 +237,30 @@ def test_real_redirect_loop_is_bounded_without_urllib_automatic_redirects(identi
         assert "redirect" in assert_safe_error(caught.value, origin.url).lower()
         assert 1 <= len(origin.requests) <= 6
         assert all(request.correct_authorization for request in origin.requests)
+
+
+def test_metadata_fetch_uses_same_verified_redirect_and_auth_rules(identities, monkeypatch):
+    relative = "any/dists/any/main/binary-amd64/Packages.gz"
+    path = "/corelight/fleet-stable/" + relative
+    body = b"synthetic compressed package index"
+    with repository_server(identities()) as origin, repository_server(identities()) as cdn:
+        use_repository(monkeypatch, origin)
+        origin.routes[path] = (302, {"Location": cdn.url + SIGNED_PATH, "Set-Cookie": "private-cookie"}, b"")
+        cdn.routes[SIGNED_PATH] = (200, {}, body)
+        assert fleet.download_repository_file(
+            TOKEN, relative, max_bytes=8 * 1024 * 1024, timeout=30, resource="package metadata",
+        ) == body
+        assert origin.requests[0].correct_authorization
+        assert cdn.requests[0].path == SIGNED_PATH
+        assert not cdn.requests[0].authorization_present and not cdn.requests[0].cookie_present
+
+
+def test_metadata_404_preserves_status_for_compression_fallback_without_response_content(identities, monkeypatch):
+    with repository_server(identities()) as origin:
+        use_repository(monkeypatch, origin)
+        origin.routes["/corelight/fleet-stable/Packages.gz"] = (404, {}, b"synthetic-server-body " + TOKEN.encode())
+        with pytest.raises(fleet.RepositoryDownloadError) as caught:
+            fleet.download_repository_file(TOKEN, "Packages.gz", resource="package metadata")
+        assert caught.value.status_code == 404
+        assert "package metadata" in assert_safe_error(caught.value, origin.url)
+        assert origin.requests[0].correct_authorization
