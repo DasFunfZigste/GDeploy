@@ -4,9 +4,9 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const page = $('#page');
   const state = {
-    session: null, settings: null, inventory: null, deployments: [], detail: null,
-    route: 'deployments', detailId: null, routeEpoch: 0, pollBusy: false,
-    search: '', filter: 'all', includeHidden: false, historyRevision: 0, visibilityBusy: new Set(), wizard: null, secrets: null, secretTimer: null,
+    session: null, settings: null, inventory: null, inventoryHost: null, deployments: [], detail: null, detailPending: null,
+    route: 'deployments', detailId: null, detailRequest: 0, routeEpoch: 0, pollBusy: false,
+    search: '', filter: 'all', includeHidden: false, historyRevision: 0, visibilityBusy: new Set(), stopBusy: new Set(), wizard: null, secrets: null, secretTimer: null,
     secretDeadline: 0, secretRequest: 0, toastTimer: null,
     setupBusy: false, mediaUpload: null, setupTab: null, packageTab: 'splunk', openLogs: new Set(),
   };
@@ -19,10 +19,11 @@
   };
   const stageOrder = ['queued', 'preflight', 'preparing', 'creating', 'installing_os', 'installing_software', 'verifying', 'completed'];
   const stageNames = {queued: 'Waiting in queue', preflight: 'Checking prerequisites', preparing: 'Preparing installation media', creating: 'Creating virtual machines', installing_os: 'Install operating system', installing_software: 'Installing software', verifying: 'Verifying services', completed: 'Ready to use', failed: 'Deployment failed', interrupted: 'Deployment interrupted', cleaning: 'Removing deployment resources', cleanup_failed: 'Cleanup needs attention', reverted: 'Resources removed'};
-  const statusNames = {queued: 'Queued', running: 'In progress', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', cleaning: 'Cleaning up', cleanup_failed: 'Cleanup failed', reverted: 'Reverted'};
+  const statusNames = {queued: 'Queued', running: 'In progress', stopping: 'Stopping', stopped: 'Stopped', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', cleaning: 'Cleaning up', cleanup_failed: 'Cleanup failed', reverted: 'Reverted'};
   const failureStatuses = new Set(['failed', 'interrupted', 'cleanup_failed']);
-  const busyStatuses = new Set(['queued', 'running', 'cleaning']);
-  const hideableStatuses = new Set(['completed', 'failed', 'interrupted', 'cleanup_failed', 'reverted']);
+  const busyStatuses = new Set(['queued', 'running', 'stopping', 'cleaning']);
+  const stoppableStatuses = new Set(['queued', 'running']);
+  const hideableStatuses = new Set(['completed', 'failed', 'interrupted', 'cleanup_failed', 'reverted', 'stopped']);
   const icons = {
     plus: [['path', {d: 'M12 5v14M5 12h14'}]],
     arrow: [['path', {d: 'M5 12h14M13 6l6 6-6 6'}]],
@@ -81,6 +82,7 @@
   const loading = label => el('div', {class: 'loading-block', role: 'status'}, spinner(), label);
   const roleIcon = role => el('span', {class: 'role-icon'}, icon((roles[role] || roles.ubuntu).icon));
   const roleName = role => (roles[role] || {name: role || 'Virtual machine'}).name;
+  const endpointIdentity = value => String(value || '').trim().toLowerCase();
   const roleLimits = role => ({cpu: roles[role]?.minCpu || 1, ram: roles[role]?.minRam || ({ubuntu: 2, elasticsearch: 8, kibana: 4, splunk: 4})[role] || 2, disk: roles[role]?.minDisk || 25});
   function statusBadge(status) {
     const known = Object.hasOwn(statusNames, status);
@@ -199,11 +201,14 @@
     state.setupTab = null;
     state.packageTab = 'splunk';
     state.inventory = null;
+    state.inventoryHost = null;
     state.deployments = [];
     state.includeHidden = false;
     state.historyRevision++;
     state.visibilityBusy.clear();
+    state.stopBusy.clear();
     state.detail = null;
+    state.detailPending = null;
     state.detailId = null;
     state.openLogs.clear();
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
@@ -275,6 +280,7 @@
     globalError('');
     hideCredentials();
     state.detail = null;
+    state.detailPending = null;
     state.detailId = null;
     page.replaceChildren(loading('Loading your workspace…'));
     const hash = location.hash.slice(1);
@@ -287,6 +293,7 @@
         const settings = await api('/api/settings');
         if (epoch !== state.routeEpoch) return;
         state.settings = settings;
+        if (endpointIdentity(state.inventoryHost) !== endpointIdentity(settings.host)) { state.inventory = null; state.inventoryHost = null; }
         state.setupTab = setupRoute[1] || (settings.configured && !settings.iso_configured ? 'media' : 'connection');
         if (state.setupTab === 'packages') state.packageTab = setupRoute[2] || 'splunk';
         renderSettings();
@@ -298,8 +305,9 @@
       try {
         const id = decodeURIComponent(hash.slice('deployment/'.length));
         state.detailId = id;
+        const request = ++state.detailRequest;
         const data = await api(`/api/deployments/${encodeURIComponent(id)}`);
-        if (epoch !== state.routeEpoch) return;
+        if (epoch !== state.routeEpoch || request !== state.detailRequest) return;
         state.detail = data;
         renderDetail(data);
       } catch (error) { if (epoch === state.routeEpoch) renderLoadError(error, route); }
@@ -325,6 +333,52 @@
     return el('div', {class: 'page-heading'}, el('div', {}, el('h1', {}, title), el('p', {}, description)), action);
   }
   function deploymentListPath() { return `/api/deployments${state.includeHidden ? '?include_hidden=true' : ''}`; }
+  function stopButton(data, compact = false) {
+    if (!stoppableStatuses.has(data.status) && data.status !== 'stopping') return null;
+    const control = button(data.status === 'stopping' ? 'Stopping…' : compact ? 'Stop' : 'Stop deployment', `button-small ${compact ? 'button-ghost' : 'button-full'}`, () => openStopDeployment(data), 'close');
+    control.id = `deployment-stop-${data.id}`;
+    control.disabled = data.status === 'stopping' || state.stopBusy.has(data.id);
+    control.setAttribute('aria-label', data.status === 'stopping' ? `Stopping ${data.name}` : `Stop ${data.name}`);
+    return control;
+  }
+  function openStopDeployment(data) {
+    const currentData = () => state.detailId === data.id ? state.detailPending || state.detail || data : state.deployments.find(row => row.id === data.id) || data;
+    if (!state.session || state.stopBusy.has(data.id) || !stoppableStatuses.has(currentData().status)) return;
+    const session = state.session, epoch = state.routeEpoch;
+    const dialog = $('#confirm-dialog'), errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
+    const currentView = () => state.session === session && state.routeEpoch === epoch && dialog.open && dialog.contains(confirm);
+    const dismiss = button('Keep deploying', '', () => dialog.close());
+    const confirm = button('Stop deployment', 'button-primary', async () => {
+      if (!currentView() || state.stopBusy.has(data.id)) return;
+      if (!stoppableStatuses.has(currentData().status)) { inlineError(errorBox, 'This deployment is no longer queued or running. Close this dialog to see its current status.'); confirm.disabled = true; return; }
+      state.stopBusy.add(data.id); state.historyRevision++;
+      const existingStop = document.getElementById(`deployment-stop-${data.id}`); if (existingStop) existingStop.disabled = true;
+      dialog.dataset.busy = 'true'; dismiss.disabled = true; setBusy(confirm, 'Requesting stop…'); inlineError(errorBox, '');
+      try {
+        const updated = await api(`/api/deployments/${encodeURIComponent(data.id)}/stop`, {method: 'POST'});
+        if (!currentView()) return;
+        state.stopBusy.delete(data.id); state.historyRevision++;
+        dialog.close();
+        const row = {...updated}; delete row.events;
+        state.deployments = state.deployments.map(item => item.id === data.id ? row : item);
+        if (state.route === 'detail' && state.detailId === data.id) applyDetailUpdate(updated);
+        else if (state.route === 'deployments') renderOverview();
+        notify(updated.status === 'stopped' ? 'Deployment stopped. Existing VMs and disks are preserved.' : 'Stop requested. GDeploy is waiting for the current operation to finish.');
+      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
+      finally {
+        if (state.session === session) { state.stopBusy.delete(data.id); state.historyRevision++; }
+        if (dialog.contains(confirm)) { delete dialog.dataset.busy; dismiss.disabled = false; confirm.disabled = false; confirm.replaceChildren('Stop deployment'); }
+        if (state.session === session && state.routeEpoch === epoch) {
+          const control = document.getElementById(`deployment-stop-${data.id}`);
+          if (control) { const replacement = stopButton(currentData(), control.classList.contains('button-ghost')); if (replacement) control.replaceWith(replacement); else control.remove(); }
+        }
+        if (state.session === session && state.routeEpoch === epoch && state.route === 'detail') refreshDetail();
+      }
+    }, 'close');
+    confirm.id = 'deployment-stop-confirm';
+    dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('info'), el('h2', {id: 'confirm-title'}, 'Stop this deployment?')), el('div', {class: 'confirm-body'}, el('p', {}, 'Stop GDeploy’s automation for ', el('strong', {}, data.name), '. Existing VMs, disks, and data stay in place.'), el('p', {}, 'This does not power off VMs or undo work already started. An installation already running inside a VM may continue. GDeploy may finish its current operation before marking this deployment Stopped.'), el('p', {}, 'A stopped deployment cannot be resumed. Delete & redeploy remains a separate action that permanently removes its VMs and disks.'), errorBox, el('div', {class: 'confirm-actions'}, dismiss, confirm)));
+    dialog.showModal(); dismiss.focus();
+  }
   function visibilityButton(data, compact = false) {
     const hidden = Boolean(data.hidden_at);
     const control = button(hidden ? compact ? 'Restore' : 'Restore to history' : compact ? 'Hide' : 'Hide from history', `button-small ${compact ? 'button-ghost' : 'button-full'}`, () => setDeploymentVisibility(data, !hidden, control));
@@ -377,9 +431,9 @@
     const completed = rows.filter(row => row.status === 'completed').length;
     const failures = rows.filter(row => failureStatuses.has(row.status)).length;
     const metric = (title, value, foot, symbol, extra = '') => el('div', {class: `metric ${extra}`}, el('div', {class: 'metric-top'}, title, icon(symbol)), el('div', {class: 'metric-value'}, value), el('div', {class: 'metric-foot'}, foot));
-    const metrics = el('div', {class: 'metrics'}, metric('Total deployments', rows.length, state.includeHidden ? 'Including hidden runs' : 'Visible deployment runs', 'grid'), metric('Ready to use', completed, 'Successfully provisioned', 'checkCircle', 'success'), metric('In progress', active, 'Queued, running, or cleaning', 'activity'), metric('Needs attention', failures, 'Review errors and logs', 'alert', failures ? 'warning' : ''));
+    const metrics = el('div', {class: 'metrics'}, metric('Total deployments', rows.length, state.includeHidden ? 'Including hidden runs' : 'Visible deployment runs', 'grid'), metric('Ready to use', completed, 'Successfully provisioned', 'checkCircle', 'success'), metric('In progress', active, 'Queued, running, stopping, or cleaning', 'activity'), metric('Needs attention', failures, 'Review errors and logs', 'alert', failures ? 'warning' : ''));
     const search = el('input', {class: 'search-field', type: 'search', placeholder: 'Search deployments…', 'aria-label': 'Search deployments', value: state.search, onInput: event => { state.search = event.target.value; renderDeploymentRows(); }});
-    const filter = el('select', {class: 'filter-select', 'aria-label': 'Filter by deployment status', onChange: event => { state.filter = event.target.value; renderDeploymentRows(); }}, el('option', {value: 'all'}, 'All statuses'), el('option', {value: 'active'}, 'In progress'), el('option', {value: 'completed'}, 'Completed'), el('option', {value: 'attention'}, 'Needs attention'), el('option', {value: 'reverted'}, 'Reverted'));
+    const filter = el('select', {class: 'filter-select', 'aria-label': 'Filter by deployment status', onChange: event => { state.filter = event.target.value; renderDeploymentRows(); }}, el('option', {value: 'all'}, 'All statuses'), el('option', {value: 'active'}, 'In progress'), el('option', {value: 'completed'}, 'Completed'), el('option', {value: 'attention'}, 'Needs attention'), el('option', {value: 'stopped'}, 'Stopped'), el('option', {value: 'reverted'}, 'Reverted'));
     filter.value = state.filter;
     const showHidden = el('label', {class: 'check-label history-hidden-filter'}, el('input', {id: 'history-show-hidden', type: 'checkbox', checked: state.includeHidden, onChange: async event => {
       state.includeHidden = event.target.checked; state.historyRevision++;
@@ -404,7 +458,7 @@
     const body = el('tbody');
     for (const row of rows) {
       const vmRows = row.vms || [];
-      body.append(el('tr', {}, el('td', {}, el('a', {class: 'deployment-name', href: `#deployment/${encodeURIComponent(row.id)}`}, row.name), row.hidden_at ? el('span', {class: 'history-hidden-badge'}, 'Hidden') : null, el('div', {class: 'subline'}, vmRows.map(vm => (roles[vm.role] || {short: vm.role}).short).join(' · ') || 'OS deployment')), el('td', {}, statusBadge(row.status)), el('td', {}, `${vmRows.length} ${vmRows.length === 1 ? 'VM' : 'VMs'}`, el('div', {class: 'subline'}, `${vmRows.reduce((n, vm) => n + Number(vm.cpu || 0), 0)} vCPU · ${vmRows.reduce((n, vm) => n + Number(vm.ram_gb || 0), 0)} GB RAM`)), el('td', {}, el('time', {datetime: row.created_at || ''}, date(row.created_at, true))), el('td', {}, el('div', {class: 'history-row-actions'}, visibilityButton(row, true), el('a', {class: 'table-arrow', href: `#deployment/${encodeURIComponent(row.id)}`, 'aria-label': `View ${row.name}`}, icon('arrow'))))));
+      body.append(el('tr', {}, el('td', {}, el('a', {class: 'deployment-name', href: `#deployment/${encodeURIComponent(row.id)}`}, row.name), row.hidden_at ? el('span', {class: 'history-hidden-badge'}, 'Hidden') : null, el('div', {class: 'subline'}, vmRows.map(vm => (roles[vm.role] || {short: vm.role}).short).join(' · ') || 'OS deployment')), el('td', {}, statusBadge(row.status)), el('td', {}, `${vmRows.length} ${vmRows.length === 1 ? 'VM' : 'VMs'}`, el('div', {class: 'subline'}, `${vmRows.reduce((n, vm) => n + Number(vm.cpu || 0), 0)} vCPU · ${vmRows.reduce((n, vm) => n + Number(vm.ram_gb || 0), 0)} GB RAM`)), el('td', {}, el('time', {datetime: row.created_at || ''}, date(row.created_at, true))), el('td', {}, el('div', {class: 'history-row-actions'}, stopButton(row, true), visibilityButton(row, true), el('a', {class: 'table-arrow', href: `#deployment/${encodeURIComponent(row.id)}`, 'aria-label': `View ${row.name}`}, icon('arrow'))))));
     }
     container.replaceChildren(el('div', {class: 'table-scroll'}, el('table', {}, el('thead', {}, el('tr', {}, ...['Deployment', 'Status', 'Resources', 'Created', 'Actions'].map(text => el('th', {scope: 'col'}, text)))), body)));
   }
@@ -1218,6 +1272,8 @@
     let certificateRequest = 0;
     let certificateBusy = '';
     let connectionBusy = '';
+    let defaultsBusy = '', defaultsEdited = false, defaultDraft = '';
+    let deploymentDefaults = settings.deployment_defaults || {host: settings.host || null, default_network: null, applies_to_host: true};
     let mediaBusy = false;
     let mediaControls = null;
     let sshBusy = false;
@@ -1232,6 +1288,44 @@
     let removeButton = null;
     let comparison = null;
     const currentView = () => form.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const connectionInventory = () => state.inventory && hostKey(state.inventoryHost) === hostKey(settings.host) ? state.inventory : null;
+    const defaultsApply = () => deploymentDefaults.applies_to_host === true;
+    const defaultNetwork = el('select', {id: 'deployment-default-network', 'aria-describedby': 'deployment-default-network-help', onChange: () => { defaultsEdited = true; defaultDraft = defaultNetwork.value; defaultsSuccess.hidden = true; inlineError(defaultsError, ''); syncControls(); }});
+    const defaultNetworkHelp = el('small', {id: 'deployment-default-network-help'});
+    const defaultsStatus = el('p', {id: 'deployment-default-status', class: 'media-help'});
+    const defaultsWarning = el('div', {id: 'deployment-default-warning', class: 'alert alert-warning', role: 'status', hidden: true});
+    const defaultsError = el('div', {id: 'deployment-default-error', class: 'alert alert-error', role: 'alert', hidden: true});
+    const defaultsSuccess = el('div', {id: 'deployment-default-success', class: 'alert alert-success', role: 'status', hidden: true});
+    const saveDefault = button('Save default', 'button-primary button-small', () => saveDeploymentDefault(false), 'check'); saveDefault.id = 'deployment-default-save';
+    const clearDefault = button('Clear default', 'button-small button-ghost', () => saveDeploymentDefault(true)); clearDefault.id = 'deployment-default-clear';
+    const defaultsPanel = el('section', {id: 'deployment-defaults-panel', class: 'surface'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {}, 'Deployment defaults'), el('p', {}, 'Choose the port group used for new VM configurations. Each VM can still use a different port group.'))), el('div', {class: 'form-body'}, defaultsStatus, defaultsWarning, defaultsError, defaultsSuccess, field('Default port group', defaultNetwork, defaultNetworkHelp)), el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Existing jobs and VM choices in your current draft stay unchanged.'), el('div', {class: 'defaults-actions'}, clearDefault, saveDefault)));
+    function renderNetworkDefaults() {
+      const inventory = connectionInventory(), saved = deploymentDefaults.default_network || '';
+      const networks = (inventory?.networks || []).map(item => item.name);
+      const count = name => networks.filter(item => item === name).length;
+      const chosen = defaultsEdited ? defaultDraft : defaultsApply() ? saved : '';
+      defaultNetwork.replaceChildren(el('option', {value: ''}, inventory ? 'Choose a default port group' : 'Test connection to load port groups'), ...[...new Set(networks)].map(name => el('option', {value: name, disabled: count(name) !== 1}, count(name) === 1 ? name : `${name} · ambiguous name`)));
+      defaultNetwork.value = count(chosen) === 1 ? chosen : '';
+      defaultsStatus.textContent = saved ? `Saved default: ${saved} · ESXi host: ${deploymentDefaults.host || 'unavailable'}` : 'No default saved. New VMs require an explicit port group selection.';
+      defaultNetworkHelp.textContent = !settings.configured ? 'Save your ESXi connection first, then test it to load port groups.' : !inventory ? 'Test the saved connection above to load its available port groups.' : 'This default is tied to the saved ESXi host and is checked again when you create a deployment.';
+      const warning = saved && !defaultsApply() ? 'This default belongs to a different ESXi host. Choose a port group on the current host and save a new default, or clear the saved default.' : saved && inventory && count(saved) > 1 ? 'The saved default port group name is ambiguous on this ESXi host. Choose a group with a unique name or clear the default.' : saved && inventory && !networks.includes(saved) ? 'The saved default port group is not available on this ESXi host. Choose another port group or clear the default. New VMs will require a selection.' : chosen && inventory && count(chosen) !== 1 ? 'Your selected port group is unavailable or ambiguous. Choose a port group with a unique name from the refreshed list.' : '';
+      inlineError(defaultsWarning, warning);
+    }
+    async function saveDeploymentDefault(clear) {
+      if (!currentView() || defaultsBusy || (clear ? clearDefault.disabled : saveDefault.disabled)) return;
+      const session = state.session, expectedHost = settings.host, selected = defaultNetwork.value;
+      defaultsBusy = clear ? 'clear' : 'save'; inlineError(defaultsError, ''); defaultsSuccess.hidden = true;
+      setBusy(clear ? clearDefault : saveDefault, clear ? 'Clearing…' : 'Saving…'); syncControls();
+      try {
+        const next = await api('/api/settings/deployment-defaults', clear ? {method: 'DELETE'} : {method: 'PUT', body: {host: expectedHost, default_network: selected}});
+        if (!currentView() || state.session !== session || hostKey(state.settings?.host) !== hostKey(expectedHost)) return;
+        deploymentDefaults = next; settings.deployment_defaults = next; state.settings.deployment_defaults = next; defaultsEdited = false;
+        renderNetworkDefaults(); invalidatePreflight();
+        defaultsSuccess.textContent = clear ? 'Default cleared. Choose a port group for each new VM.' : 'Default port group saved. It applies to new VM configurations; existing jobs and draft VM choices are unchanged.';
+        defaultsSuccess.hidden = false;
+      } catch (error) { if (currentView() && state.session === session) inlineError(defaultsError, error.message); }
+      finally { if (currentView() && state.session === session) { defaultsBusy = ''; clearDefault.replaceChildren('Clear default'); saveDefault.replaceChildren(icon('check'), 'Save default'); syncControls(); } }
+    }
     const currentCertificate = () => certificate && certificateHost === hostKey(host.value);
     const certificateUsable = () => {
       if (!currentCertificate() || certificate.can_trust !== true || !certificate.fingerprint_sha256) return false;
@@ -1243,22 +1337,26 @@
       return value && !Number.isNaN(parsed.getTime()) ? new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}).format(parsed) : 'Not available';
     };
     function syncControls() {
-      const busy = Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy || packagesBusy || fleetBusy);
+      const busy = Boolean(connectionBusy || certificateBusy || defaultsBusy || mediaBusy || sshBusy || packagesBusy || fleetBusy);
       const identityChanged = hostKey(host.value) !== hostKey(settings.host) || username.value.trim() !== (settings.username || '');
-      const lockInputs = Boolean(connectionBusy || ['trust', 'remove'].includes(certificateBusy));
+      const lockInputs = Boolean(connectionBusy || defaultsBusy || ['trust', 'remove'].includes(certificateBusy));
       host.disabled = lockInputs; username.disabled = lockInputs; password.disabled = lockInputs;
       password.required = !settings.configured || identityChanged;
       save.disabled = busy;
       test.disabled = busy || !settings.configured || identityChanged || Boolean(password.value);
       retrieve.disabled = busy || !host.value.trim();
+      defaultNetwork.disabled = busy || !settings.configured || !connectionInventory() || identityChanged || Boolean(password.value);
+      saveDefault.disabled = defaultNetwork.disabled || !defaultNetwork.value || (connectionInventory()?.networks || []).filter(network => network.name === defaultNetwork.value).length !== 1;
+      clearDefault.disabled = busy || !deploymentDefaults.default_network;
+      defaultsPanel.setAttribute('aria-busy', defaultsBusy ? 'true' : 'false');
       if (trustButton) trustButton.disabled = busy || !fingerprintConfirmed || !certificateUsable();
       if (removeButton) removeButton.disabled = busy;
       if (comparison) comparison.disabled = busy || !certificateUsable();
       certificatePanel.setAttribute('aria-busy', certificateBusy ? 'true' : 'false');
-      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || sshBusy || packagesBusy || fleetBusy));
-      sshControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || packagesBusy || fleetBusy));
-      packagesControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy || fleetBusy));
-      fleetControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || mediaBusy || sshBusy || packagesBusy));
+      mediaControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || defaultsBusy || sshBusy || packagesBusy || fleetBusy));
+      sshControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || defaultsBusy || mediaBusy || packagesBusy || fleetBusy));
+      packagesControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || defaultsBusy || mediaBusy || sshBusy || fleetBusy));
+      fleetControls?.setExternalBusy(Boolean(connectionBusy || certificateBusy || defaultsBusy || mediaBusy || sshBusy || packagesBusy));
       if (returnToWizard) returnToWizard.disabled = busy;
     }
     function renderCertificate() {
@@ -1296,7 +1394,7 @@
             if (!currentView() || request !== certificateRequest || hostKey(requestedHost) !== hostKey(host.value)) return;
             certificate = result; certificateHost = hostKey(requestedHost); certificateSource = 'retrieved';
             if (state.settings && hostKey(state.settings.host) === certificateHost) state.settings.certificate_trust = result;
-            state.inventory = null;
+            state.inventory = null; state.inventoryHost = null; renderNetworkDefaults();
             renderReadiness();
             certificateStatus.textContent = 'Certificate trusted for this host. Save the connection details, then test the saved connection. No restart is needed.';
           } catch (error) {
@@ -1321,7 +1419,7 @@
             if (!currentView() || request !== certificateRequest || hostKey(requestedHost) !== hostKey(host.value)) return;
             certificate = null;
             if (state.settings && hostKey(state.settings.host) === hostKey(requestedHost)) state.settings.certificate_trust = null;
-            state.inventory = null;
+            state.inventory = null; state.inventoryHost = null; renderNetworkDefaults();
             renderReadiness();
             certificateStatus.textContent = 'Saved trust removed. Standard certificate authority verification remains enabled. Retrieve the certificate to review trust again.';
           } catch (error) {
@@ -1362,12 +1460,12 @@
     const test = button('Test saved connection', '', async () => {
       if (!currentView() || test.disabled) return;
       inlineError(errorBox, ''); resultBox.hidden = true; connectionBusy = 'test'; setBusy(test, 'Connecting…'); syncControls();
-      state.inventory = null; renderReadiness();
+      state.inventory = null; state.inventoryHost = null; renderNetworkDefaults(); renderReadiness();
       try {
         const inventory = await api('/api/inventory');
         if (!currentView()) return;
-        state.inventory = inventory;
-        renderReadiness();
+        state.inventory = inventory; state.inventoryHost = settings.host;
+        renderNetworkDefaults(); renderReadiness();
         resultBox.className = 'alert alert-success';
         resultBox.replaceChildren(el('strong', {}, `Connected to ${inventory.host?.name || settings.host}`), el('div', {class: 'inventory-summary'}, el('span', {}, `${inventory.host?.cpu_threads || 0} CPU threads`), el('span', {}, `${inventory.host?.memory_gb || 0} GB memory`), el('span', {}, `${inventory.datastores?.length || 0} datastores`), el('span', {}, `${inventory.networks?.length || 0} networks`)));
         resultBox.hidden = false;
@@ -1376,7 +1474,7 @@
     }, 'refresh');
     const form = el('form', {class: 'surface', id: 'esxi-connection-panel', onSubmit: async event => {
       event.preventDefault();
-      if (!currentView() || connectionBusy || certificateBusy || mediaBusy || sshBusy || !form.reportValidity()) return;
+      if (!currentView() || connectionBusy || certificateBusy || defaultsBusy || mediaBusy || sshBusy || !form.reportValidity()) return;
       const payload = {host: host.value.trim(), username: username.value.trim(), password: password.value, verify_tls: true};
       inlineError(errorBox, ''); resultBox.hidden = true; connectionBusy = 'save'; setBusy(save, 'Saving…'); syncControls();
       try {
@@ -1385,7 +1483,7 @@
         password.value = '';
         const updated = await api('/api/settings');
         if (!currentView()) return;
-        state.settings = updated; state.inventory = null;
+        state.settings = updated; state.inventory = null; state.inventoryHost = null;
         renderSettings(sshControls?.getDraft());
         notify('ESXi connection saved. Test the connection to check access.');
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
@@ -1455,7 +1553,7 @@
     sshControls = createSSHAccessPanel(count => { if (state.settings) state.settings.ssh_key_count = count; renderReadiness(); }, value => { sshBusy = value; syncControls(); }, initialSSHdraft);
     packagesControls = createSplunkPackagePanel(catalog => { if (state.settings) state.settings.splunk_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { packagesBusy = value; syncControls(); });
     fleetControls = createFleetManagerPanel(catalog => { if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; state.settings.fleetmanager_mode = catalog.mode; } invalidatePreflight(); renderReadiness(); }, value => { fleetBusy = value; syncControls(); }, {onDirty: invalidatePreflight});
-    panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form);
+    panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form, defaultsPanel);
     panels.media = el('div', {id: 'setup-panel-media', role: 'tabpanel', 'aria-labelledby': 'setup-tab-media', tabindex: '0'}, mediaControls.panel);
     panels.ssh = el('div', {id: 'setup-panel-ssh', role: 'tabpanel', 'aria-labelledby': 'setup-tab-ssh', tabindex: '0'}, sshControls.panel);
     const softwareTabs = el('div', {class: 'software-tabs', role: 'tablist', 'aria-label': 'Software configuration'});
@@ -1483,10 +1581,20 @@
     const draftBanner = returnToWizard ? el('div', {class: 'connection-banner'}, icon('clock'), el('div', {}, el('strong', {}, 'Your deployment draft is saved in this tab'), el('p', {}, 'Finish setup, then return to your VM names, resources, and network settings. Preflight will run again before deployment.')), returnToWizard) : null;
     page.replaceChildren(...[heading('Setup', 'Configure your host, OS installation media, SSH access, and software packages.'), draftBanner, steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, panels.connection, panels.media, panels.ssh, panels.packages), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.')))].filter(Boolean));
     selectSetupTab(state.setupTab || (settings.configured && !settings.iso_configured ? 'media' : 'connection'), {updateHash: false});
-    renderReadiness(); renderCertificate(); syncControls(); mediaControls.load(); packagesControls.load(); fleetControls.load(); sshControls.load();
+    renderReadiness(); renderCertificate(); renderNetworkDefaults(); syncControls(); mediaControls.load(); packagesControls.load(); fleetControls.load(); sshControls.load();
   }
   function field(label, input, hint) { return el('label', {class: 'field'}, el('span', {}, label), input, hint ? el('small', {}, hint) : null); }
+  function renderDeploymentControls(data) {
+    const controls = el('div', {id: 'deployment-controls', class: 'deployment-controls'});
+    if (stoppableStatuses.has(data.status)) controls.append(el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Deployment controls')), el('div', {class: 'recovery-body'}, el('p', {}, 'Stop GDeploy’s automation while keeping existing VMs, disks, and data.'), stopButton(data))));
+    if (data.status === 'stopping') controls.append(el('section', {class: 'surface', id: 'deployment-stop-status', role: 'status'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Stop requested')), el('div', {class: 'recovery-body'}, el('p', {}, 'GDeploy is waiting for its current operation to finish. Existing VMs and disks are preserved; VMs are not powered off.'), stopButton(data))));
+    if (data.status === 'stopped') controls.append(el('section', {class: 'surface', id: 'deployment-stop-status', role: 'status'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Deployment stopped')), el('div', {class: 'recovery-body'}, el('p', {}, 'GDeploy has stopped its automation. Existing VMs and disks are preserved; work already started inside a VM may continue. This deployment cannot be resumed.'), el('p', {}, 'Keep the VMs and hide this record, or use the separate Delete & redeploy action below to start over.'))));
+    if (data.hidden_at || hideableStatuses.has(data.status)) controls.append(el('section', {class: 'surface history-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'History visibility')), el('div', {class: 'recovery-body'}, el('p', {}, data.hidden_at ? 'This record is hidden from the default history view. Its deployment status is unchanged.' : 'Keep the VMs and hide this record from the default history view. Find it again with Show hidden. Credentials and logs stay available.'), visibilityButton(data))));
+    if (failureStatuses.has(data.status) || data.status === 'stopped') controls.append(el('section', {class: 'surface recovery-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Start over')), el('div', {class: 'recovery-body'}, el('p', {}, 'If the VM is working, you can keep it and hide this record instead. Starting over permanently deletes the VMs, all data on their disks, and installation media owned by this deployment.'), el('p', {}, 'A replacement uses the same VM configuration and the current OS ISO selection in Setup.'), button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger button-full', () => openRedeploy(data), 'refresh'))));
+    return controls;
+  }
   function renderDetail(data) {
+    state.detailPending = null;
     const previousLogBody = $('#deployment-log-body');
     const logScrollTop = previousLogBody?.scrollTop || 0;
     const logsAtEnd = previousLogBody && previousLogBody.scrollHeight - previousLogBody.clientHeight - logScrollTop < 12;
@@ -1494,7 +1602,7 @@
     const focusedHistoryControl = document.activeElement?.id === `history-visibility-${data.id}` ? document.activeElement.id : null;
     const vms = data.vms || [];
     const back = el('a', {class: 'back-link', href: '#deployments'}, icon('back'), 'All deployments');
-    const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), statusBadge(data.status)), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'} · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
+    const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), el('span', {id: 'deployment-detail-status', role: 'status'}, statusBadge(data.status))), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'} · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
     const vmSurface = el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Virtual machines', el('span', {class: 'count-badge'}, vms.length))));
     for (const vm of vms) {
       const spec = (label, value) => el('div', {}, el('dt', {}, label), el('dd', {}, value || '—'));
@@ -1545,9 +1653,7 @@
     const hiddenNotice = data.hidden_at ? el('div', {class: 'visibility-notice', role: 'status'}, icon('info'), el('div', {}, el('strong', {}, 'Hidden from deployment history'), el('p', {}, 'The recorded status, VMs, credentials, and logs are preserved. Restore this record using History visibility.'))) : null;
     const left = el('div', {class: 'detail-main'}, hiddenNotice, failure, vmSurface, logs);
     const credentials = renderCredentials();
-    const aside = el('aside', {class: 'detail-aside'}, renderProgress(data), credentials);
-    if (data.hidden_at || hideableStatuses.has(data.status)) aside.append(el('section', {class: 'surface history-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'History visibility')), el('div', {class: 'recovery-body'}, el('p', {}, data.hidden_at ? 'This record is hidden from the default history view. Its deployment status is unchanged.' : 'Keep the VMs and hide this record from the default history view. Find it again with Show hidden. Credentials and logs stay available.'), visibilityButton(data))));
-    if (failureStatuses.has(data.status)) aside.append(el('section', {class: 'surface recovery-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Start over')), el('div', {class: 'recovery-body'}, el('p', {}, 'If the VM is working, you can keep it and hide this record instead. Starting over permanently deletes the VMs, all data on their disks, and installation media owned by this deployment.'), el('p', {}, 'A replacement uses the same VM configuration and the current OS ISO selection in Setup.'), button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger button-full', () => openRedeploy(data), 'refresh'))));
+    const aside = el('aside', {class: 'detail-aside'}, renderProgress(data), credentials, renderDeploymentControls(data));
     page.replaceChildren(back, title, el('div', {class: 'detail-layout'}, left, aside));
     if (state.openLogs.has(data.id)) logBody.scrollTop = logsAtEnd ? logBody.scrollHeight : logScrollTop;
     if (focusedLogControl) document.getElementById(focusedLogControl)?.focus({preventScroll: true});
@@ -1557,6 +1663,7 @@
     const index = stageOrder.indexOf(data.stage);
     const completed = data.status === 'completed';
     const failed = failureStatuses.has(data.status);
+    const stopping = data.status === 'stopping', stopped = data.status === 'stopped';
     const percentage = completed ? 100 : index > 0 ? Math.round(index / (stageOrder.length - 1) * 100) : 0;
     const list = el('ol', {class: 'stage-list'});
     const stages = [['preflight', 'Preflight checks'], ['preparing', 'Prepare installation media'], ['creating', 'Create virtual machines'], ['installing_os', 'Install operating system'], ['installing_software', 'Install selected software'], ['verifying', 'Verify services']];
@@ -1564,9 +1671,9 @@
       const stageIndex = stageOrder.indexOf(key);
       const done = completed || (index >= 0 && stageIndex < index);
       const current = stageIndex === index;
-      list.append(el('li', {class: `${done ? 'done' : current ? 'current' : ''} ${failed ? 'failed' : ''}`}, el('span', {class: 'stage-marker'}, done ? icon('check') : current ? '•' : String(stageIndex)), label, current ? el('span', {class: 'stage-note'}, 'Current') : null));
+      list.append(el('li', {class: `${done ? 'done' : current ? 'current' : ''} ${failed ? 'failed' : ''}`}, el('span', {class: 'stage-marker'}, done ? icon('check') : current ? '•' : String(stageIndex)), label, current ? el('span', {class: 'stage-note'}, stopped ? 'Last stage' : 'Current') : null));
     }
-    return el('section', {class: 'surface progress-card'}, el('div', {class: 'card-label'}, 'Deployment progress'), el('div', {class: 'progress-top'}, el('strong', {}, stageNames[data.stage] || statusNames[data.status] || 'Preparing deployment'), el('span', {}, completed ? 'Complete' : failed ? 'Stopped' : '')), el('div', {class: 'progress-track', role: 'progressbar', 'aria-label': 'Completed deployment stages', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': percentage}, el('div', {class: `progress-fill progress-${percentage} ${failed ? 'failed' : ''}`})), list);
+    return el('section', {id: 'deployment-progress', class: 'surface progress-card'}, el('div', {class: 'card-label'}, 'Deployment progress'), el('div', {class: 'progress-top'}, el('strong', {}, stopping || stopped ? statusNames[data.status] : stageNames[data.stage] || statusNames[data.status] || 'Preparing deployment'), el('span', {}, completed ? 'Complete' : stopped ? 'Automation stopped' : stopping ? 'Stop requested' : failed ? 'Stopped' : '')), el('div', {class: 'progress-track', role: 'progressbar', 'aria-label': 'Completed deployment stages', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': percentage}, el('div', {class: `progress-fill progress-${percentage} ${failed ? 'failed' : ''}`})), list);
   }
   function hideCredentials() {
     clearInterval(state.secretTimer);
@@ -1643,17 +1750,30 @@
     }}, icon('copy'));
     return el('div', {class: 'secret-field'}, el('label', {for: id}, label), el('div', {class: 'secret-input-row'}, input, copy));
   }
+  function applyDetailUpdate(data) {
+    const selection = window.getSelection();
+    const selectingLogs = state.openLogs.has(data.id) && selection && !selection.isCollapsed && $('#deployment-logs')?.contains(selection.anchorNode);
+    const copyingLogs = $('#deployment-log-copy')?.dataset.copying === 'true' || $('#deployment-log-manual-copy')?.hidden === false;
+    if (selectingLogs || copyingLogs) {
+      // Keep the user's log snapshot and selection intact while lifecycle state updates.
+      const previous = state.detailPending || state.detail;
+      state.detailPending = data;
+      if (!previous || previous.status !== data.status || previous.stage !== data.stage || previous.hidden_at !== data.hidden_at) {
+        $('#deployment-detail-status')?.replaceChildren(statusBadge(data.status));
+        $('#deployment-progress')?.replaceWith(renderProgress(data));
+        $('#deployment-controls')?.replaceWith(renderDeploymentControls(data));
+      }
+    } else { state.detail = data; state.detailPending = null; renderDetail(data); }
+  }
   async function refreshDetail(manual = false) {
     if (!state.session || setupRequired()) return;
     const id = state.detailId; const epoch = state.routeEpoch; const revision = state.historyRevision;
-    if (!id || state.visibilityBusy.has(id)) return;
+    if (!id || state.visibilityBusy.has(id) || state.stopBusy.has(id)) return;
+    const request = ++state.detailRequest;
     try {
       const data = await api(`/api/deployments/${encodeURIComponent(id)}`);
-      if (id !== state.detailId || epoch !== state.routeEpoch || revision !== state.historyRevision || state.visibilityBusy.has(id)) return;
-      const selection = window.getSelection();
-      const selectingLogs = state.openLogs.has(id) && selection && !selection.isCollapsed && $('#deployment-logs')?.contains(selection.anchorNode);
-      const copyingLogs = $('#deployment-log-copy')?.dataset.copying === 'true' || $('#deployment-log-manual-copy')?.hidden === false;
-      if (JSON.stringify(data) !== JSON.stringify(state.detail) && !selectingLogs && !copyingLogs) { state.detail = data; renderDetail(data); }
+      if (id !== state.detailId || epoch !== state.routeEpoch || request !== state.detailRequest || revision !== state.historyRevision || state.visibilityBusy.has(id) || state.stopBusy.has(id)) return;
+      if (JSON.stringify(data) !== JSON.stringify(state.detail)) applyDetailUpdate(data);
       if (manual) notify('Deployment details refreshed.');
     } catch (error) { if (manual || epoch === state.routeEpoch) globalError(error.message); }
   }
@@ -1703,7 +1823,7 @@
       if (state.wizard !== wizard) return;
       if (results[0].status === 'rejected') throw results[0].reason;
       if (results[1].status === 'rejected') throw results[1].reason;
-      state.inventory = results[0].value; state.settings = results[1].value;
+      state.inventory = results[0].value; state.settings = results[1].value; state.inventoryHost = state.settings.host;
       wizard.busy = false;
       renderWizard();
     } catch (error) {
@@ -1765,10 +1885,18 @@
     content.append(wizard.fleetControls.panel);
   }
   function defaultVMName(name, role) { return `${(name || 'environment').slice(0, 62 - role.length).replace(/-+$/, '')}-${role}`; }
+  function savedNetworkDefault() {
+    const saved = state.settings?.deployment_defaults;
+    const name = saved?.default_network || '';
+    const sameHost = Boolean(state.settings?.host) && saved?.applies_to_host === true;
+    const available = sameHost && endpointIdentity(state.inventoryHost) === endpointIdentity(state.settings.host) && (state.inventory?.networks || []).filter(network => network.name === name).length === 1;
+    return {name, sameHost, available, host: saved?.host};
+  }
   function ensureVMs() {
     const wizard = state.wizard;
+    const networkDefault = savedNetworkDefault();
     for (const role of selectedRoles()) {
-      if (!wizard.vms[role]) wizard.vms[role] = {role, name: defaultVMName(wizard.name, role), cpu: roles[role].cpu, ram_gb: roles[role].ram, disk_gb: roles[role].disk, datastore: state.inventory?.datastores?.[0]?.name || '', network: state.inventory?.networks?.[0]?.name || '', ip_mode: 'dhcp', address: '', gateway: '', dnsText: ''};
+      if (!wizard.vms[role]) wizard.vms[role] = {role, name: defaultVMName(wizard.name, role), cpu: roles[role].cpu, ram_gb: roles[role].ram, disk_gb: roles[role].disk, datastore: state.inventory?.datastores?.[0]?.name || '', network: networkDefault.available ? networkDefault.name : '', ip_mode: 'dhcp', address: '', gateway: '', dnsText: ''};
     }
   }
   function invalidatePreflight() {
@@ -1838,6 +1966,8 @@
     const wizard = state.wizard;
     const selected = selectedRoles();
     content.append(el('h3', {}, `Configure ${selected.length} ${selected.length === 1 ? 'virtual machine' : 'separate virtual machines'}`), el('p', {class: 'muted'}, 'Every section below creates a dedicated VM. Give each machine its own name, resources, storage destination, and network settings.'));
+    const networkDefault = savedNetworkDefault();
+    if (networkDefault.name && !networkDefault.available) content.append(el('div', {id: 'wizard-network-default-warning', class: 'alert alert-warning', role: 'status'}, networkDefault.sameHost ? `The saved default port group “${networkDefault.name}” is unavailable or ambiguous. Choose an available network / port group with a unique name for each VM.` : `The saved default port group belongs to ESXi host ${networkDefault.host || 'unavailable'}. Choose a network / port group on the current host for each VM.`));
     if (selected.length > 1) content.append(el('nav', {class: 'vm-jump-links', 'aria-label': 'VM configuration sections'}, selected.map(role => button(`${roles[role].short} VM`, 'button-small', () => {
       document.getElementById(`vm-${role}-name`)?.focus({preventScroll: true});
       document.getElementById(`vm-resource-${role}`)?.scrollIntoView({block: 'start'});
@@ -1851,7 +1981,9 @@
       form.append(...[el('div', {class: 'vm-form-header'}, roleIcon(role), el('div', {}, el('h4', {id: `vm-heading-${role}`}, `${roleName(role)} VM`), el('p', {}, 'Operating system from your selected OS ISO')), el('span', {class: 'vm-form-number'}, `VM ${index + 1} of ${selected.length}`)), wizard.vmError?.role === role ? el('div', {id: `vm-error-${role}`, class: 'alert alert-error vm-validation-error', role: 'alert', tabindex: '-1'}, wizard.vmError.error) : null, field('Virtual machine name', input('name', {type: 'text', required: true, maxlength: 63, pattern: '[a-z](?:(?:[a-z0-9]|-)*[a-z0-9])?', autocomplete: 'off', spellcheck: 'false'}), 'A unique hostname starting with a letter; lowercase letters, numbers, and hyphens only.'), el('div', {class: 'field-grid three'}, field('CPU cores', input('cpu', {type: 'number', min: limits.cpu, max: 128, step: 1, required: true}), 'vCPU'), field('Memory', input('ram_gb', {type: 'number', min: limits.ram, max: 2048, step: 1, required: true}), 'GB RAM'), field('Disk size', input('disk_gb', {type: 'number', min: limits.disk, max: 65536, step: 1, required: true}), 'GB · thin provisioned'))].filter(Boolean));
       if (role === 'fleetmanager') form.append(el('p', {class: 'media-help'}, 'FleetManager requires at least 2 CPUs, 8 GB RAM, and enough disk for 30 GB in /var, 20 GB in /tmp, and the operating system. The 80 GB default provides additional headroom.'));
       const datastore = el('select', {id: `vm-${role}-datastore`, ...invalidAttrs('datastore'), required: true, onChange: event => { vm.datastore = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a datastore'), (state.inventory?.datastores || []).map(store => el('option', {value: store.name}, `${store.name} · ${Math.floor(Number(store.free_gb))} GB free`))); datastore.value = vm.datastore;
-      const network = el('select', {id: `vm-${role}-network`, ...invalidAttrs('network'), required: true, onChange: event => { vm.network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a port group'), (state.inventory?.networks || []).map(net => el('option', {value: net.name}, net.name))); network.value = vm.network;
+      const networks = state.inventory?.networks || [], networkCount = name => networks.filter(item => item.name === name).length;
+      const network = el('select', {id: `vm-${role}-network`, ...invalidAttrs('network'), required: true, onChange: event => { vm.network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a port group'), [...new Set(networks.map(item => item.name))].map(name => el('option', {value: name, disabled: networkCount(name) !== 1}, networkCount(name) === 1 ? name : `${name} · ambiguous name`))); network.value = vm.network;
+      if (vm.network && networkCount(vm.network) !== 1) { if (!networkCount(vm.network)) network.append(el('option', {value: vm.network, disabled: true}, `${vm.network} · unavailable on this host`)); network.value = vm.network; form.append(el('p', {class: 'alert alert-warning'}, 'This VM’s selected port group is unavailable or ambiguous on the current ESXi host. Choose a group with a unique name before continuing.')); }
       form.append(el('div', {class: 'field-grid'}, field('Datastore', datastore, 'Storage destination on the ESXi host.'), field('Network / port group', network, 'Must be reachable from GDeploy.')), el('hr', {class: 'form-divider'}), el('div', {class: 'field-section-label'}, 'IP address configuration'));
       const staticFields = el('div', {class: 'static-fields', hidden: vm.ip_mode !== 'static'}, el('div', {class: 'field-grid'}, field('IPv4 address / prefix', input('address', {type: 'text', required: true, placeholder: '192.168.1.20/24', autocomplete: 'off', spellcheck: 'false'}), 'Include the subnet prefix, for example /24.'), field('Default gateway', input('gateway', {type: 'text', required: true, placeholder: '192.168.1.1', autocomplete: 'off', spellcheck: 'false'}))), field('DNS servers', input('dnsText', {type: 'text', required: true, placeholder: '192.168.1.1, 1.1.1.1', autocomplete: 'off', spellcheck: 'false'}), 'Separate multiple IPv4 addresses with commas.'));
       const dhcpNote = el('p', {class: 'network-note', hidden: vm.ip_mode !== 'dhcp'}, 'A DHCP server on this network must provide an address, gateway, and DNS. GDeploy discovers the guest address through VMware Tools.');
@@ -1913,6 +2045,7 @@
       else if (!Number.isInteger(vm.ram_gb) || vm.ram_gb < limits.ram || vm.ram_gb > 2048) invalid = ['ram_gb', `Memory must be a whole number from ${limits.ram} to 2048 GB for this role.`];
       else if (!Number.isInteger(vm.disk_gb) || vm.disk_gb < limits.disk || vm.disk_gb > 65536) invalid = ['disk_gb', `Disk size must be a whole number from ${limits.disk} to 65536 GB.`];
       else if (!vm.datastore || !vm.network) invalid = [!vm.datastore ? 'datastore' : 'network', 'Choose a datastore and network for this VM.'];
+      else if ((state.inventory?.networks || []).filter(network => network.name === vm.network).length !== 1) invalid = ['network', 'The selected port group is unavailable or ambiguous on this ESXi host. Choose an available port group with a unique name.'];
       else if (vm.ip_mode === 'static') {
         const [address, prefix, extra] = vm.address.split('/');
         if (!validIPv4(address) || extra !== undefined || !/^\d{1,2}$/.test(prefix || '') || Number(prefix) < 1 || Number(prefix) > 30) invalid = ['address', 'Enter an IPv4 address with a subnet prefix from /1 to /30, for example 192.168.1.20/24.'];
@@ -1990,7 +2123,7 @@
       else if (state.route === 'deployments') {
         const revision = state.historyRevision;
         const rows = await api(deploymentListPath());
-        if (epoch === state.routeEpoch && revision === state.historyRevision && !state.visibilityBusy.size && JSON.stringify(rows) !== JSON.stringify(state.deployments)) {
+        if (epoch === state.routeEpoch && revision === state.historyRevision && !state.visibilityBusy.size && !state.stopBusy.size && JSON.stringify(rows) !== JSON.stringify(state.deployments)) {
           const activeElement = document.activeElement;
           const editing = activeElement?.classList.contains('search-field');
           const focusedId = page.contains(activeElement) ? activeElement?.id : '';

@@ -52,6 +52,9 @@ def test_every_business_endpoint_is_blocked_before_setup(default_client, spec):
     identifier = str(uuid4())
     requests = [
         ("GET", "/api/settings", None),
+        ("GET", "/api/settings/deployment-defaults", None),
+        ("PUT", "/api/settings/deployment-defaults", {"host": "esxi.invalid", "default_network": "Servers"}),
+        ("DELETE", "/api/settings/deployment-defaults", None),
         ("GET", "/api/settings/ssh-keys", None),
         ("PUT", "/api/settings/ssh-keys", {"public_keys": []}),
         ("PUT", "/api/settings", {"host": "esxi.invalid", "username": "root", "password": "test-only"}),
@@ -63,6 +66,7 @@ def test_every_business_endpoint_is_blocked_before_setup(default_client, spec):
         ("POST", "/api/preflight", spec),
         ("POST", "/api/deployments", spec),
         ("POST", f"/api/deployments/{identifier}/credentials", None),
+        ("POST", f"/api/deployments/{identifier}/stop", None),
         ("POST", f"/api/deployments/{identifier}/redeploy", {"confirm_name": "test"}),
     ]
     for method, path, payload in requests:

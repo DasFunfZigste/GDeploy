@@ -176,7 +176,7 @@ To reclaim space:
 
 1. Find an unused upload or ESXi-imported copy under **Storage & saved ISOs**. Its original source is shown so you can identify the right file. If it is the current choice, use **Clear saved selection** in the saved ISO summary, or choose another ISO.
 2. Select **Delete**, review **Delete saved ISO?**, then confirm **Delete ISO**. This permanently removes only GDeploy's local saved copy. To use it again, restore a backup or upload/import it again.
-3. If deletion is disabled, follow the displayed reason. Clear the saved selection or choose another OS ISO if this is still the current default. Copies referenced by **queued, running or cleaning deployments** remain protected until that work is resolved, even after clearing the default.
+3. If deletion is disabled, follow the displayed reason. Clear the saved selection or choose another OS ISO if this is still the current default. Copies referenced by **queued, running, stopping or cleaning deployments** remain protected until that work is resolved, even after clearing the default.
 
 **Clear saved selection** removes only the saved default, without deleting any file or changing active deployment snapshots. Existing environment-configured ISO settings become the fallback. If there is no valid fallback, select an ISO before starting another deployment. You can therefore clear and delete your only unused uploaded/imported copy without needing space to upload a replacement first. Clearing alone does not reclaim storage; the separate **Delete ISO** action does.
 
@@ -200,7 +200,7 @@ If preflight reports a missing Splunk package, select **Configure Splunk package
 
 After validating the publisher's checksum, GDeploy computes an internal SHA-256 for the package. Each new Splunk job captures its package path and that SHA-256 when queued. Later Setup changes apply to future jobs, and the selected file must remain available and unchanged until the original job finishes. After transfer, the guest verifies the package against the queued SHA-256 before package-manager or extraction work. New **Delete & redeploy** jobs use the current package selection. Jobs created before v0.8.0 keep their original environment-configured package behavior rather than adopting a new UI default.
 
-To manage uploaded packages, use **Clear saved selection** or choose another package before deleting an unused upload, then confirm **Delete package**. Clearing removes only the saved default; it does not delete a file. Uploads referenced by queued, running or cleaning jobs remain protected even after clearing. Deletion removes only the eligible uploaded copy; it cannot delete server-mounted files, change a VM or uninstall Splunk already running on a VM. Restore a deleted copy from backup or upload it again if needed.
+To manage uploaded packages, use **Clear saved selection** or choose another package before deleting an unused upload, then confirm **Delete package**. Clearing removes only the saved default; it does not delete a file. Uploads referenced by queued, running, stopping or cleaning jobs remain protected even after clearing. Deletion removes only the eligible uploaded copy; it cannot delete server-mounted files, change a VM or uninstall Splunk already running on a VM. Restore a deleted copy from backup or upload it again if needed.
 
 When no UI package choice is saved, existing environment settings remain the fallback:
 
@@ -241,7 +241,7 @@ The PEM license is limited to **64 KiB**. It must include the currently valid pr
 
 On the new VM, GDeploy writes `/etc/corelight-fleetd.conf` and the license `/etc/corelight-fleetd.pem`, enables `corelight-fleetd`, and checks HTTPS **443** and the sensor listener **1443**. Open the deployment's **Credentials** for the **`admin`** temporary password, saved community string and `https://VM_IP`; **change the administrator password at first sign-in**. Sensor enrollment, browser certificate configuration, existing-VM upgrades and ongoing guest backups remain administration tasks. See the [complete FleetManager walkthrough](FLEETMANAGER.md) for network, upgrade and troubleshooting details.
 
-FleetManager/dependency uploads persist in `/data/fleetmanager-packages`. Each queued job retains its configuration, license and package checksums; editing or clearing Setup does not change existing jobs or VMs. **Clear FleetManager setup** removes defaults while keeping uploads. Selected or queued/running/cleaning packages cannot be deleted; mounted files are managed on the Docker host. Back up the complete data volume and original encryption key, and separately back up mounted packages and vendor license records. Live licensed-package and ESXi acceptance has not been performed for this feature; use the [lab checklist](LAB_VALIDATION.md#fleetmanager-installation).
+FleetManager/dependency uploads persist in `/data/fleetmanager-packages`. Each queued job retains its configuration, license and package checksums; editing or clearing Setup does not change existing jobs or VMs. **Clear FleetManager setup** removes defaults while keeping uploads. Selected or queued/running/stopping/cleaning packages cannot be deleted; mounted files are managed on the Docker host. Back up the complete data volume and original encryption key, and separately back up mounted packages and vendor license records. Live licensed-package and ESXi acceptance has not been performed for this feature; use the [lab checklist](LAB_VALIDATION.md#fleetmanager-installation).
 
 ### Deploy your VMs
 
@@ -250,6 +250,18 @@ FleetManager/dependency uploads persist in `/data/fleetmanager-packages`. Each q
 3. When FleetManager is selected, complete **FleetManager configuration** with its online/offline mode, community string, license and required token/packages, then select **Save & continue**. Existing defaults can be reused. This step appears before review even if FleetManager was configured previously.
 4. In **Review & deploy**, select **Run preflight**, address any reported issues, and then deploy. To queue the job immediately after successful checks, first check **Start deployment automatically when preflight passes**, then select **Run preflight & deploy**. The checkbox starts unchecked in every fresh wizard; failed checks stop either flow. Without FleetManager, the wizard goes directly from **Configure VMs** to this review step and remains three steps long.
 5. Open the deployment to follow its stages and errors. In **Deployment logs**, select **View logs** to expand recorded events and sanitized diagnostic details, and **Copy logs** to copy them. The failure banner's **View deployment logs** opens the same view. When ready, use the application links and **Reveal credentials** panel for the VM passwords and application sign-in details.
+
+In **Setup → ESXi connection → Default port group**, load the saved host's port groups, choose the network for new VMs and save the default. Confirm that its VLAN and routing let GDeploy reach the guests on TCP 22. The default only applies to the ESXi host it was saved for, and the form checks that the group still exists. If it is missing or belongs to a different host, choose a port group explicitly or update the default. Clearing the default restores explicit selection. Saving or clearing affects new VM forms; existing job specifications and deliberate choices in an open deployment draft are preserved. Review each VM's port group before preflight.
+
+### Stop a deployment
+
+Open a queued or running deployment, choose **Stop deployment**, and confirm. Queued work becomes **Stopped** before provisioning begins. Running work becomes **Stopping** while its current operation reaches a safe boundary; GDeploy then stops further orchestration and records **Stopped**. Waiting for an OS becomes interruptible, but an in-flight ESXi operation or guest installation command can take time to finish. The pending state stays visible until the worker acknowledges the stop.
+
+Created VMs and disks remain in place, and credentials, logs and ownership records stay available. OS installation already running inside a powered-on VM can continue. Stop does not power off the VM, undo installed software, remove remote installation media, or resume later. If the current application command finishes, GDeploy retains any returned credentials before acknowledging the stop. Check the ESXi console and guest state when deciding what to do with an unfinished VM.
+
+You can hide a stopped job from history or explicitly use **Delete & redeploy** to replace its resources. That separate action permanently deletes the deployment's owned VMs and disks and still requires its typed confirmation. Do not use it when you want to preserve a working VM. Media and package files stay protected while stopping. If GDeploy restarts during a pending stop, the job becomes **Interrupted** so its remote state can be inspected.
+
+### Read deployment logs
 
 **Copy logs** tries the available browser copy methods, including a fallback for HTTP LAN addresses. If the browser blocks them, it opens a selected **Full deployment log** containing the deployment name, status, error and recorded events. Press Ctrl+C (⌘C on Mac), or use the browser's Copy command, then select **Done copying**. The complete log snapshot stays in place while you copy it. Older failures retain only the text originally recorded; upgrading cannot recover discarded tool output. New media-preparation errors include captured diagnostics where available, without exposing generated credentials or the autoinstall secret data.
 
@@ -321,7 +333,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from history** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.11.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.12.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## Optional manual credentials
 
@@ -378,10 +390,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.11.1** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.12.0** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.11.1-deploy.tar.gz`
-- `gdeploy-0.11.1-linux-amd64.image.tar.gz`
+- `gdeploy-0.12.0-deploy.tar.gz`
+- `gdeploy-0.12.0-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -393,12 +405,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.11.1-deploy.tar.gz
-sudo docker load --input gdeploy-0.11.1-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.12.0-deploy.tar.gz
+sudo docker load --input gdeploy-0.12.0-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.11.1` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.12.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
@@ -443,12 +455,14 @@ Common startup issues:
 | Media preparation reports permission denied or only a generic ISO error | Update to v0.5.0 or later, then open the deployment's **View logs**. These releases fix read-only extracted GRUB/manifest working files and use `/data/artifacts` for subprocess temporary files. Check the new diagnostic for the failing path/tool, plus `/data` free space and permissions. An older generic error alone does not establish which condition failed. |
 | Cloud-init verification failed but the VM appears installed | Update to v0.7.1 or later and read the [readiness troubleshooting steps](#check-ubuntu-readiness-after-a-deployment-error). The fix separates stderr warnings from JSON and verifies clean installer-disabled states using independent guest checks. Keep a healthy existing VM; updating does not resume its failed job. |
 | Data storage is full or appears smaller than the host disk | Check **Storage & saved ISOs** and run `docker compose exec gdeploy df -h /data /tmp`. The app sees the backing data filesystem, not all host disks. Delete eligible unused ISO copies or expand/migrate that backing storage; `/tmp` is a separate 256 MiB mount. |
-| A saved ISO cannot be deleted | Use **Clear saved selection** or select another ISO if this is the current choice. Resolve any queued, running or cleaning deployment using it; clearing the default does not remove that protection. Only uploaded/ESXi-imported local copies can be deleted in Setup; server-mounted files and original ESXi ISOs are outside this control. |
+| A saved ISO cannot be deleted | Use **Clear saved selection** or select another ISO if this is the current choice. Resolve any queued, running, stopping or cleaning deployment using it; clearing the default does not remove that protection. Only uploaded/ESXi-imported local copies can be deleted in Setup; server-mounted files and original ESXi ISOs are outside this control. |
 | ISO upload is rejected or interrupted | Browser uploads are limited to 16 GiB. Check the data volume's free space and, if using a reverse proxy, its request-size and upload-timeout settings. The prior media selection remains saved. |
 | ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in Setup → ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
 | A finished deployment is missing from history | Enable **Show hidden** and check the search/status filters. Select **Restore** to return the record to the default list. Hiding retains the VM, credentials and logs. |
 | Copy logs is blocked by the browser | Use the selected **Full deployment log** shown after the automatic copy attempts fail. Press Ctrl+C (⌘C on Mac) or the browser's Copy command, then **Done copying**. The snapshot includes the deployment header and recorded events, even on HTTP LAN access. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
+
+Version **0.12.0** adds Stop deployment and a saved, host-specific default port group. The new settings table is additive; preserve the complete data volume and encryption key. Finish or resolve active work before updating. Resolve pending stop requests before rollback to a release that does not understand them; older releases ignore the default port group. Updating does not resume failed/interrupted jobs or change networking on existing VMs.
 
 Version **0.11.1** adds repository version choices, starts fresh deployment forms with no selected roles, offers an unchecked option to deploy after successful preflight, and improves copying logs over HTTP. Existing saved exact versions and queued snapshots retain their choices; no data migration is required. Keep the existing data volume and encryption key. Updating does not resume failed jobs or change existing VMs.
 

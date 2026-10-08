@@ -923,7 +923,7 @@ td {
   background:#1c332a;
   border-color:#2e5141
 }
-.status-running,.status-queued,.status-cleaning {
+.status-running,.status-queued,.status-cleaning,.status-stopping {
   color:#9acdf8;
   background:#21303b;
   border-color:#364b5c
@@ -933,11 +933,19 @@ td {
   background:var(--danger-bg);
   border-color:#654243
 }
-.status-reverted {
+.status-reverted,.status-stopped {
   color:var(--muted)
 }
 .section-spacer {
   margin-top:24px
+}
+#deployment-defaults-panel {
+  margin-top:22px
+}
+.defaults-actions {
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap
 }
 .text-link {
   color:var(--accent);
@@ -1884,7 +1892,7 @@ td {
 .detail-main,.detail-aside {
   min-width:0
 }
-.detail-aside>*+*,.detail-main>*+* {
+.detail-aside>*+*,.detail-main>*+*,.deployment-controls>*+* {
   margin-top:22px
 }
 .progress-card {

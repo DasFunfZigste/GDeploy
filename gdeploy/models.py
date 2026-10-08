@@ -75,6 +75,18 @@ class SSHKeySettings(StrictModel):
     public_keys: list[Annotated[str, Field(max_length=MAX_SSH_KEY_BYTES)]] = Field(max_length=MAX_SSH_KEYS)
 
 
+class DeploymentDefaultsSettings(CertificateHost):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False, strict=True)
+    default_network: str = Field(min_length=1, max_length=128, strict=True)
+
+    @field_validator("default_network")
+    @classmethod
+    def validate_port_group(cls, value):
+        if not value.strip() or value != value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("Choose a port group without surrounding whitespace or control characters.")
+        return value
+
+
 class MediaSelection(StrictModel):
     media_id: str = Field(min_length=1, max_length=1024)
     sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")

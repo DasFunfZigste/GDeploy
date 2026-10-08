@@ -28,6 +28,10 @@ class DeploymentVisibilityError(ValueError):
     """A deployment cannot be hidden while it may still change resources."""
 
 
+class DeploymentStopError(ValueError):
+    """A deployment is no longer eligible for a stop request."""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -41,6 +45,7 @@ class Database:
             conn.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS deployment_defaults (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS esxi_certificates (endpoint TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS ssh_public_keys (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
@@ -106,6 +111,24 @@ class Database:
         with self.connect() as c:
             c.execute("INSERT OR REPLACE INTO settings VALUES(1,?)", (self.seal(value),))
         self.audit("ESXi connection settings updated")
+
+    def deployment_defaults(self):
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM deployment_defaults WHERE id=1").fetchone()
+        return self.unseal(row[0]) if row else None
+
+    def set_deployment_defaults(self, value):
+        encrypted = self.seal(value)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("INSERT OR REPLACE INTO deployment_defaults VALUES(1,?)", (encrypted,))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Deployment defaults updated"))
+
+    def clear_deployment_defaults(self):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("DELETE FROM deployment_defaults WHERE id=1").rowcount:
+                connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Deployment defaults cleared"))
 
     def ssh_public_keys(self):
         with self.connect() as connection:
@@ -180,7 +203,7 @@ class Database:
 
     def _active_media(self, connection):
         rows = connection.execute(
-            "SELECT secrets FROM deployments WHERE status IN ('queued','running','cleaning')"
+            "SELECT secrets FROM deployments WHERE status IN ('queued','running','stopping','cleaning')"
         ).fetchall()
         return [media for row in rows if (media := self.unseal(row[0]).get("os_media"))]
 
@@ -206,7 +229,7 @@ class Database:
         if matches(selected):
             return "Clear the saved selection or choose another OS ISO before deleting this one."
         if any(matches(reference) for reference in references):
-            return "Used by a queued, running, or cleaning deployment."
+            return "Used by a queued, running, or cleaning deployment (including pending stop requests)."
         return None
 
     def delete_media(self, media_id, remove_file, *, fallback_selected=None):
@@ -286,7 +309,7 @@ class Database:
 
     def _active_splunk_packages(self, connection):
         rows = connection.execute(
-            "SELECT secrets FROM deployments WHERE status IN ('queued','running','cleaning')"
+            "SELECT secrets FROM deployments WHERE status IN ('queued','running','stopping','cleaning')"
         ).fetchall()
         return [package for row in rows if (package := self.unseal(row[0]).get("splunk_package"))]
 
@@ -309,7 +332,7 @@ class Database:
         if matches(selected):
             return "Clear the saved selection or choose another Splunk package before deleting this one."
         if any(matches(reference) for reference in references):
-            return "Used by a queued, running, or cleaning deployment."
+            return "Used by a queued, running, or cleaning deployment (including pending stop requests)."
         return None
 
     def delete_splunk_package(self, package_id, remove_file, *, fallback_selected=None):
@@ -381,7 +404,7 @@ class Database:
                 connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Fleet Manager configuration cleared"))
 
     def _active_fleetmanager_packages(self, connection):
-        rows = connection.execute("SELECT secrets FROM deployments WHERE status IN ('queued','running','cleaning')").fetchall()
+        rows = connection.execute("SELECT secrets FROM deployments WHERE status IN ('queued','running','stopping','cleaning')").fetchall()
         return [item for row in rows for item in self.fleetmanager_packages(self.unseal(row[0]).get("fleetmanager"))]
 
     def fleetmanager_storage_state(self):
@@ -401,7 +424,7 @@ class Database:
         if any(matches(item) for item in cls.fleetmanager_packages(selected)):
             return "Clear the saved Fleet Manager configuration or choose another package before deleting this one."
         if any(matches(item) for item in references):
-            return "Used by a queued, running, or cleaning deployment."
+            return "Used by a queued, running, or cleaning deployment (including pending stop requests)."
         return None
 
     def delete_fleetmanager_package(self, package_id, remove_file):
@@ -582,7 +605,7 @@ class Database:
             row = c.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
             if row is None:
                 return None
-            if hidden and row["status"] not in {"completed", "failed", "interrupted", "cleanup_failed", "reverted"}:
+            if hidden and row["status"] not in {"completed", "failed", "stopped", "interrupted", "cleanup_failed", "reverted"}:
                 raise DeploymentVisibilityError("Only finished or stopped deployments can be hidden. Wait for this deployment to stop.")
             if (row["hidden_at"] is not None) != hidden:
                 stamp = now()
@@ -616,7 +639,7 @@ class Database:
             k: self.seal(v) if k == "secrets" else json.dumps(v) if k in {"vms", "resources"} else v
             for k, v in values.items()
         }
-        if values.get("status") in {"queued", "running", "cleaning"}:
+        if values.get("status") in {"queued", "running", "stopping", "cleaning"}:
             # Starting recovery through a hidden record must make active work visible.
             encoded["hidden_at"] = None
         encoded["updated_at"] = now()
@@ -642,6 +665,99 @@ class Database:
                 )
             ]
 
+    def deployment_status(self, deployment_id):
+        with self.connect() as connection:
+            row = connection.execute("SELECT status FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+        return row[0] if row else None
+
+    def request_stop(self, deployment_id):
+        """Serialize a stop with worker claims and completion; never change finished work."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+            if row is None:
+                return None
+            previous = row["status"]
+            if previous in {"stopping", "stopped"}:
+                return self._decode(row)
+            if previous not in {"queued", "running"}:
+                raise DeploymentStopError("Only queued or running deployments can be stopped.")
+            status = "stopped" if previous == "queued" else "stopping"
+            stamp = now()
+            connection.execute(
+                "UPDATE deployments SET status=?,stage=?,updated_at=?,hidden_at=NULL WHERE id=?",
+                (status, status, stamp, deployment_id),
+            )
+            message = (
+                "Administrator stopped the queued deployment before provisioning started."
+                if previous == "queued" else
+                "Administrator requested a stop. Waiting for the current operation to finish safely; "
+                "existing VMs will be retained and left powered as they are."
+            )
+            connection.execute(
+                "INSERT INTO events(deployment_id,at,level,message) VALUES(?,?,?,?)",
+                (deployment_id, stamp, "audit", message),
+            )
+            connection.execute("INSERT INTO audit VALUES(?,?)", (stamp, f"{deployment_id}: {message}"))
+            return self._decode(connection.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone())
+
+    def progress_stage(self, deployment_id, stage, message):
+        """Keep a pending stop visible even if the worker races its next stage update."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            stamp = now()
+            changed = connection.execute(
+                "UPDATE deployments SET stage=?,updated_at=? WHERE id=? AND status='running'",
+                (stage, stamp, deployment_id),
+            ).rowcount
+            if changed:
+                connection.execute(
+                    "INSERT INTO events(deployment_id,at,level,message) VALUES(?,?,?,?)",
+                    (deployment_id, stamp, "info", message),
+                )
+            return bool(changed)
+
+    def finish(self, deployment_id, status, *, vms, resources, secrets, error=None):
+        """Acknowledge a stop only after the worker has left all active operations."""
+        if status not in {"completed", "failed", "interrupted"}:
+            raise ValueError("Invalid worker completion status")
+        encrypted = self.seal(secrets)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+            if row is None or row["status"] not in {"running", "stopping"}:
+                return self._decode(row)
+            if row["status"] == "stopping":
+                status = "stopped"
+            stamp = now()
+            connection.execute(
+                "UPDATE deployments SET status=?,stage=?,updated_at=?,vms=?,resources=?,secrets=?,error=? WHERE id=?",
+                (status, status, stamp, json.dumps(vms), json.dumps(resources), encrypted, error, deployment_id),
+            )
+            if status == "stopped":
+                if error:
+                    connection.execute(
+                        "INSERT INTO events(deployment_id,at,level,message) VALUES(?,?,?,?)",
+                        (deployment_id, stamp, "warning", "Current operation ended with an error while stopping: " + error),
+                    )
+                message = (
+                    "Deployment stopped. GDeploy will start no further work. Existing VMs, installation media "
+                    "and credentials are retained; a guest OS installation already started may continue."
+                )
+                level = "audit"
+                connection.execute("INSERT INTO audit VALUES(?,?)", (stamp, f"{deployment_id}: {message}"))
+            elif status == "completed":
+                message = "Deployment completed. Open Credentials for VM and application sign-in details."
+                level = "info"
+            else:
+                message = error or "Deployment interrupted. Existing resources retained."
+                level = "error"
+            connection.execute(
+                "INSERT INTO events(deployment_id,at,level,message) VALUES(?,?,?,?)",
+                (deployment_id, stamp, level, message),
+            )
+            return self._decode(connection.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone())
+
     def claim(self):
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -655,17 +771,24 @@ class Database:
 
     def recover(self):
         with self.connect() as c:
-            rows = c.execute("SELECT id,status FROM deployments WHERE status IN ('running','cleaning')").fetchall()
-        for row in rows:
-            status = "cleanup_failed" if row["status"] == "cleaning" else "interrupted"
-            self.update(
-                row["id"],
-                status=status,
-                stage=status,
-                error="The service stopped during this deployment. Review logs and use delete & redeploy to recover.",
-            )
-            self.event(
-                row["id"],
-                "Deployment interrupted by service restart; resources retained for deliberate cleanup.",
-                "warning",
-            )
+            c.execute("BEGIN IMMEDIATE")
+            rows = c.execute("SELECT id,status FROM deployments WHERE status IN ('running','stopping','cleaning')").fetchall()
+            for row in rows:
+                status = "cleanup_failed" if row["status"] == "cleaning" else "interrupted"
+                message = (
+                    "The service restarted while a stop was pending. GDeploy will not resume this deployment. "
+                    "A guest operation may still be running; inspect the retained VM before further action."
+                    if row["status"] == "stopping" else
+                    "Deployment interrupted by service restart; resources retained for deliberate cleanup."
+                )
+                stamp = now()
+                c.execute(
+                    "UPDATE deployments SET status=?,stage=?,error=?,updated_at=? WHERE id=?",
+                    (status, status, message, stamp, row["id"]),
+                )
+                c.execute(
+                    "INSERT INTO events(deployment_id,at,level,message) VALUES(?,?,?,?)",
+                    (row["id"], stamp, "warning", message),
+                )
+                if row["status"] == "stopping":
+                    c.execute("INSERT INTO audit VALUES(?,?)", (stamp, f"{row['id']}: {message}"))

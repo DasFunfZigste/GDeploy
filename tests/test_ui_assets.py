@@ -199,5 +199,64 @@ def test_log_copy_uses_truthful_fallback_and_keeps_full_manual_snapshot_selectab
     assert "id: 'deployment-log-manual-text'" in detail
     assert "if (!open) { manualCopy.hidden = true; manualText.value = ''; }" in detail
     assert "$('#deployment-log-manual-copy')?.hidden === false" in script
-    assert "const selectingLogs = state.openLogs.has(id) && selection" in script
-    assert "!selectingLogs && !copyingLogs" in script
+    assert "const selectingLogs = state.openLogs.has(data.id) && selection" in script
+    assert "if (selectingLogs || copyingLogs)" in script
+
+
+def test_stop_deployment_is_separate_from_destructive_redeploy_and_only_available_for_active_jobs(client):
+    script = client.get("/static/app.js").text
+    assert "const stoppableStatuses = new Set(['queued', 'running'])" in script
+    assert "stopping: 'Stopping', stopped: 'Stopped'" in script
+    assert "new Set(['queued', 'running', 'stopping', 'cleaning'])" in script
+    stop = script.split("function openStopDeployment(", 1)[1].split("function visibilityButton(", 1)[0]
+    assert "api(`/api/deployments/${encodeURIComponent(data.id)}/stop`, {method: 'POST'})" in stop
+    assert "body:" not in stop
+    assert "/redeploy" not in stop
+    assert "state.session === session && state.routeEpoch === epoch" in stop
+    assert "state.stopBusy.has(data.id)" in stop
+    assert "Existing VMs, disks, and data stay in place." in stop
+    assert "does not power off VMs or undo work already started" in stop
+    assert "A stopped deployment cannot be resumed." in stop
+    assert "Delete & redeploy remains a separate action" in stop
+    assert "stopButton(row, true)" in script
+
+
+def test_stop_lifecycle_updates_remain_visible_while_logs_are_selected(client):
+    script = client.get("/static/app.js").text
+    update = script.split("function applyDetailUpdate(", 1)[1].split("async function refreshDetail(", 1)[0]
+    assert "state.detailPending = data" in update
+    assert "$('#deployment-detail-status')?.replaceChildren(statusBadge(data.status))" in update
+    assert "$('#deployment-controls')?.replaceWith(renderDeploymentControls(data))" in update
+    assert "manualText.value" not in update  # The user's full log snapshot is not replaced.
+    controls = script.split("function renderDeploymentControls(", 1)[1].split("function renderDetail(", 1)[0]
+    assert "data.status === 'stopping'" in controls and "data.status === 'stopped'" in controls
+    assert "failureStatuses.has(data.status) || data.status === 'stopped'" in controls
+    assert "request !== state.detailRequest" in script
+
+
+def test_port_group_default_is_bound_to_the_host_and_saved_explicitly(client):
+    script = client.get("/static/app.js").text
+    settings = script.split("function renderSettings(", 1)[1].split("function field(", 1)[0]
+    assert "settings.deployment_defaults" in settings
+    assert "id: 'deployment-default-network'" in settings
+    assert "id = 'deployment-default-save'" in settings
+    assert "id = 'deployment-default-clear'" in settings
+    assert "api('/api/settings/deployment-defaults', clear ? {method: 'DELETE'}" in settings
+    assert "body: {host: expectedHost, default_network: selected}" in settings
+    assert "state.session !== session" in settings
+    assert "deploymentDefaults.applies_to_host === true" in settings
+    assert "The saved default port group is not available" in settings
+    assert "defaultsEdited ? defaultDraft" in settings
+
+
+def test_new_vm_network_requires_a_valid_saved_default_or_explicit_choice(client):
+    script = client.get("/static/app.js").text
+    defaults = script.split("function savedNetworkDefault()", 1)[1].split("function invalidatePreflight()", 1)[0]
+    assert "saved?.applies_to_host === true" in defaults
+    assert "endpointIdentity(saved.host)" not in defaults  # Backend handles canonical endpoint equivalence.
+    assert "filter(network => network.name === name).length === 1" in defaults
+    assert "if (!wizard.vms[role])" in defaults  # Revisiting Setup does not overwrite draft choices.
+    assert "network: networkDefault.available ? networkDefault.name : ''" in defaults
+    assert "networks?.[0]" not in defaults
+    assert "id: 'wizard-network-default-warning'" in script
+    assert "'The selected port group is unavailable or ambiguous on this ESXi host. Choose an available port group with a unique name.'" in script

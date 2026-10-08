@@ -715,6 +715,29 @@ class GuestSession:
         self.host_key = known_host_key or ""
         self.client: paramiko.SSHClient | None = None
         self._secrets = {password, private_key}
+        self._check_cancelled: Callable[[], None] = lambda: None
+        self._wait_callback: Callable[[float], None] | None = None
+
+    def set_cancellation_hooks(
+        self, check_cancelled: Callable[[], None], wait: Callable[[float], None] | None = None,
+    ) -> None:
+        """Check for a requested stop only at safe provisioning boundaries."""
+        self._check_cancelled = check_cancelled
+        self._wait_callback = wait
+
+    def _wait(self, seconds: float) -> None:
+        self._check_cancelled()
+        if self._wait_callback is not None:
+            self._wait_callback(seconds)
+        else:
+            # Remain responsive without requiring callers to supply an Event.
+            remaining = seconds
+            while remaining > 0:
+                delay = min(0.25, remaining)
+                time.sleep(delay)
+                remaining -= delay
+                self._check_cancelled()
+        self._check_cancelled()
 
     def __enter__(self) -> GuestSession:
         self._connect()
@@ -726,6 +749,7 @@ class GuestSession:
             self.client = None
 
     def _connect(self) -> None:
+        self._check_cancelled()
         if self.client is not None and self.client.get_transport() and self.client.get_transport().is_active():
             return
         client = paramiko.SSHClient()
@@ -763,8 +787,9 @@ class GuestSession:
                 text = text.replace(secret, "[redacted]")
         return text
 
-    def _exec(self, command: str, *, timeout: int = 1800, sudo: bool = False) -> str:
-        result = self._exec_result(command, timeout=timeout, sudo=sudo, combine_stderr=True)
+    def _exec(self, command: str, *, timeout: int = 1800, sudo: bool = False, cancellable: bool = True) -> str:
+        options = {} if cancellable else {"cancellable": False}
+        result = self._exec_result(command, timeout=timeout, sudo=sudo, combine_stderr=True, **options)
         if result.exit_code != 0:
             safe = self._sanitize(result.stdout).strip()[-3000:]
             raise GuestError(f"Guest command failed (exit {result.exit_code}). {safe}")
@@ -772,8 +797,11 @@ class GuestSession:
 
     def _exec_result(
         self, command: str, *, timeout: int = 1800, sudo: bool = False, combine_stderr: bool = False,
+        cancellable: bool = True,
     ) -> CommandResult:
         """Drain both SSH streams with bounded memory and an absolute deadline."""
+        if cancellable:
+            self._check_cancelled()
         if self.client is None:
             raise GuestError("SSH session is not connected.")
         if sudo:
@@ -806,6 +834,8 @@ class GuestSession:
             watchdog.daemon = True
             watchdog.start()
             channel.set_combine_stderr(combine_stderr)
+            if cancellable:
+                self._check_cancelled()
             channel.exec_command(command)
             if sudo:
                 channel.sendall((self.password + "\n").encode())
@@ -843,8 +873,16 @@ class GuestSession:
                 if watchdog is not None:
                     watchdog.cancel()
 
-    def wait_ready(self, timeout: int = 1800, *, log: Callable[[str, str], None] = lambda message, level: None) -> None:
+    def wait_ready(
+        self, timeout: int = 1800, *, log: Callable[[str, str], None] = lambda message, level: None,
+        check_cancelled: Callable[[], None] | None = None, wait: Callable[[float], None] | None = None,
+    ) -> None:
         """Verify cloud-init and installed-system evidence within one boot deadline."""
+        if check_cancelled is not None:
+            self.set_cancellation_hooks(check_cancelled, wait)
+        elif wait is not None:
+            self._wait_callback = wait
+        self._check_cancelled()
         deadline = time.monotonic() + timeout
 
         def emit(message: str, level: str = "info") -> None:
@@ -858,21 +896,25 @@ class GuestSession:
                 log(f"{label}: {line}", level)
 
         while self.client is None:
+            self._check_cancelled()
             try:
                 self._connect()
             except GuestConnectionError:
+                self._check_cancelled()
                 if time.monotonic() + 5 >= deadline:
                     raise
-                time.sleep(5)
+                self._wait(5)
         previous = None
         previous_evidence = None
         last_pending = "cloud-init has not reported completion"
         while time.monotonic() < deadline:
+            self._check_cancelled()
             # --wait can emit progress on stdout. Poll clean JSON instead, and
             # query as root because current cloud-init reads protected config.
             result = self._exec_result(
                 "cloud-init status --format json", timeout=min(60, max(1, int(deadline - time.monotonic()))), sudo=True,
             )
+            self._check_cancelled()
             observation = (result.stdout, result.stderr, result.exit_code)
             changed = observation != previous
             if changed:
@@ -921,10 +963,12 @@ class GuestSession:
                     raise GuestError("Cloud-init is disabled for an unverified reason; inspect sudo cloud-init status --long.")
                 if time.monotonic() >= deadline:
                     break
+                self._check_cancelled()
                 probe = self._exec_result(
                     "python3 -c " + shlex.quote(_READINESS_PROBE),
                     timeout=min(60, max(1, int(deadline - time.monotonic()))), sudo=True,
                 )
+                self._check_cancelled()
                 if probe.stderr.strip():
                     emit_stream("OS readiness probe stderr", probe.stderr)
                 if probe.exit_code != 0:
@@ -961,12 +1005,14 @@ class GuestSession:
             if pending != last_pending:
                 emit("Waiting for OS readiness: " + pending + ".")
                 last_pending = pending
-            time.sleep(min(5, max(0, deadline - time.monotonic())))
+            self._wait(min(5, max(0, deadline - time.monotonic())))
+        self._check_cancelled()
         raise GuestError(f"Timed out verifying OS readiness: {last_pending}. Expand deployment logs and check the guest console.")
 
     def _run_script(
         self, script: str, payload: dict, package: Path | None = None, *, extra_files: dict[str, Path] | None = None,
     ) -> dict:
+        self._check_cancelled()
         if self.client is None:
             raise GuestError("SSH session is not connected.")
         extra_files = extra_files or {}
@@ -980,25 +1026,32 @@ class GuestSession:
         transferred = False
         try:
             with self.client.open_sftp() as sftp:
+                self._check_cancelled()
                 sftp.mkdir(remote, 0o700)
                 for filename, contents in (("install.sh", script), ("payload.json", json.dumps(payload))):
+                    self._check_cancelled()
                     with sftp.file(f"{remote}/{filename}", "w") as stream:
                         stream.write(contents)
                     sftp.chmod(f"{remote}/{filename}", 0o600)
                 if package is not None:
-                    sftp.put(str(package), f"{remote}/splunk.tgz")
+                    self._check_cancelled()
+                    sftp.put(str(package), f"{remote}/splunk.tgz", callback=lambda sent, total: self._check_cancelled())
                     sftp.chmod(f"{remote}/splunk.tgz", 0o600)
                 for filename, local in extra_files.items():
-                    sftp.put(str(local), f"{remote}/{filename}")
+                    self._check_cancelled()
+                    sftp.put(str(local), f"{remote}/{filename}", callback=lambda sent, total: self._check_cancelled())
                     sftp.chmod(f"{remote}/{filename}", 0o600)
-            transferred = True
             quoted = shlex.quote(remote)
             # Scripts and their secret payload become root-owned before execution.
             # A trap removes all staging files on either success or failure.
             wrapper = (
                 f"set -e; trap 'rm -rf -- {quoted}' EXIT; chown -R root:root -- {quoted}; /bin/bash {quoted}/install.sh"
             )
-            output = self._exec(wrapper, timeout=2400, sudo=True)
+            self._check_cancelled()
+            transferred = True
+            # Once started, let this operation finish and return its credentials.
+            # The caller persists the result before acknowledging a later stop.
+            output = self._exec(wrapper, timeout=2400, sudo=True, cancellable=False)
             results = [
                 line.removeprefix("GDEPLOY_RESULT=")
                 for line in output.splitlines()
@@ -1013,7 +1066,7 @@ class GuestSession:
             if not transferred:
                 # Partial SFTP uploads can otherwise leave a plaintext seed behind.
                 try:
-                    self._exec(f"rm -rf -- {shlex.quote(remote)}", timeout=30)
+                    self._exec(f"rm -rf -- {shlex.quote(remote)}", timeout=30, cancellable=False)
                 except GuestError:
                     pass
 
@@ -1027,6 +1080,7 @@ class GuestSession:
         log: Callable[[str], None] = lambda message: None,
         fleetmanager: dict | None = None,
     ) -> dict:
+        self._check_cancelled()
         self._secrets.update(value for value in secrets.values() if isinstance(value, str))
         payload: dict = {"ip": self.ip, "secrets": secrets}
         if role == "ubuntu":

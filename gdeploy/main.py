@@ -15,7 +15,8 @@ from pydantic import BaseModel, ConfigDict, StrictBool
 from . import __version__
 from .certificate_trust import CertificateTrust, CertificateTrustError, certificate_endpoint
 from .config import Config, hash_password, verify_password
-from .db import Database, DeploymentVisibilityError, MediaStateError
+from .db import Database, DeploymentStopError, DeploymentVisibilityError, MediaStateError
+from .deployment_defaults import DeploymentDefaults, DeploymentDefaultsError
 from .fleetmanager import FleetManager, FleetManagerError
 from .media import MediaError, MediaManager
 from .models import (
@@ -23,6 +24,7 @@ from .models import (
     CertificateApproval,
     CertificateHost,
     ConnectionSettings,
+    DeploymentDefaultsSettings,
     DeploymentSpec,
     ESXiMediaSelection,
     FleetManagerSettings,
@@ -56,6 +58,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             app.state.config.admin_username, app.state.config.admin_password_hash
         )
         app.state.service = service_factory(app.state.db, app.state.config)
+        app.state.deployment_defaults = DeploymentDefaults(app.state.db, app.state.service)
         app.state.certificates = CertificateTrust(app.state.db)
         app.state.media = MediaManager(app.state.db, app.state.config)
         app.state.media.recover_uploads()
@@ -161,6 +164,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     async def fleetmanager_error(request, exc):
         return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
+    @app.exception_handler(DeploymentDefaultsError)
+    async def deployment_defaults_error(request, exc):
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
     @app.get("/api/health")
     def health(request: Request):
         service = request.app.state.service
@@ -253,7 +260,20 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "splunk_configured": request.app.state.packages.catalog()["ready"],
             "fleetmanager_configured": fleetmanager["ready"],
             "fleetmanager_mode": fleetmanager["mode"],
+            "deployment_defaults": request.app.state.deployment_defaults.catalog(),
         }
+
+    @app.get("/api/settings/deployment-defaults")
+    def deployment_defaults(request: Request, current=Depends(authenticated)):
+        return request.app.state.deployment_defaults.catalog()
+
+    @app.put("/api/settings/deployment-defaults")
+    def save_deployment_defaults(payload: DeploymentDefaultsSettings, request: Request, current=Depends(authenticated)):
+        return request.app.state.deployment_defaults.save(payload.host, payload.default_network)
+
+    @app.delete("/api/settings/deployment-defaults")
+    def clear_deployment_defaults(request: Request, current=Depends(authenticated)):
+        return request.app.state.deployment_defaults.clear()
 
     @app.get("/api/settings/ssh-keys")
     def ssh_keys(request: Request, current=Depends(authenticated)):
@@ -319,12 +339,13 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     def save_settings(payload: ConnectionSettings, request: Request, current=Depends(authenticated)):
         db = request.app.state.db
         value = payload.model_dump()
-        previous = db.settings()
-        if not value["password"]:
-            if not previous or previous["host"] != value["host"] or previous["username"] != value["username"]:
-                raise HTTPException(400, "Supply the ESXi password when setting or changing the connection.")
-            value["password"] = previous["password"]
-        db.set_settings(value)
+        with request.app.state.service.action_lock:
+            previous = db.settings()
+            if not value["password"]:
+                if not previous or previous["host"] != value["host"] or previous["username"] != value["username"]:
+                    raise HTTPException(400, "Supply the ESXi password when setting or changing the connection.")
+                value["password"] = previous["password"]
+            db.set_settings(value)
         return {"ok": True}
 
     @app.get("/api/settings/media")
@@ -445,6 +466,17 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         if not request.app.state.db.get(str(deployment_id)):
             raise HTTPException(404, "Deployment not found.")
         return request.app.state.service.credentials(str(deployment_id))
+
+    @app.post("/api/deployments/{deployment_id}/stop")
+    def stop_deployment(deployment_id: UUID, request: Request, current=Depends(authenticated)):
+        try:
+            item = request.app.state.service.request_stop(str(deployment_id))
+        except DeploymentStopError as error:
+            raise HTTPException(409, str(error)) from None
+        if item is None:
+            raise HTTPException(404, "Deployment not found.")
+        item["events"] = request.app.state.db.events(str(deployment_id))
+        return item
 
     @app.post("/api/deployments/{deployment_id}/redeploy", status_code=201)
     def redeploy(deployment_id: UUID, payload: RedeployRequest, request: Request, current=Depends(authenticated)):

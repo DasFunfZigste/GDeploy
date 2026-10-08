@@ -4,6 +4,25 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-08
+
+### Added
+
+- **Stop deployment** for queued and running jobs. Queued jobs stop before provisioning; running jobs show **Stopping** until GDeploy reaches a safe boundary, then **Stopped**. Stop requests are persisted and audited. Already-created VMs, disks, installation media, credentials and logs are retained, with separate history hiding and explicit delete/redeploy controls.
+- A **Default port group** in Setup's ESXi connection section, selected from live host inventory. New VM forms use that default while retaining per-VM overrides. Without a valid default, choose a port group explicitly instead of silently using the first network. Defaults belong to their ESXi host; changes do not alter existing jobs or VM choices already entered in a draft.
+
+### Deployment behavior
+
+- Stopping ends GDeploy's orchestration without powering off VMs or undoing completed work. OS installation already running inside a VM can continue. In-flight ESXi tasks and guest installation commands may finish before the stop is acknowledged; additional stages and VMs are skipped. Stopped jobs do not automatically resume.
+- Protect media and software packages while a stop is pending, retain VM ownership and address reservations after stopping, and prevent stale or repeated requests from turning completed jobs into stopped jobs.
+- Show periodic, actionable deployment-log messages while VMware Tools has no guest IP or reports an address different from the requested static IP, including port-group and guest-network checks.
+
+### Installation and compatibility
+
+- From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the full data volume, encryption key, settings, licenses and media. The default-port-group table is added alongside existing data.
+- Finish or resolve active jobs before updating; restarting interrupts active provisioning. Resolve pending stop requests before rolling back to a version without stop support. Older versions do not apply the saved default port group or provide the new stop controls. Updating does not resume earlier failed or interrupted deployments.
+- Automated checks use synthetic VM operations. Live ESXi and licensed guest installation acceptance remain lab checks.
+
 ## [0.11.1] - 2026-10-08
 
 ### Added

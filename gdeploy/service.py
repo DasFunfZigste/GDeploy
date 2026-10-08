@@ -22,6 +22,10 @@ class DeploymentError(RuntimeError):
     pass
 
 
+class DeploymentStopped(RuntimeError):
+    """Internal control flow: finish the current job without starting more work."""
+
+
 def safe_error(error, secret_data=None):
     text = str(error) or type(error).__name__
 
@@ -76,6 +80,7 @@ class DeploymentService:
         self.fleetmanager = FleetManager(db, config)
         self.action_lock = threading.Lock()
         self.stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self.thread = None
         self.worker_error = False
 
@@ -86,8 +91,38 @@ class DeploymentService:
 
     def stop(self):
         self.stop_event.set()
+        self._wake_event.set()
         if self.thread:
             self.thread.join(timeout=5)
+
+    def request_stop(self, deployment_id):
+        deployment = self.db.request_stop(deployment_id)
+        if deployment is not None:
+            self._wake_event.set()
+        return deployment
+
+    def _check_stop(self, deployment_id):
+        if self.db.deployment_status(deployment_id) in {"stopping", "stopped"}:
+            raise DeploymentStopped()
+        if self.stop_event.is_set():
+            raise DeploymentError("Service shutdown requested.")
+
+    def _wait(self, deployment_id, duration):
+        # Clear before reading the durable state so a racing stop cannot be lost.
+        self._wake_event.clear()
+        self._check_stop(deployment_id)
+        self._wake_event.wait(duration)
+        self._check_stop(deployment_id)
+
+    def _guest_session(self, deployment_id, ip, credential):
+        guest = GuestSession(
+            ip, credential["username"], credential["private_key"], credential["password"], credential.get("host_key"),
+        )
+        if callable(getattr(guest, "set_cancellation_hooks", None)):
+            guest.set_cancellation_hooks(
+                lambda: self._check_stop(deployment_id), lambda seconds: self._wait(deployment_id, seconds),
+            )
+        return guest
 
     def client(self, settings):
         if not settings:
@@ -192,7 +227,7 @@ class DeploymentService:
         requested_names = {vm["name"] for vm in spec["vms"]}
         names = {vm["name"] for vm in inventory["vms"]}
         retained = [d for d in self.db.retained() if d["id"] != exclude_id]
-        pending = [d for d in retained if d["status"] in {"queued", "running", "cleaning"}]
+        pending = [d for d in retained if d["status"] in {"queued", "running", "stopping", "cleaning"}]
         reserved = [vm for d in pending for vm in d["vms"]]
         conflicts = requested_names & (names | {vm["name"] for vm in reserved})
         check(
@@ -206,7 +241,7 @@ class DeploymentService:
             vm
             for d in retained
             for vm in d["vms"]
-            if vm.get("vm_id") or d["status"] in {"queued", "running", "cleaning"}
+            if vm.get("vm_id") or d["status"] in {"queued", "running", "stopping", "cleaning"}
         ]
         active_addresses = {vm["address"].split("/")[0] for vm in retained_vms if vm.get("address")}
         active_addresses.update(vm["ip"] for vm in retained_vms if vm.get("ip"))
@@ -313,25 +348,22 @@ class DeploymentService:
                 self.stop_event.wait(10)
 
     def stage(self, deployment_id, stage, message):
-        self.db.update(deployment_id, stage=stage)
-        self.db.event(deployment_id, message)
+        self._check_stop(deployment_id)
+        self.db.progress_stage(deployment_id, stage, message)
+        self._check_stop(deployment_id)
 
     def _wait_for_guest(self, esxi, vm, credential, deployment_id):
         deadline = time.monotonic() + self.config.os_timeout
+        previous_observation = None
+        last_report = 0
         while time.monotonic() < deadline:
-            if self.stop_event.is_set():
-                raise DeploymentError("Service shutdown requested during OS installation.")
+            self._check_stop(deployment_id)
             ip = esxi.guest_ip(vm["vm_id"])
+            self._check_stop(deployment_id)
             expected = str(ipaddress.IPv4Interface(vm["address"]).ip) if vm.get("address") else None
             if ip and (not expected or ip == expected):
                 try:
-                    with GuestSession(
-                        ip,
-                        credential["username"],
-                        credential["private_key"],
-                        credential["password"],
-                        credential.get("host_key"),
-                    ) as guest:
+                    with self._guest_session(deployment_id, ip, credential) as guest:
                         vm["ip"] = ip
                         credential["host_key"] = guest.host_key
                         # Persist the first authenticated SSH host key before running anything.
@@ -344,6 +376,7 @@ class DeploymentService:
                                 deployment_id, safe_error(f"{vm['name']}: {text}", current["secrets"]), level,
                             ),
                         )
+                        self._check_stop(deployment_id)
                         return
                 except GuestConnectionError as exc:
                     # Installation can expose an IP before SSH is ready. Host-key
@@ -353,7 +386,20 @@ class DeploymentService:
                             f"{vm['name']}: {exc} Retrying within the OS installation timeout.", {"credential": credential},
                         ),
                     )
-            self.stop_event.wait(min(10, max(0, deadline - time.monotonic())))
+            else:
+                observation = (ip, expected)
+                current_time = time.monotonic()
+                if observation != previous_observation or current_time - last_report >= 60:
+                    message = (
+                        f"{vm['name']}: VMware Tools has not reported a guest IP address yet. "
+                        "Waiting for OS installation and networking; check the VM console, NIC port group and DHCP."
+                        if not ip else
+                        f"{vm['name']}: VMware Tools reports {ip}, but the requested static IP is {expected}. "
+                        "Waiting for the configured address; check the VM console, NIC port group and guest network."
+                    )
+                    self.db.event(deployment_id, message)
+                    previous_observation, last_report = observation, current_time
+            self._wait(deployment_id, min(10, max(0, deadline - time.monotonic())))
         raise DeploymentError(
             f"Timed out waiting for the operating system on {vm['name']}. Check its ESXi console, DHCP/static network, OS package mirror access, and TCP 22 reachability from GDeploy."
         )
@@ -362,12 +408,18 @@ class DeploymentService:
         deployment = None
         secret_data = {}
         vms = []
+        resources = []
+        outcome = "completed"
+        error = None
         artifact_dir = self.config.data_dir / "artifacts" / deployment_id
         try:
             deployment = self.db.get(deployment_id, private=True)
-            if not deployment:
-                raise DeploymentError("Deployment record is unavailable.")
+            if not deployment or deployment["status"] not in {"running", "stopping"}:
+                return
             secret_data = deployment["secrets"]
+            vms = deployment["vms"]
+            resources = deployment["resources"]
+            self._check_stop(deployment_id)
             # Jobs created before media selection existed retain their environment
             # configuration. A later Setup edit must not switch a queued job's ISO.
             os_media = secret_data.get("os_media") or self.media.legacy()
@@ -375,8 +427,6 @@ class DeploymentService:
             # Jobs from before package selection retain their environment source.
             splunk_package = secret_data.get("splunk_package") if "splunk_package" in secret_data else self.packages.legacy()
             fleetmanager = secret_data.get("fleetmanager")
-            vms = deployment["vms"]
-            resources = deployment["resources"]
             artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.stage(deployment_id, "preflight", "Checking media, host capacity and deployment inputs")
             result = self.preflight(
@@ -388,16 +438,17 @@ class DeploymentService:
                 raise DeploymentError(
                     "; ".join(c["name"] + ": " + c["message"] for c in result["checks"] if not c["ok"])
                 )
+            self._check_stop(deployment_id)
             with self.client(secret_data["esxi"]) as esxi:
                 for vm in vms:
-                    if self.stop_event.is_set():
-                        raise DeploymentError("Service shutdown requested.")
+                    self._check_stop(deployment_id)
                     credential = secret_data["vm_credentials"][vm["name"]]
                     self.stage(deployment_id, "preparing", f"Preparing unattended OS installation for {vm['name']}")
                     iso = artifact_dir / (vm["name"] + ".iso")
                     if os_media:
                         # A mounted file can be replaced while an earlier VM installs.
                         self.media.validate_snapshot(os_media)
+                    self._check_stop(deployment_id)
                     build_seed_iso(
                         Path(os_media["path"]) if os_media else self.config.ubuntu_iso,
                         iso,
@@ -411,15 +462,18 @@ class DeploymentService:
                         log=lambda text, level: self.db.event(deployment_id, safe_error(text, secret_data), level),
                         **({"offline": True} if vm["role"] == "fleetmanager" and fleetmanager["mode"] == "offline" else {}),
                     )
+                    self._check_stop(deployment_id)
                     remote = f"gdeploy/{deployment_id}/{vm['name']}.iso"
                     resources.append({"datastore": vm["datastore"], "path": remote})
                     self.db.update(deployment_id, resources=resources)
                     self.stage(deployment_id, "creating", f"Uploading installation media and creating {vm['name']}")
                     esxi.upload_iso(vm["datastore"], remote, iso)
                     iso.unlink(missing_ok=True)
+                    self._check_stop(deployment_id)
                     vm["vm_id"] = esxi.create_vm(vm, f"[{vm['datastore']}] {remote}", deployment_id)
                     vm["status"] = "installing_os"
                     self.db.update(deployment_id, vms=vms)
+                    self._check_stop(deployment_id)
                     esxi.power_on(vm["vm_id"], deployment_id)
                     self.stage(
                         deployment_id,
@@ -428,7 +482,9 @@ class DeploymentService:
                     )
                     self._wait_for_guest(esxi, vm, credential, deployment_id)
                     self.db.update(deployment_id, secrets=secret_data)
+                    self._check_stop(deployment_id)
                     esxi.detach_iso(vm["vm_id"], deployment_id)
+                    self._check_stop(deployment_id)
                     esxi.delete_iso(vm["datastore"], remote, deployment_id)
                     resources.remove({"datastore": vm["datastore"], "path": remote})
                     vm["status"] = "os_ready"
@@ -440,6 +496,7 @@ class DeploymentService:
                 for vm in sorted(
                     vms, key=lambda item: {"elasticsearch": 0, "kibana": 1, "splunk": 2, "fleetmanager": 3, "ubuntu": 4}[item["role"]]
                 ):
+                    self._check_stop(deployment_id)
                     credential = secret_data["vm_credentials"][vm["name"]]
                     # OS installation may take time: a mounted installer can be
                     # replaced since preflight. Recheck the snapshotted bytes.
@@ -452,13 +509,8 @@ class DeploymentService:
                     self.stage(deployment_id, "installing_software", f"Configuring {role_label} on {vm['name']}")
                     vm["status"] = "installing_software"
                     self.db.update(deployment_id, vms=vms)
-                    with GuestSession(
-                        vm["ip"],
-                        credential["username"],
-                        credential["private_key"],
-                        credential["password"],
-                        credential["host_key"],
-                    ) as guest:
+                    self._check_stop(deployment_id)
+                    with self._guest_session(deployment_id, vm["ip"], credential) as guest:
                         installed = guest.install(
                             vm["role"],
                             secret_data["software"],
@@ -477,29 +529,33 @@ class DeploymentService:
                     ]
                     vm["status"] = "completed"
                     self.db.update(deployment_id, vms=vms, secrets=secret_data)
+                    # Installation may generate new credentials. Save its result
+                    # before acknowledging a stop requested while it was running.
+                    self._check_stop(deployment_id)
                 self.stage(deployment_id, "verifying", "OS readiness and application health checks passed")
-            self.db.update(deployment_id, status="completed", stage="completed")
-            self.db.event(
-                deployment_id, "Deployment completed. Open Credentials for VM and application sign-in details."
-            )
+        except DeploymentStopped:
+            # The database atomically acknowledges the persisted stop below.
+            outcome = "interrupted"
         except Exception as exc:
+            if deployment is None:
+                raise
             error = safe_error(exc, secret_data)
-            status = "interrupted" if self.stop_event.is_set() else "failed"
-            updates = {"status": status, "stage": status, "error": error}
-            if deployment is not None:
-                updates.update(vms=vms, secrets=secret_data)
-            self.db.update(deployment_id, **updates)
-            self.db.event(deployment_id, error, "error")
+            outcome = "interrupted" if self.stop_event.is_set() else "failed"
         finally:
             # Only our own local working directory; shared source media is never removed.
             shutil.rmtree(artifact_dir, ignore_errors=True)
+        # Active SSH/ESXi contexts and local preparation have ended before the
+        # job becomes stopped and media can be deleted or history hidden.
+        self.db.finish(
+            deployment_id, outcome, vms=vms, resources=resources, secrets=secret_data, error=error,
+        )
 
     def redeploy(self, deployment_id, confirm_name):
         deployment = self.db.get(deployment_id, private=True)
         if not deployment:
             raise DeploymentError("Deployment not found.")
-        if deployment["status"] not in {"failed", "interrupted", "cleanup_failed"}:
-            raise DeploymentError("Only failed or interrupted deployments can be deleted and redeployed.")
+        if deployment["status"] not in {"failed", "stopped", "interrupted", "cleanup_failed"}:
+            raise DeploymentError("Only failed, stopped or interrupted deployments can be deleted and redeployed.")
         if confirm_name != deployment["name"]:
             raise DeploymentError("Type the exact deployment name to confirm deletion.")
         self.db.update(deployment_id, status="cleaning", stage="cleaning", error=None)

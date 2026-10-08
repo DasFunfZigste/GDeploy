@@ -1,5 +1,5 @@
 FROM python:3.12-slim-bookworm
-ARG VERSION=0.11.1
+ARG VERSION=0.12.0
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="GDeploy" \
     org.opencontainers.image.description="OS and application VM deployment for standalone ESXi" \
