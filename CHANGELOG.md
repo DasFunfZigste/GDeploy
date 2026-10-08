@@ -4,6 +4,23 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-08
+
+### Added
+
+- A separate **Previous deployments** view for hidden records, shown as a child beneath **Deployments** in the sidebar when browsing deployments. Search, filter, inspect logs/credentials and restore records from this view. The main Deployments view contains visible records only; the former **Show hidden** checkbox is replaced by this navigation.
+- Filter hidden records on the server before applying the history limit, so recent visible jobs do not crowd older hidden jobs out of Previous deployments.
+
+### Fixed
+
+- Keep Hide/Restore controls synchronized with the latest deployment status, including when a running job becomes **Stopped** while logs are selected or open for manual copying. Hiding/restoring preserves the log-copy buffer and updates the surrounding navigation and controls.
+- Let finished and stopped jobs be hidden/restored without waiting for unrelated ESXi, queueing or redeploy operations. Visibility changes retain their atomic status checks, authentication and CSRF protection. **Stopping** jobs become hideable only after the worker acknowledges **Stopped**.
+
+### Installation and compatibility
+
+- From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the data volume, encryption key, settings and media. No data migration is required; existing hidden records appear in Previous deployments.
+- Hiding and restoring change only list visibility. VMs, disks, credentials, logs, job status and resource reservations remain intact. This release does not add permanent job deletion or resume stopped jobs.
+
 ## [0.12.1] - 2026-10-08
 
 ### Changed

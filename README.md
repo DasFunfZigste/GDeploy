@@ -50,7 +50,7 @@ The rebuild preserves the existing data volume, account, settings and history. K
 - Unattended Ubuntu installation using a remastered, bootable ISO and NoCloud autoinstall configuration.
 - Unique generated guest/application credentials, encrypted storage and an explicit **Credentials** view in every deployment.
 - Stage progress, persisted events and expandable deployment logs with sanitized error details. **Copy logs** supports HTTP LAN access and offers full-text manual copying if the browser blocks automatic copying. Interrupted work is identified on restart.
-- Reversible history hiding for finished jobs, with **Show hidden** and **Restore**. VMs, logs and credentials remain available.
+- Reversible history hiding for finished and stopped jobs, with a separate **Deployments → Previous deployments** view and **Restore**. VMs, logs and credentials remain available.
 - Stop queued or running deployments while preserving created VMs, disks, credentials and logs. Running jobs acknowledge the stop at a safe boundary; existing guest operations may finish and stopped jobs do not resume automatically.
 - Data-filesystem capacity and saved ISO usage in Setup, with protected deletion of unused uploaded or ESXi-imported copies.
 - Failed-deployment **delete & redeploy**, with typed confirmation and strict resource ownership checks.
@@ -65,7 +65,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The current iteration is **v0.12.1**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.12.1` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
+The current iteration is **v0.13.0**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.13.0` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -125,7 +125,7 @@ As an optional alternative for a private CA, make a PEM bundle containing the no
 
 ## Failure recovery
 
-To remove a finished record from the default **Deployment history**, select **Hide** in its row or **Hide from history** on its detail page. Check **Show hidden** to include hidden records, then select **Restore** to show one normally again. Direct links to hidden deployments still open their details. Queued, running and cleaning work cannot be hidden.
+To remove a finished or stopped record from the main **Deployment history**, select **Hide** in its row or **Hide from Deployments** on its detail page. Click **Deployments** in the sidebar to reveal **Previous deployments** underneath it. That separate view contains hidden records; select **Restore** to move one back to the main list. Direct links still open hidden deployment details. Queued, running, stopping and cleaning work cannot be hidden; a stop request must finish before Hide becomes available.
 
 Hiding preserves the VMs, original job status, logs, credentials and resource reservations. It does not complete failed checks, resume provisioning or remove attached installation media. If a VM is healthy but its deployment record failed a readiness check, you can keep that VM and hide the record. Inspect the guest and logs before deciding whether any unfinished work needs attention.
 

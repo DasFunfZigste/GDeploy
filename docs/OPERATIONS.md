@@ -313,7 +313,9 @@ Edit the list and save to add or remove keys; save an empty list to stop adding 
 
 ### Manage deployment history
 
-Select **Hide** beside a finished record in **Deployment history**, or **Hide from history** on its detail page. The record disappears from the default list. Enable **Show hidden** to include hidden records with a **Hidden** badge, then select **Restore** in the row or **Restore to history** on the detail page. Hidden records remain accessible through their direct links, and their visibility setting survives container restarts and rebuilds using the same data volume. Queued, running and cleaning jobs cannot be hidden.
+Select **Hide** beside a finished or stopped record in **Deployment history**, or **Hide from Deployments** on its detail page. The record moves out of the main list. Click **Deployments** in the left navigation, then **Previous deployments** underneath it to see hidden records in their own view. Search, filter, open details or reveal credentials there, then select **Restore** to return a record to the main Deployments view. Hidden records remain accessible through direct links, and their visibility setting survives container restarts and rebuilds using the same data volume.
+
+Queued, running, stopping and cleaning jobs cannot be hidden. After requesting a stop, wait for **Stopped**; Hide becomes available when the worker acknowledges that it has finished its current operation. Status and visibility controls continue updating while logs are selected or open for manual copying. Hiding or restoring a finished job does not wait for unrelated provisioning work.
 
 Hiding changes only history visibility. It preserves VMs and their disks, the original status, logs, credentials, ownership and resource reservations. For example, a healthy OS-only VM can be kept while its failed readiness-check record is hidden. Hiding does not mark that job successful, retry its checks, finish provisioning or detach/delete its installation media. Use the deployment logs and ESXi console to assess unfinished work; **Delete & redeploy** is for deliberately replacing the deployment's VMs.
 
@@ -335,9 +337,9 @@ findmnt -n -o SOURCE,FSTYPE /
 
 After OS readiness passes, GDeploy detaches and deletes that VM's temporary installation ISO, finishes any remaining VMs, and installs/verifies the selected software before completing the job. An **OS only** VM has no application package installation after this check. A record stopped at readiness can therefore leave its temporary ISO attached/stored or selected applications unfinished.
 
-Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from history** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
+Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from Deployments** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.12.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.13.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## Optional manual credentials
 
@@ -394,10 +396,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.12.1** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.13.0** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.12.1-deploy.tar.gz`
-- `gdeploy-0.12.1-linux-amd64.image.tar.gz`
+- `gdeploy-0.13.0-deploy.tar.gz`
+- `gdeploy-0.13.0-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -409,12 +411,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.12.1-deploy.tar.gz
-sudo docker load --input gdeploy-0.12.1-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.13.0-deploy.tar.gz
+sudo docker load --input gdeploy-0.13.0-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.12.1` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.13.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
@@ -462,7 +464,7 @@ Common startup issues:
 | A saved ISO cannot be deleted | Use **Clear saved selection** or select another ISO if this is the current choice. Resolve any queued, running, stopping or cleaning deployment using it; clearing the default does not remove that protection. Only uploaded/ESXi-imported local copies can be deleted in Setup; server-mounted files and original ESXi ISOs are outside this control. |
 | ISO upload is rejected or interrupted | Browser uploads are limited to 16 GiB. Check the data volume's free space and, if using a reverse proxy, its request-size and upload-timeout settings. The prior media selection remains saved. |
 | ESXi connection fails | Check the hostname, port 443, credentials and API license/permissions. For certificate errors, retrieve the certificate in Setup → ESXi connection and verify its fingerprint and dates. A renewed certificate requires a new approval. |
-| A finished deployment is missing from history | Enable **Show hidden** and check the search/status filters. Select **Restore** to return the record to the default list. Hiding retains the VM, credentials and logs. |
+| A finished deployment is missing from history | Open **Deployments → Previous deployments** and check the search/status filters. Select **Restore** to return the record to the main list. Hiding retains the VM, credentials and logs. |
 | Copy logs is blocked by the browser | Use the selected **Full deployment log** shown after the automatic copy attempts fail. Press Ctrl+C (⌘C on Mac) or the browser's Copy command, then **Done copying**. The snapshot includes the deployment header and recorded events, even on HTTP LAN access. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
 

@@ -589,12 +589,17 @@ class Database:
             row = c.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
         return self._decode(row, private)
 
-    def list(self, include_hidden=False):
+    def list(self, include_hidden=False, hidden_only=False):
+        # Filter each history view before limiting it so newer records in the
+        # other view cannot crowd out older matching deployments.
+        selection = ""
+        if hidden_only:
+            selection = "WHERE hidden_at IS NOT NULL "
+        elif not include_hidden:
+            selection = "WHERE hidden_at IS NULL "
         with self.connect() as c:
             rows = c.execute(
-                "SELECT * FROM deployments "
-                + ("" if include_hidden else "WHERE hidden_at IS NULL ")
-                + "ORDER BY created_at DESC LIMIT 500"
+                "SELECT * FROM deployments " + selection + "ORDER BY created_at DESC LIMIT 500"
             ).fetchall()
         return [self._decode(row) for row in rows]
 

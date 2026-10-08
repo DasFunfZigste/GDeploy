@@ -424,8 +424,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         return {"ok": True}
 
     @app.get("/api/deployments")
-    def deployments(request: Request, include_hidden: bool = False, current=Depends(authenticated)):
-        return request.app.state.db.list(include_hidden=include_hidden)
+    def deployments(request: Request, include_hidden: bool = False, hidden_only: bool = False, current=Depends(authenticated)):
+        return request.app.state.db.list(include_hidden=include_hidden, hidden_only=hidden_only)
 
     @app.get("/api/deployments/{deployment_id}")
     def detail(deployment_id: UUID, request: Request, current=Depends(authenticated)):
@@ -439,17 +439,17 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     def deployment_visibility(
         deployment_id: UUID, payload: DeploymentVisibility, request: Request, current=Depends(authenticated)
     ):
-        service = request.app.state.service
         db = request.app.state.db
-        with service.action_lock:
-            try:
-                item = db.set_visibility(str(deployment_id), payload.hidden)
-            except DeploymentVisibilityError as exc:
-                raise HTTPException(409, str(exc)) from None
-            if item is None:
-                raise HTTPException(404, "Deployment not found.")
-            item["events"] = db.events(str(deployment_id))
-            return item
+        # The database checks the state and changes visibility atomically. Do
+        # not wait behind unrelated ESXi calls held under the provisioning lock.
+        try:
+            item = db.set_visibility(str(deployment_id), payload.hidden)
+        except DeploymentVisibilityError as exc:
+            raise HTTPException(409, str(exc)) from None
+        if item is None:
+            raise HTTPException(404, "Deployment not found.")
+        item["events"] = db.events(str(deployment_id))
+        return item
 
     @app.post("/api/preflight")
     def preflight(payload: DeploymentSpec, request: Request, current=Depends(authenticated)):

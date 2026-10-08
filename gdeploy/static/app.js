@@ -6,7 +6,7 @@
   const state = {
     session: null, settings: null, inventory: null, inventoryHost: null, deployments: [], detail: null, detailPending: null,
     route: 'deployments', detailId: null, detailRequest: 0, routeEpoch: 0, pollBusy: false,
-    search: '', filter: 'all', includeHidden: false, historyRevision: 0, visibilityBusy: new Set(), stopBusy: new Set(), wizard: null, secrets: null, secretTimer: null,
+    historyViews: {deployments: {search: '', filter: 'all'}, previous: {search: '', filter: 'all'}}, historyRevision: 0, visibilityBusy: new Set(), stopBusy: new Set(), wizard: null, secrets: null, secretTimer: null,
     secretDeadline: 0, secretRequest: 0, toastTimer: null,
     setupBusy: false, mediaUpload: null, setupTab: null, packageTab: 'splunk', openLogs: new Set(),
   };
@@ -203,7 +203,7 @@
     state.inventory = null;
     state.inventoryHost = null;
     state.deployments = [];
-    state.includeHidden = false;
+    state.historyViews = {deployments: {search: '', filter: 'all'}, previous: {search: '', filter: 'all'}};
     state.historyRevision++;
     state.visibilityBusy.clear();
     state.stopBusy.clear();
@@ -212,6 +212,8 @@
     state.detailId = null;
     state.openLogs.clear();
     $('#sidebar-preview').open = false;
+    $('#deployments-subnav').hidden = true;
+    $('#nav-deployments').setAttribute('aria-expanded', 'false');
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
     $('#wizard-dialog').replaceChildren();
     page.replaceChildren();
@@ -266,6 +268,10 @@
     catch (error) { if (setupRequired()) inlineError($('#setup-error'), error.message); else globalError(error.message); }
   }
   function markNav(name) {
+    const deploymentBranch = name !== 'settings';
+    $('#deployments-subnav').hidden = !deploymentBranch;
+    $('#nav-deployments').setAttribute('aria-expanded', String(deploymentBranch));
+    $('#nav-deployments').classList.toggle('branch-active', deploymentBranch);
     for (const link of document.querySelectorAll('[data-nav]')) {
       const active = link.dataset.nav === name;
       link.classList.toggle('active', active);
@@ -313,9 +319,9 @@
         renderDetail(data);
       } catch (error) { if (epoch === state.routeEpoch) renderLoadError(error, route); }
     } else {
-      state.route = 'deployments';
-      markNav('deployments');
-      $('#breadcrumb').textContent = 'Deployments';
+      state.route = hash === 'deployments/previous' ? 'previous' : 'deployments';
+      markNav(state.route);
+      $('#breadcrumb').textContent = state.route === 'previous' ? 'Previous deployments' : 'Deployments';
       const results = await Promise.allSettled([api(deploymentListPath()), api('/api/settings')]);
       if (epoch !== state.routeEpoch) return;
       if (results[1].status === 'fulfilled') state.settings = results[1].value;
@@ -333,7 +339,10 @@
   function heading(title, description, action) {
     return el('div', {class: 'page-heading'}, el('div', {}, el('h1', {}, title), el('p', {}, description)), action);
   }
-  function deploymentListPath() { return `/api/deployments${state.includeHidden ? '?include_hidden=true' : ''}`; }
+  const isDeploymentList = () => state.route === 'deployments' || state.route === 'previous';
+  const deploymentView = () => state.historyViews[state.route === 'previous' ? 'previous' : 'deployments'];
+  const belongsToDeploymentList = data => Boolean(data.hidden_at) === (state.route === 'previous');
+  function deploymentListPath() { return `/api/deployments${state.route === 'previous' ? '?hidden_only=true' : ''}`; }
   function stopButton(data, compact = false) {
     if (!stoppableStatuses.has(data.status) && data.status !== 'stopping') return null;
     const control = button(data.status === 'stopping' ? 'Stopping…' : compact ? 'Stop' : 'Stop deployment', `button-small ${compact ? 'button-ghost' : 'button-full'}`, () => openStopDeployment(data), 'close');
@@ -380,14 +389,28 @@
     dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('info'), el('h2', {id: 'confirm-title'}, 'Stop this deployment?')), el('div', {class: 'confirm-body'}, el('p', {}, 'Stop GDeploy’s automation for ', el('strong', {}, data.name), '. Existing VMs, disks, and data stay in place.'), el('p', {}, 'This does not power off VMs or undo work already started. An installation already running inside a VM may continue. GDeploy may finish its current operation before marking this deployment Stopped.'), el('p', {}, 'A stopped deployment cannot be resumed. Delete & redeploy remains a separate action that permanently removes its VMs and disks.'), errorBox, el('div', {class: 'confirm-actions'}, dismiss, confirm)));
     dialog.showModal(); dismiss.focus();
   }
-  function visibilityButton(data, compact = false) {
-    const hidden = Boolean(data.hidden_at);
-    const control = button(hidden ? compact ? 'Restore' : 'Restore to history' : compact ? 'Hide' : 'Hide from history', `button-small ${compact ? 'button-ghost' : 'button-full'}`, () => setDeploymentVisibility(data, !hidden, control));
-    control.id = `history-visibility-${data.id}`;
-    control.disabled = state.visibilityBusy.has(data.id) || (!hidden && !hideableStatuses.has(data.status));
-    control.setAttribute('aria-label', hidden ? `Restore ${data.name} to history` : `Hide ${data.name} from history`);
-    control.title = control.disabled ? 'Active deployments cannot be hidden.' : hidden ? 'Show this deployment in the default history view.' : 'Hide this record without changing its VMs, credentials, or logs.';
+  function latestDeployment(data) {
+    const current = state.detailId === data.id ? state.detailPending || state.detail : state.deployments.find(row => row.id === data.id);
+    return current && (!data.updated_at || current.updated_at >= data.updated_at) ? current : data;
+  }
+  function updateVisibilityButton(control, data, compact = control.classList.contains('button-ghost')) {
+    const hidden = Boolean(data.hidden_at), busy = state.visibilityBusy.has(data.id);
+    const label = hidden ? compact ? 'Restore' : 'Restore to Deployments' : compact ? 'Hide' : 'Hide from Deployments';
+    control.disabled = busy || (!hidden && !hideableStatuses.has(data.status));
+    control.setAttribute('aria-label', hidden ? `Restore ${data.name} to Deployments` : `Hide ${data.name} from Deployments`);
+    control.title = busy ? 'Saving this deployment’s visibility.' : data.status === 'stopping' && !hidden ? 'Wait until this deployment is Stopped before hiding it.' : control.disabled ? 'Active deployments cannot be hidden.' : hidden ? 'Move this record back to Deployments.' : 'Move this record to Previous deployments. VMs, credentials, and logs stay available.';
+    if (!busy && control.textContent !== label) control.replaceChildren(label);
+    control.onclick = () => { const current = latestDeployment(data); setDeploymentVisibility(current, !current.hidden_at, control); };
     return control;
+  }
+  function visibilityButton(data, compact = false) {
+    const control = button('', `button-small ${compact ? 'button-ghost' : 'button-full'}`);
+    control.id = `history-visibility-${data.id}`;
+    return updateVisibilityButton(control, data, compact);
+  }
+  function reconcileVisibilityControl(data) {
+    const control = document.getElementById(`history-visibility-${data.id}`);
+    if (control) updateVisibilityButton(control, data);
   }
   async function setDeploymentVisibility(data, hidden, control) {
     if (state.visibilityBusy.has(data.id)) return;
@@ -398,63 +421,59 @@
     setBusy(control, hidden ? 'Hiding…' : 'Restoring…'); globalError('');
     try {
       updated = await api(`/api/deployments/${encodeURIComponent(data.id)}/visibility`, {method: 'PATCH', body: {hidden}});
-      state.visibilityBusy.delete(data.id); state.historyRevision++;
       if (state.session !== session) return;
+      state.visibilityBusy.delete(data.id); state.historyRevision++;
       if (state.routeEpoch === epoch) {
-        if (state.route === 'detail' && state.detailId === data.id) { state.detail = updated; renderDetail(updated); }
-        if (state.route === 'deployments') {
+        if (state.route === 'detail' && state.detailId === data.id) applyDetailUpdate(updated);
+        if (isDeploymentList()) {
           const listEntry = {...updated};
           delete listEntry.events;
-          state.deployments = state.deployments.map(row => row.id === data.id ? listEntry : row).filter(row => state.includeHidden || !row.hidden_at);
+          state.deployments = state.deployments.map(row => row.id === data.id ? listEntry : row).filter(belongsToDeploymentList);
           renderOverview();
         }
-        (document.getElementById(`history-visibility-${data.id}`) || $('#history-show-hidden'))?.focus({preventScroll: true});
-      }
-      notify(hidden ? 'Deployment hidden. VMs, credentials, and logs are unchanged.' : 'Deployment restored to history.');
-    } catch (error) { if (state.routeEpoch === epoch) globalError(error.message); }
-    finally {
-      state.visibilityBusy.delete(data.id);
-      if (state.session === session) {
-        const currentControl = document.getElementById(`history-visibility-${data.id}`);
-        if (currentControl) {
-          const currentData = updated || (state.detail?.id === data.id ? state.detail : state.deployments.find(row => row.id === data.id)) || data;
-          const focused = document.activeElement === currentControl;
-          const replacement = visibilityButton(currentData, currentControl.classList.contains('button-ghost'));
-          currentControl.replaceWith(replacement);
-          if (focused) replacement.focus({preventScroll: true});
+        if (document.activeElement === document.body || document.activeElement === control) {
+          (document.getElementById(`history-visibility-${data.id}`) || $('#history-search'))?.focus({preventScroll: true});
         }
+      }
+      notify(hidden ? 'Moved to Previous deployments. VMs, credentials, and logs are unchanged.' : 'Restored to Deployments.');
+    } catch (error) { if (state.session === session && state.routeEpoch === epoch) globalError(error.message); }
+    finally {
+      if (state.session === session) {
+        state.visibilityBusy.delete(data.id); state.historyRevision++;
+        // Log copying can hold an older full detail snapshot. Always reconcile
+        // against the newer lifecycle record so a Stopped job remains hideable.
+        reconcileVisibilityControl(latestDeployment(updated || data));
       }
     }
   }
   function renderOverview() {
-    const rows = state.deployments;
+    const previous = state.route === 'previous', view = deploymentView();
+    const rows = state.deployments.filter(belongsToDeploymentList);
     const active = rows.filter(row => busyStatuses.has(row.status)).length;
     const completed = rows.filter(row => row.status === 'completed').length;
     const failures = rows.filter(row => failureStatuses.has(row.status)).length;
     const metric = (title, value, foot, symbol, extra = '') => el('div', {class: `metric ${extra}`}, el('div', {class: 'metric-top'}, title, icon(symbol)), el('div', {class: 'metric-value'}, value), el('div', {class: 'metric-foot'}, foot));
-    const metrics = el('div', {class: 'metrics'}, metric('Total deployments', rows.length, state.includeHidden ? 'Including hidden runs' : 'Visible deployment runs', 'grid'), metric('Ready to use', completed, 'Successfully provisioned', 'checkCircle', 'success'), metric('In progress', active, 'Queued, running, stopping, or cleaning', 'activity'), metric('Needs attention', failures, 'Review errors and logs', 'alert', failures ? 'warning' : ''));
-    const search = el('input', {class: 'search-field', type: 'search', placeholder: 'Search deployments…', 'aria-label': 'Search deployments', value: state.search, onInput: event => { state.search = event.target.value; renderDeploymentRows(); }});
-    const filter = el('select', {class: 'filter-select', 'aria-label': 'Filter by deployment status', onChange: event => { state.filter = event.target.value; renderDeploymentRows(); }}, el('option', {value: 'all'}, 'All statuses'), el('option', {value: 'active'}, 'In progress'), el('option', {value: 'completed'}, 'Completed'), el('option', {value: 'attention'}, 'Needs attention'), el('option', {value: 'stopped'}, 'Stopped'), el('option', {value: 'reverted'}, 'Reverted'));
-    filter.value = state.filter;
-    const showHidden = el('label', {class: 'check-label history-hidden-filter'}, el('input', {id: 'history-show-hidden', type: 'checkbox', checked: state.includeHidden, onChange: async event => {
-      state.includeHidden = event.target.checked; state.historyRevision++;
-      await route();
-      if (state.route === 'deployments') $('#history-show-hidden')?.focus({preventScroll: true});
-    }}), 'Show hidden');
-    const history = el('section', {class: 'surface', 'aria-labelledby': 'history-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'history-title'}, 'Deployment history', el('span', {class: 'count-badge'}, rows.length)), el('p', {}, 'Hide finished runs without changing their VMs. Restore them at any time.')), showHidden), el('div', {class: 'history-controls'}, search, filter), el('div', {id: 'deployment-rows'}));
-    const setupBanner = !state.settings?.configured || !state.settings?.iso_configured ? el('div', {class: 'connection-banner'}, icon('server'), el('div', {}, el('strong', {}, 'Finish your GDeploy setup'), el('p', {}, 'Connect an ESXi host and select an OS ISO before creating a deployment.')), el('a', {href: state.settings?.configured ? '#settings/media' : '#settings/connection', class: 'button button-small'}, 'Open Setup', icon('arrow'))) : null;
-    page.replaceChildren(...[heading('Deployments', 'Build your environment. We’ll take care of the setup.', button(state.wizard?.suspended ? 'Continue deployment' : 'New deployment', 'button-primary', openWizard, 'plus')), metrics, setupBanner, history].filter(Boolean));
+    const metrics = previous ? null : el('div', {class: 'metrics'}, metric('Total deployments', rows.length, 'Visible deployment runs', 'grid'), metric('Ready to use', completed, 'Successfully provisioned', 'checkCircle', 'success'), metric('In progress', active, 'Queued, running, stopping, or cleaning', 'activity'), metric('Needs attention', failures, 'Review errors and logs', 'alert', failures ? 'warning' : ''));
+    const search = el('input', {id: 'history-search', class: 'search-field', type: 'search', placeholder: previous ? 'Search previous deployments…' : 'Search deployments…', 'aria-label': previous ? 'Search previous deployments' : 'Search deployments', value: view.search, onInput: event => { view.search = event.target.value; renderDeploymentRows(); }});
+    const filter = el('select', {id: 'history-status', class: 'filter-select', 'aria-label': 'Filter by deployment status', onChange: event => { view.filter = event.target.value; renderDeploymentRows(); }}, el('option', {value: 'all'}, 'All statuses'), el('option', {value: 'active'}, 'In progress'), el('option', {value: 'completed'}, 'Completed'), el('option', {value: 'attention'}, 'Needs attention'), el('option', {value: 'stopped'}, 'Stopped'), el('option', {value: 'reverted'}, 'Reverted'));
+    filter.value = view.filter;
+    const history = el('section', {class: 'surface', 'aria-labelledby': 'history-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'history-title'}, previous ? 'Hidden deployments' : 'Deployment history', el('span', {class: 'count-badge'}, rows.length)), el('p', {}, previous ? 'Open a record to see its details, credentials, and logs. Restore it to return it to Deployments.' : 'Hide finished records to move them to Previous deployments. Their VMs stay in place.'))), el('div', {class: 'history-controls'}, search, filter), el('div', {id: 'deployment-rows'}));
+    const setupBanner = !previous && (!state.settings?.configured || !state.settings?.iso_configured) ? el('div', {class: 'connection-banner'}, icon('server'), el('div', {}, el('strong', {}, 'Finish your GDeploy setup'), el('p', {}, 'Connect an ESXi host and select an OS ISO before creating a deployment.')), el('a', {href: state.settings?.configured ? '#settings/media' : '#settings/connection', class: 'button button-small'}, 'Open Setup', icon('arrow'))) : null;
+    const title = previous ? heading('Previous deployments', 'Hidden records, with their VMs, credentials, and logs preserved.') : heading('Deployments', 'Build your environment. We’ll take care of the setup.', button(state.wizard?.suspended ? 'Continue deployment' : 'New deployment', 'button-primary', openWizard, 'plus'));
+    page.replaceChildren(...[title, metrics, setupBanner, history].filter(Boolean));
     renderDeploymentRows();
   }
   function renderDeploymentRows() {
     const container = $('#deployment-rows');
     if (!container) return;
-    if (!state.deployments.length) {
-      container.replaceChildren(el('div', {class: 'empty-state'}, el('div', {class: 'empty-icon'}, icon('server')), el('h3', {}, 'No deployments in this view'), el('p', {}, state.includeHidden ? 'Create a deployment to start building your environment.' : 'Create a deployment, or select Show hidden to find and restore hidden records.'), button('Create a deployment', 'button-primary', openWizard, 'plus')));
+    const previous = state.route === 'previous', view = deploymentView();
+    const visibleRows = state.deployments.filter(belongsToDeploymentList);
+    if (!visibleRows.length) {
+      container.replaceChildren(el('div', {class: 'empty-state'}, el('div', {class: 'empty-icon'}, icon(previous ? 'clock' : 'server')), el('h3', {}, previous ? 'No previous deployments' : 'No deployments in this view'), el('p', {}, previous ? 'Records you hide from Deployments will appear here. Their VMs, credentials, and logs stay available.' : 'Create a deployment, or open Previous deployments to restore a hidden record.'), previous ? el('a', {class: 'button', href: '#deployments'}, 'View Deployments', icon('arrow')) : el('div', {class: 'empty-history-actions'}, button('Create a deployment', 'button-primary', openWizard, 'plus'), el('a', {class: 'button', href: '#deployments/previous'}, 'Previous deployments', icon('clock')))));
       return;
     }
-    const query = state.search.trim().toLowerCase();
-    const rows = state.deployments.filter(row => (!query || String(row.name).toLowerCase().includes(query) || (row.vms || []).some(vm => String(vm.name).toLowerCase().includes(query))) && (state.filter === 'all' || (state.filter === 'active' ? busyStatuses.has(row.status) : state.filter === 'attention' ? failureStatuses.has(row.status) : row.status === state.filter)));
+    const query = view.search.trim().toLowerCase();
+    const rows = visibleRows.filter(row => (!query || String(row.name).toLowerCase().includes(query) || (row.vms || []).some(vm => String(vm.name).toLowerCase().includes(query))) && (view.filter === 'all' || (view.filter === 'active' ? busyStatuses.has(row.status) : view.filter === 'attention' ? failureStatuses.has(row.status) : row.status === view.filter)));
     if (!rows.length) { container.replaceChildren(el('div', {class: 'empty-state'}, el('h3', {}, 'No matching deployments'), el('p', {}, 'Try another name or status filter.'))); return; }
     const body = el('tbody');
     for (const row of rows) {
@@ -1590,9 +1609,22 @@
     if (stoppableStatuses.has(data.status)) controls.append(el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Deployment controls')), el('div', {class: 'recovery-body'}, el('p', {}, 'Stop GDeploy’s automation while keeping existing VMs, disks, and data.'), stopButton(data))));
     if (data.status === 'stopping') controls.append(el('section', {class: 'surface', id: 'deployment-stop-status', role: 'status'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Stop requested')), el('div', {class: 'recovery-body'}, el('p', {}, 'GDeploy is waiting for its current operation to finish. Existing VMs and disks are preserved; VMs are not powered off.'), stopButton(data))));
     if (data.status === 'stopped') controls.append(el('section', {class: 'surface', id: 'deployment-stop-status', role: 'status'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Deployment stopped')), el('div', {class: 'recovery-body'}, el('p', {}, 'GDeploy has stopped its automation. Existing VMs and disks are preserved; work already started inside a VM may continue. This deployment cannot be resumed.'), el('p', {}, 'Keep the VMs and hide this record, or use the separate Delete & redeploy action below to start over.'))));
-    if (data.hidden_at || hideableStatuses.has(data.status)) controls.append(el('section', {class: 'surface history-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'History visibility')), el('div', {class: 'recovery-body'}, el('p', {}, data.hidden_at ? 'This record is hidden from the default history view. Its deployment status is unchanged.' : 'Keep the VMs and hide this record from the default history view. Find it again with Show hidden. Credentials and logs stay available.'), visibilityButton(data))));
+    if (data.hidden_at || hideableStatuses.has(data.status)) controls.append(el('section', {class: 'surface history-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'History visibility')), el('div', {class: 'recovery-body'}, el('p', {}, data.hidden_at ? 'This record is in Previous deployments. Restore it to return it to Deployments. Its deployment status is unchanged.' : 'Move this record to Previous deployments while keeping its VMs, credentials, and logs available.'), visibilityButton(data))));
     if (failureStatuses.has(data.status) || data.status === 'stopped') controls.append(el('section', {class: 'surface recovery-card'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Start over')), el('div', {class: 'recovery-body'}, el('p', {}, 'If the VM is working, you can keep it and hide this record instead. Starting over permanently deletes the VMs, all data on their disks, and installation media owned by this deployment.'), el('p', {}, 'A replacement uses the same VM configuration and the current OS ISO selection in Setup.'), button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger button-full', () => openRedeploy(data), 'refresh'))));
     return controls;
+  }
+  function renderVisibilityNotice(data) {
+    return el('div', {id: 'deployment-visibility-notice', class: 'visibility-notice', role: 'status', hidden: !data.hidden_at}, icon('info'), el('div', {}, el('strong', {}, 'In Previous deployments'), el('p', {}, 'The recorded status, VMs, credentials, and logs are preserved. Restore this record using History visibility.')));
+  }
+  function syncDetailNavigation(data) {
+    const previous = Boolean(data.hidden_at), back = $('#deployment-back');
+    markNav(previous ? 'previous' : 'deployments');
+    $('#breadcrumb').textContent = previous ? 'Previous deployments / Details' : 'Deployments / Details';
+    if (back) {
+      const label = previous ? 'Previous deployments' : 'All deployments';
+      back.href = previous ? '#deployments/previous' : '#deployments';
+      if (back.textContent !== label) back.replaceChildren(icon('back'), label);
+    }
   }
   function renderDetail(data) {
     state.detailPending = null;
@@ -1602,7 +1634,7 @@
     const focusedLogControl = $('#deployment-logs')?.contains(document.activeElement) ? document.activeElement.id : null;
     const focusedHistoryControl = document.activeElement?.id === `history-visibility-${data.id}` ? document.activeElement.id : null;
     const vms = data.vms || [];
-    const back = el('a', {class: 'back-link', href: '#deployments'}, icon('back'), 'All deployments');
+    const back = el('a', {id: 'deployment-back', class: 'back-link', href: data.hidden_at ? '#deployments/previous' : '#deployments'}, icon('back'), data.hidden_at ? 'Previous deployments' : 'All deployments');
     const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), el('span', {id: 'deployment-detail-status', role: 'status'}, statusBadge(data.status))), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'} · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
     const vmSurface = el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Virtual machines', el('span', {class: 'count-badge'}, vms.length))));
     for (const vm of vms) {
@@ -1651,11 +1683,12 @@
     const logs = el('section', {class: 'surface', id: 'deployment-logs', 'aria-labelledby': 'deployment-logs-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'deployment-logs-title'}, 'Deployment logs'), el('p', {}, `${data.events?.length || 0} recorded events${busyStatuses.has(data.status) ? ' · Updates automatically' : ''}`)), logToggle), logContents);
     setLogsOpen(state.openLogs.has(data.id));
     const failure = data.error ? el('div', {class: 'alert alert-error deployment-error', role: 'alert'}, el('strong', {}, 'Deployment needs attention'), el('p', {}, data.error), button('View deployment logs', 'button-small', () => setLogsOpen(true, true), 'terminal')) : null;
-    const hiddenNotice = data.hidden_at ? el('div', {class: 'visibility-notice', role: 'status'}, icon('info'), el('div', {}, el('strong', {}, 'Hidden from deployment history'), el('p', {}, 'The recorded status, VMs, credentials, and logs are preserved. Restore this record using History visibility.'))) : null;
+    const hiddenNotice = renderVisibilityNotice(data);
     const left = el('div', {class: 'detail-main'}, hiddenNotice, failure, vmSurface, logs);
     const credentials = renderCredentials();
     const aside = el('aside', {class: 'detail-aside'}, renderProgress(data), credentials, renderDeploymentControls(data));
     page.replaceChildren(back, title, el('div', {class: 'detail-layout'}, left, aside));
+    syncDetailNavigation(data);
     if (state.openLogs.has(data.id)) logBody.scrollTop = logsAtEnd ? logBody.scrollHeight : logScrollTop;
     if (focusedLogControl) document.getElementById(focusedLogControl)?.focus({preventScroll: true});
     if (focusedHistoryControl) document.getElementById(focusedHistoryControl)?.focus({preventScroll: true});
@@ -1752,6 +1785,7 @@
     return el('div', {class: 'secret-field'}, el('label', {for: id}, label), el('div', {class: 'secret-input-row'}, input, copy));
   }
   function applyDetailUpdate(data) {
+    syncDetailNavigation(data);
     const selection = window.getSelection();
     const selectingLogs = state.openLogs.has(data.id) && selection && !selection.isCollapsed && $('#deployment-logs')?.contains(selection.anchorNode);
     const copyingLogs = $('#deployment-log-copy')?.dataset.copying === 'true' || $('#deployment-log-manual-copy')?.hidden === false;
@@ -1760,11 +1794,15 @@
       const previous = state.detailPending || state.detail;
       state.detailPending = data;
       if (!previous || previous.status !== data.status || previous.stage !== data.stage || previous.hidden_at !== data.hidden_at) {
+        const focusedId = document.activeElement?.id;
         $('#deployment-detail-status')?.replaceChildren(statusBadge(data.status));
         $('#deployment-progress')?.replaceWith(renderProgress(data));
         $('#deployment-controls')?.replaceWith(renderDeploymentControls(data));
+        $('#deployment-visibility-notice')?.replaceWith(renderVisibilityNotice(data));
+        if (focusedId?.startsWith('history-visibility-')) document.getElementById(focusedId)?.focus({preventScroll: true});
       }
     } else { state.detail = data; state.detailPending = null; renderDetail(data); }
+    reconcileVisibilityControl(data);
   }
   async function refreshDetail(manual = false) {
     if (!state.session || setupRequired()) return;
@@ -1775,6 +1813,9 @@
       const data = await api(`/api/deployments/${encodeURIComponent(id)}`);
       if (id !== state.detailId || epoch !== state.routeEpoch || request !== state.detailRequest || revision !== state.historyRevision || state.visibilityBusy.has(id) || state.stopBusy.has(id)) return;
       if (JSON.stringify(data) !== JSON.stringify(state.detail)) applyDetailUpdate(data);
+      // A prior request can leave a control disabled even when the record is
+      // unchanged. Reconcile eligibility without replacing selected logs.
+      reconcileVisibilityControl(data);
       if (manual) notify('Deployment details refreshed.');
     } catch (error) { if (manual || epoch === state.routeEpoch) globalError(error.message); }
   }
@@ -2121,17 +2162,20 @@
     const epoch = state.routeEpoch;
     try {
       if (state.route === 'detail') await refreshDetail();
-      else if (state.route === 'deployments') {
+      else if (isDeploymentList()) {
         const revision = state.historyRevision;
         const rows = await api(deploymentListPath());
-        if (epoch === state.routeEpoch && revision === state.historyRevision && !state.visibilityBusy.size && !state.stopBusy.size && JSON.stringify(rows) !== JSON.stringify(state.deployments)) {
-          const activeElement = document.activeElement;
-          const editing = activeElement?.classList.contains('search-field');
-          const focusedId = page.contains(activeElement) ? activeElement?.id : '';
-          const selection = editing ? activeElement.selectionStart : null;
-          state.deployments = rows; renderOverview();
-          if (editing) { const input = $('.search-field'); input?.focus({preventScroll: true}); if (selection !== null) input?.setSelectionRange(selection, selection); }
-          else if (focusedId) (document.getElementById(focusedId) || (focusedId.startsWith('history-visibility-') ? $('#history-show-hidden') : null))?.focus({preventScroll: true});
+        if (epoch === state.routeEpoch && revision === state.historyRevision && !state.visibilityBusy.size && !state.stopBusy.size) {
+          if (JSON.stringify(rows) !== JSON.stringify(state.deployments)) {
+            const activeElement = document.activeElement;
+            const editing = activeElement?.classList.contains('search-field');
+            const focusedId = page.contains(activeElement) ? activeElement?.id : '';
+            const selection = editing ? activeElement.selectionStart : null;
+            state.deployments = rows; renderOverview();
+            if (editing) { const input = $('#history-search'); input?.focus({preventScroll: true}); if (selection !== null) input?.setSelectionRange(selection, selection); }
+            else if (focusedId) (document.getElementById(focusedId) || (focusedId.startsWith('history-visibility-') ? $('#history-search') : null))?.focus({preventScroll: true});
+          }
+          for (const row of rows) reconcileVisibilityControl(row);
         }
       }
     } catch (error) { if (epoch === state.routeEpoch) globalError(error.message); }

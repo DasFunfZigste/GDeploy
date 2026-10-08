@@ -63,7 +63,12 @@
       <span class="nav-label">WORKSPACE</span>
       <nav>
         <a class="nav-link" data-nav="settings" href="#settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M15 7h3M15 17h3" stroke-linecap="round"/></svg>Setup</a>
-        <a class="nav-link" data-nav="deployments" href="#deployments"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Deployments</a>
+        <div class="deployments-nav-group">
+          <a id="nav-deployments" class="nav-link" data-nav="deployments" href="#deployments" aria-controls="deployments-subnav" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Deployments</a>
+          <div id="deployments-subnav" class="deployment-subnav" hidden>
+            <a id="nav-previous-deployments" class="nav-link nav-sublink" data-nav="previous" href="#deployments/previous">Previous deployments</a>
+          </div>
+        </div>
       </nav>
       <details id="sidebar-preview" class="sidebar-preview">
         <summary id="sidebar-preview-toggle" class="nav-link"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>Preview<svg class="preview-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></summary>
