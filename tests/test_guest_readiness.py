@@ -532,7 +532,31 @@ def test_stalled_transport_send_is_closed_and_eof_becomes_deadline_error(connect
 
 
 @pytest.mark.parametrize("cleanup_eof", [False, True])
-def test_command_cleanup_remains_bounded_and_preserves_received_result(connected_session, cleanup_eof):
+def test_command_cleanup_remains_bounded_and_preserves_received_result(connected_session, cleanup_eof, monkeypatch, boot_clock):
+    timers = []
+
+    class CleanupDeadline:
+        def __init__(self, interval, callback):
+            self.interval, self.callback = interval, callback
+            self.started = self.cancelled = self.firing = False
+            timers.append(self)
+
+        def start(self):
+            self.started = True
+
+        def cancel(self):
+            self.cancelled = True
+
+        def fire(self):
+            assert self.started and not self.cancelled, "The watchdog must remain active through cleanup"
+            boot_clock.now += self.interval
+            self.firing = True
+            try:
+                self.callback()
+            finally:
+                self.firing = False
+
+    monkeypatch.setattr(guest.threading, "Timer", CleanupDeadline)
     closed = threading.Event()
     transport = Mock()
     transport.close.side_effect = closed.set
@@ -541,20 +565,23 @@ def test_command_cleanup_remains_bounded_and_preserves_received_result(connected
     channel.recv_stderr_ready.return_value = False
     channel.exit_status_ready.return_value = True
     channel.recv_exit_status.return_value = 0
-    caller = threading.get_ident()
-
     def close_channel():
-        if not closed.wait(timeout=2):
-            pytest.fail("Final channel cleanup bypassed the command deadline")
-        if cleanup_eof and threading.get_ident() == caller:
+        if not closed.is_set():
+            # Expire only after the command result has arrived and final cleanup
+            # starts; a busy CI runner must not race an arbitrary 30 ms timer.
+            channel.recv_exit_status.assert_called_once()
+            assert len(timers) == 1
+            timers[0].fire()
+        assert closed.is_set(), "The watchdog must release final channel cleanup by closing the transport"
+        if cleanup_eof and not timers[0].firing:
             raise EOFError("Transport closed during final channel cleanup")
 
     channel.close.side_effect = close_channel
     transport.open_session.return_value = channel
     connected_session.client.get_transport.return_value = transport
-    started = guest.time.monotonic()
     result = connected_session._exec_result("cloud-init status --format json", timeout=0.03)
     assert result == guest.CommandResult("", "", 0)
     transport.close.assert_called_once()
-    channel.close.assert_called()
-    assert guest.time.monotonic() - started < 1
+    assert channel.close.call_count == 2
+    assert timers[0].cancelled
+    assert boot_clock.now == pytest.approx(100.03)

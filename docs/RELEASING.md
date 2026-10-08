@@ -8,7 +8,7 @@ User-facing releases live at https://github.com/DasFunfZigste/GDeploy/releases. 
 2. Update `version` in `pyproject.toml` and `__version__` in `gdeploy/__init__.py`. The API reads the latter. Also update the default image version in `compose.release.yaml` and `Dockerfile`, current version/image examples in `README.md`, `docs/INSTALL.md` and `docs/OPERATIONS.md`, and the installation guide's version-pinned operations link. Preserve historical compatibility notes.
 3. Add a dated `## [X.Y.Z] - YYYY-MM-DD` section in `CHANGELOG.md`, describing user-visible changes, installation/upgrade implications and remaining limitations. Move completed items out of Unreleased.
 4. Run `pytest -q`, `ruff check .`, and `python scripts/build_release.py --tag vX.Y.Z --validate-only`. Review installation examples and any database compatibility changes.
-5. Commit and push the reviewed changes, then tag that exact commit:
+5. Commit and push the reviewed changes. Wait for **Test and container smoke check** to pass on that exact commit, including Linux-only checks that may be skipped locally, then tag it:
 
    ```sh
    git tag -a vX.Y.Z -m "GDeploy vX.Y.Z"

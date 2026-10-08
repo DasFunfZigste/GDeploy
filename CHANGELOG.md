@@ -4,7 +4,7 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
-## [0.11.0] - 2026-10-08
+## [0.11.1] - 2026-10-08
 
 ### Added
 
@@ -13,6 +13,7 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ### Fixed
 
+- Make the SSH cleanup regression test independent of shared-runner scheduling delays while retaining its watchdog and completed-result assertions. Guest command timeout behavior is unchanged.
 - Start each new deployment with no software roles selected. Select the desired roles before continuing; explicitly choosing Kibana still includes its required Elasticsearch VM. Back navigation and returning from Setup retain intentional choices.
 - Make **Copy logs** work on LAN HTTP through a browser-compatible copy fallback. Report success only when a copy operation succeeds; if the browser blocks copying, provide the full formatted logs for manual copying.
 
@@ -21,6 +22,10 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 - From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the data volume, encryption key, environment files, credentials, licenses and media. No database migration is required, and existing queued jobs keep their captured settings.
 - Version discovery requires outbound HTTPS from the GDeploy container to Corelight's repository and its metadata download destinations, using the customer's repository entitlement. A displayed version is not proof of guest compatibility or installability; the guest still verifies signed repository data and installs the exact chosen version. The guest's existing repository/network requirements continue to apply.
 - Automated tests use synthetic repository data and local TLS servers. Live Corelight repository listings and licensed installations remain lab acceptance checks.
+
+## [0.11.0] - 2026-10-08
+
+- Source tag only; no Docker image or GitHub Release was published because an existing timing-sensitive SSH regression test blocked validation. The deployment refinements are included in **0.11.1** above.
 
 ## [0.10.1] - 2026-10-07
 

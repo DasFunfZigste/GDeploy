@@ -1,6 +1,6 @@
 # GDeploy operations and reference
 
-Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers optional network settings, account recovery, installation media, software configuration, storage, backups and advanced launch methods for **GDeploy 0.11.0**. Commands for source installations assume the same clone at `~/GDeploy` and use `sudo docker`; users already authorized to run Docker directly may omit `sudo`.
+Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers optional network settings, account recovery, installation media, software configuration, storage, backups and advanced launch methods for **GDeploy 0.11.1**. Commands for source installations assume the same clone at `~/GDeploy` and use `sudo docker`; users already authorized to run Docker directly may omit `sudo`.
 
 - [Network binding](#optional-restrict-the-bind-address-or-change-the-port) and [HTTPS/SSH access](#https-and-optional-ssh-access)
 - [Account setup](#complete-the-first-sign-in) and [startup recovery](#fix-an-existing-source-checkout-that-cannot-start)
@@ -321,7 +321,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from history** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.11.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.11.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## Optional manual credentials
 
@@ -378,10 +378,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.11.0** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.11.1** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.11.0-deploy.tar.gz`
-- `gdeploy-0.11.0-linux-amd64.image.tar.gz`
+- `gdeploy-0.11.1-deploy.tar.gz`
+- `gdeploy-0.11.1-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -393,12 +393,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.11.0-deploy.tar.gz
-sudo docker load --input gdeploy-0.11.0-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.11.1-deploy.tar.gz
+sudo docker load --input gdeploy-0.11.1-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.11.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.11.1` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
@@ -450,7 +450,7 @@ Common startup issues:
 | Copy logs is blocked by the browser | Use the selected **Full deployment log** shown after the automatic copy attempts fail. Press Ctrl+C (⌘C on Mac) or the browser's Copy command, then **Done copying**. The snapshot includes the deployment header and recorded events, even on HTTP LAN access. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
 
-Version **0.11.0** adds repository version choices, starts fresh deployment forms with no selected roles, offers an unchecked option to deploy after successful preflight, and improves copying logs over HTTP. Existing saved exact versions and queued snapshots retain their choices; no data migration is required. Keep the existing data volume and encryption key. Updating does not resume failed jobs or change existing VMs.
+Version **0.11.1** adds repository version choices, starts fresh deployment forms with no selected roles, offers an unchecked option to deploy after successful preflight, and improves copying logs over HTTP. Existing saved exact versions and queued snapshots retain their choices; no data migration is required. Keep the existing data volume and encryption key. Updating does not resume failed jobs or change existing VMs.
 
 Version **0.10.1** fixes FleetManager signing-key redirects without changing stored data, queued credentials, version selection or offline installation. Keep the existing data volume and encryption key. It does not correct a rejected token or resume failed jobs. Earlier versions will reject redirects again after rollback.
 
