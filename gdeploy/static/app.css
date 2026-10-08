@@ -423,6 +423,48 @@ code,.mono {
   background:#1c342e;
   border-color:#2a4b40
 }
+.sidebar-preview {
+  min-width:0
+}
+.sidebar-preview>summary {
+  list-style:none;
+  cursor:pointer;
+  touch-action:manipulation
+}
+.sidebar-preview>summary::-webkit-details-marker {
+  display:none
+}
+.sidebar-preview .preview-chevron {
+  width:13px;
+  height:13px;
+  margin-left:auto
+}
+.sidebar-preview[open] .preview-chevron {
+  transform:rotate(90deg)
+}
+.preview-list {
+  list-style:none;
+  margin:0 12px 14px 22px;
+  padding:0 0 0 13px;
+  border-left:1px solid var(--border);
+  color:var(--muted);
+  font-size:11px
+}
+.preview-list>li {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  flex-wrap:wrap;
+  gap:3px 8px;
+  padding:7px 0
+}
+.preview-status {
+  font-size:9px;
+  color:var(--muted);
+  background:var(--panel-2);
+  border-radius:4px;
+  padding:2px 5px
+}
 .sidebar-bottom {
   margin-top:auto
 }
@@ -3010,11 +3052,21 @@ td {
     width:100%;
     height:auto;
     flex-direction:row;
+    flex-wrap:wrap;
     align-items:center;
     padding:13px 18px;
     border-right:0;
     border-bottom:1px solid var(--border);
     gap:20px
+  }
+  .sidebar-preview {
+    flex-basis:100%
+  }
+  .sidebar-preview>summary {
+    margin:0
+  }
+  .sidebar-preview .preview-list {
+    margin:0 9px 2px 17px
   }
   .app-shell {
     display:block

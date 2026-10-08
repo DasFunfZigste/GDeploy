@@ -15,6 +15,7 @@ from .guest import GuestConnectionError, GuestSession, build_seed_iso, generate_
 from .fleetmanager import FleetManager, FleetManagerError
 from .media import MediaError, MediaManager
 from .packages import PackageError, SplunkPackageManager
+from .passwords import generate_login_password
 from .vmware import ESXiClient
 
 
@@ -306,7 +307,7 @@ class DeploymentService:
             private, public = generate_ssh_key()
             vm_credentials[vm["name"]] = {
                 "username": "gdeploy",
-                "password": secrets.token_urlsafe(24),
+                "password": generate_login_password(),
                 "private_key": private,
                 "public_key": public,
                 "services": [],
@@ -319,14 +320,12 @@ class DeploymentService:
             "authorized_ssh_keys": self.db.ssh_public_keys(),
             "vm_credentials": vm_credentials,
             "software": {
-                key: secrets.token_hex(24)
-                for key in (
-                    "elastic_password",
-                    "splunk_password",
-                    "kibana_encryption_key",
-                    "kibana_security_key",
-                    "kibana_reporting_key",
-                )
+                "elastic_password": generate_login_password(),
+                "splunk_password": generate_login_password(),
+                **{
+                    key: secrets.token_hex(24)
+                    for key in ("kibana_encryption_key", "kibana_security_key", "kibana_reporting_key")
+                },
             },
         }
         self.db.create(deployment_id, spec, data, parent_id)

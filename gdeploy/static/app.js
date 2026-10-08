@@ -211,6 +211,7 @@
     state.detailPending = null;
     state.detailId = null;
     state.openLogs.clear();
+    $('#sidebar-preview').open = false;
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
     $('#wizard-dialog').replaceChildren();
     page.replaceChildren();

@@ -15,6 +15,10 @@ Use an isolated datastore/network with disposable VMs. This checklist verifies t
 
 Record your exact ESXi build, Ubuntu ISO checksum, Splunk version, Elastic version, Fleet Manager version when selected, and any host-specific findings before expanding use.
 
+## Readable passwords and planned items
+
+New deployments created with v0.12.1 or later use readable generated OS, Elastic and Splunk passwords. Verify SSH/sudo and application sign-in with their recorded credentials; previously queued/deployed passwords must remain valid. FleetManager still supplies its own temporary password and requires a first-sign-in change. The collapsed **Preview** navigation section lists Alma Linux and Proxmox as future work only, without adding deployment options.
+
 ## Stop deployment and default port group
 
 1. In **Setup → ESXi connection → Default port group**, load the saved host's inventory, select a port group and save. Reopen Setup and restart GDeploy with the same volume; the selection must persist. Every newly selected VM role must begin with that group. Override individual VMs, navigate back/forward and return from Setup; deliberate draft choices and queued jobs must remain unchanged.

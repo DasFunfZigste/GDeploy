@@ -4,6 +4,18 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-08
+
+### Changed
+
+- Generate new guest OS, Elasticsearch/Kibana and Splunk login passwords from a readable alphabet without common lookalikes, including I/i/L/l/1, O/o/0, B/b/8, G/g/6, Q/q/9, S/s/5 and Z/z/2. Passwords use 40 cryptographically random characters, include uppercase/lowercase letters and digits, and retain more than 192 bits of randomness. Machine tokens and encryption keys keep their existing formats.
+- Add a collapsed **Preview** section below **Deployments** in the navigation, containing **Alma Linux** and **Proxmox** as planned items. These are reminders only; no deployment or platform support is enabled.
+
+### Installation and compatibility
+
+- Update from the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the data volume and encryption key. No data migration is required.
+- Readable passwords apply to newly queued deployments and replacements. Existing VM passwords, already queued credentials and user-entered credentials remain unchanged. FleetManager generates its own temporary administrator password and still requires changing it at first sign-in.
+
 ## [0.12.0] - 2026-10-08
 
 ### Added

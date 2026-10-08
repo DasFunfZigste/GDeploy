@@ -267,6 +267,10 @@ You can hide a stopped job from history or explicitly use **Delete & redeploy** 
 
 The OS username is **`gdeploy`** with a different generated password per VM. The web-app administrator password, guest OS passwords and application passwords are separate. The deployment's Credentials panel is the ongoing place to find guest and application details.
 
+New OS, Elasticsearch/Kibana and Splunk passwords use 40 cryptographically random characters, excluding common lookalikes such as I/i/L/l/1 and O/o/0, plus ambiguous punctuation. This applies when a new or replacement deployment is queued; existing VM passwords and queued snapshots stay unchanged. User-entered passwords are not restricted by this generator. FleetManager generates its own temporary administrator password, which must be changed at first sign-in.
+
+The navigation's expandable **Preview** section lists **Alma Linux** and **Proxmox** as planned future work. They are reminders only and do not add supported operating systems, platforms or deployment choices.
+
 The Docker host needs access to ESXi HTTPS **443** and guest SSH **22**. Ordinary installations need working DNS and Ubuntu mirror access; Elastic roles also require the official Elastic package repository. Online FleetManager additionally needs `pkgrepos.corelight.cloud` and its HTTPS download destinations (which can be CloudFront): allow them from the GDeploy container for the version list and from the guest for installation. Offline FleetManager uses its ISO and supplied packages without repository downloads. Kibana needs access to Elasticsearch HTTPS **9200**; your browser needs access to Kibana **5601**, Splunk Web **8000** or FleetManager **443**. Corelight sensor management interfaces need FleetManager **1443**. GDeploy does not configure your firewall or switches. Prefer static IPs or DHCP reservations for application VMs because Kibana's configuration and Elasticsearch's certificate use Elasticsearch's assigned address.
 
 The ESXi account and license must permit vSphere API provisioning, datastore uploads and creation/deletion of the deployment's resources. Existing datastore media additionally needs browse and download permission. Inventory access alone does not prove those permissions. Certificate verification uses your approved certificate for that exact endpoint, or normal CA and hostname verification when no certificate is approved.
@@ -333,7 +337,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from history** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.12.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.12.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## Optional manual credentials
 
@@ -390,10 +394,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.12.0** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.12.1** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.12.0-deploy.tar.gz`
-- `gdeploy-0.12.0-linux-amd64.image.tar.gz`
+- `gdeploy-0.12.1-deploy.tar.gz`
+- `gdeploy-0.12.1-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -405,12 +409,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.12.0-deploy.tar.gz
-sudo docker load --input gdeploy-0.12.0-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.12.1-deploy.tar.gz
+sudo docker load --input gdeploy-0.12.1-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.12.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.12.1` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
