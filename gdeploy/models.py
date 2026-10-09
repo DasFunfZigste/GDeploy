@@ -9,6 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .ssh_keys import MAX_SSH_KEY_BYTES, MAX_SSH_KEYS
 
 FLEETMANAGER_VERSION_PATTERN = r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~\-]*"
+FLEETMANAGER_ONLINE_ONLY = (
+    "Offline FleetManager installation is no longer supported. Open Setup → Software packages → FleetManager "
+    "and save online repository access before creating a new deployment. Existing VMs, credentials and history are retained."
+)
 
 
 class StrictModel(BaseModel):
@@ -113,20 +117,23 @@ class ESXiMediaSelection(CertificateHost):
 
 class FleetManagerSettings(StrictModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False, strict=True)
-    mode: Literal["online", "offline"]
+    mode: Literal["online"] = "online"
     community_string: str = Field(default="", max_length=4096)
     repository_token: str = Field(default="", max_length=4096)
     online_version: str = Field(default="", max_length=128)
     license_pem: str = Field(default="", max_length=65536)
     license_name: str = Field(default="", max_length=200)
-    package_id: str | None = Field(default=None, max_length=1024)
-    dependency_ids: list[Annotated[str, Field(min_length=1, max_length=1024)]] = Field(default_factory=list, max_length=128)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def reject_offline(cls, value):
+        if value == "offline":
+            raise ValueError(FLEETMANAGER_ONLINE_ONLY)
+        return value
 
     @model_validator(mode="after")
     def validate_online_version(self):
-        if self.mode == "offline":
-            self.online_version = ""
-        elif self.online_version and not re.fullmatch(FLEETMANAGER_VERSION_PATTERN, self.online_version):
+        if self.online_version and not re.fullmatch(FLEETMANAGER_VERSION_PATTERN, self.online_version):
             raise ValueError("Enter an exact Debian package version without spaces or wildcards, or leave it blank for latest.")
         return self
 

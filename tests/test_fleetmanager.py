@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tarfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,7 +14,6 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-from starlette.requests import ClientDisconnect
 
 from gdeploy.db import Database, PackageStateError
 from gdeploy.fleetmanager import FleetManager, FleetManagerError, _deb_metadata, validate_license
@@ -70,8 +70,16 @@ def manager(config, monkeypatch):
     return FleetManager(Database(config.data_dir, config.secret_key), config)
 
 
-def upload(manager, body=None, *, checksum=None, filename="corelight-fleet_29.2.2-1_amd64.deb"):
-    return asyncio.run(manager.upload(StreamRequest([body or package_bytes()]), filename, checksum))
+def legacy_upload(manager, body=None, *, checksum=None, filename="corelight-fleet_29.2.2-1_amd64.deb"):
+    """Seed an upload from a pre-retirement data volume without the removed API."""
+    identity = "upload_" + uuid.uuid4().hex
+    manager.upload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = manager.upload_dir / (identity.removeprefix("upload_") + ".deb")
+    path.write_bytes(body or package_bytes())
+    path.chmod(0o600)
+    snapshot = manager._package(path, name=filename, source="upload", package_id=identity, expected=checksum)
+    manager.db.register_fleetmanager_package(snapshot)
+    return {**manager.catalog(), "uploaded_package_id": identity}
 
 
 def settings(**kwargs):
@@ -79,9 +87,12 @@ def settings(**kwargs):
 
 
 def offline(manager):
-    main = upload(manager)["uploaded_package_id"]
-    dependency = upload(manager, package_bytes("libexample", "all"), filename="libexample.deb")["uploaded_package_id"]
-    manager.save(settings(mode="offline", repository_token="", package_id=main, dependency_ids=[dependency]))
+    main = legacy_upload(manager)["uploaded_package_id"]
+    dependency = legacy_upload(manager, package_bytes("libexample", "all"), filename="libexample.deb")["uploaded_package_id"]
+    files = {item["id"]: item for item in manager.db.fleetmanager_files()}
+    saved = settings(mode="offline", repository_token="", online_version="", license_name="customer-fleet.pem")
+    saved.update(package=files[main], dependencies=[files[dependency]], license_sha256=validate_license(saved["license_pem"])["sha256"])
+    manager.db.set_fleetmanager_settings(saved)
     return manager.selected()
 
 
@@ -146,13 +157,14 @@ def test_offline_ignores_and_clears_prior_online_version(manager):
     manager.save(settings(online_version="29.2.2-1"))
     saved = offline(manager)
     assert saved["online_version"] == "" and manager.catalog()["online_version"] == ""
-    assert manager.validate_snapshot({**saved, "online_version": "stale-invalid-version"}) == saved
+    with pytest.raises(FleetManagerError, match="no longer supported"):
+        manager.validate_snapshot({**saved, "online_version": "stale-invalid-version"})
     assert manager.save({"mode": "online", "repository_token": "repo-token"})["online_version"] == ""
 
 
-def test_upload_registers_without_selecting_and_optional_hash_is_computed(manager):
+def test_legacy_registered_packages_remain_encrypted_and_available_for_cleanup(manager):
     body = package_bytes()
-    result = upload(manager, body)
+    result = legacy_upload(manager, body)
     item = result["packages"][0]
     assert result["uploaded_package_id"] == item["id"]
     assert not result["ready"] and result["package_id"] is None and manager.selected() is None
@@ -167,15 +179,20 @@ def test_upload_registers_without_selecting_and_optional_hash_is_computed(manage
 
 def test_offline_package_dependency_selection_and_clear_preserves_files(manager):
     saved = offline(manager)
-    assert manager.catalog()["ready"] and manager.catalog()["mode"] == "offline"
+    assert not manager.catalog()["ready"] and manager.catalog()["legacy_offline"]
+    assert manager.catalog()["mode"] == "offline"
+    assert manager.catalog()["license"]["name"] == saved["license_name"]
     assert manager.catalog()["dependency_ids"] == [saved["dependencies"][0]["id"]]
-    assert manager.validate_snapshot(saved) == saved
+    with pytest.raises(FleetManagerError, match="no longer supported"):
+        manager.validate_snapshot(saved)
     assert not any(item["can_delete"] for item in manager.catalog()["packages"])
-    assert manager.save({"mode": "offline"})["ready"]
+    with pytest.raises(FleetManagerError, match="no longer supported"):
+        manager.save({"mode": "offline"})
     assert manager.selected() == saved
     assert not manager.clear()["ready"]
     assert all(item["can_delete"] for item in manager.catalog()["packages"])
-    assert manager.validate_snapshot(saved) == saved
+    with pytest.raises(FleetManagerError, match="no longer supported"):
+        manager.validate_snapshot(saved)
 
 
 @pytest.mark.parametrize("changes,error", [
@@ -186,7 +203,7 @@ def test_offline_package_dependency_selection_and_clear_preserves_files(manager)
     ({"repository_token": "secret token"}, "whitespace"),
     ({"repository_token": "secret:token"}, "colons"),
     ({"license_pem": "invalid-secret-license"}, "certificate"),
-    ({"mode": "offline"}, "corelight-fleet"),
+    ({"mode": "offline"}, "no longer supported"),
 ])
 def test_settings_validation_does_not_persist_or_echo_secrets(manager, changes, error):
     with pytest.raises(FleetManagerError, match=error) as caught:
@@ -216,11 +233,11 @@ def test_license_requires_private_key_and_bounded_pem():
         validate_license(valid, "../secret.pem")
 
 
-def test_offline_requires_main_and_disallows_dependency_conflicts(manager):
-    main = upload(manager)["uploaded_package_id"]
-    first = upload(manager, package_bytes("libexample"), filename="first.deb")["uploaded_package_id"]
-    second = upload(manager, package_bytes("libexample", version="2.0"), filename="second.deb")["uploaded_package_id"]
-    universal_main = upload(manager, package_bytes(architecture="all"), filename="wrong.deb")["uploaded_package_id"]
+def test_offline_payloads_are_rejected_even_when_legacy_packages_are_available(manager):
+    main = legacy_upload(manager)["uploaded_package_id"]
+    first = legacy_upload(manager, package_bytes("libexample"), filename="first.deb")["uploaded_package_id"]
+    second = legacy_upload(manager, package_bytes("libexample", version="2.0"), filename="second.deb")["uploaded_package_id"]
+    universal_main = legacy_upload(manager, package_bytes(architecture="all"), filename="wrong.deb")["uploaded_package_id"]
     for fields in [
         {"package_id": first}, {"package_id": universal_main},
         {"package_id": main, "dependency_ids": [main]},
@@ -232,7 +249,7 @@ def test_offline_requires_main_and_disallows_dependency_conflicts(manager):
     assert manager.selected() is None
 
 
-def test_server_catalog_metadata_and_validation_are_cached_but_selection_rehashes(manager, config, monkeypatch):
+def test_legacy_server_catalog_metadata_is_cached_and_cannot_be_selected(manager, config, monkeypatch):
     path = config.ubuntu_iso.with_name("corelight-fleet.deb")
     path.write_bytes(package_bytes())
     catalog = manager.catalog()
@@ -242,12 +259,13 @@ def test_server_catalog_metadata_and_validation_are_cached_but_selection_rehashe
         context.setattr("gdeploy.fleetmanager._deb_metadata", lambda *args: pytest.fail("unnecessary metadata parse"))
         assert manager.catalog()["packages"] == catalog["packages"]
         assert manager.catalog(include_packages=False)["packages"] == []
-    manager.save(settings(mode="offline", package_id=item["id"]))
+    with pytest.raises(FleetManagerError, match="no longer supported"):
+        manager.save(settings(mode="offline", package_id=item["id"]))
     before = path.stat()
     path.write_bytes(b"x" * before.st_size)
     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
     with pytest.raises(FleetManagerError, match="SHA-256"):
-        manager.validate_snapshot(manager.selected())
+        manager._inspect_package(path, item["sha256"])
     with pytest.raises(FleetManagerError, match="Only Debian packages uploaded"):
         manager.delete(item["id"])
 
@@ -257,46 +275,36 @@ def test_missing_or_changed_package_fails_readiness(manager):
     path = Path(saved["package"]["path"])
     path.write_bytes(b"changed")
     assert not manager.catalog()["ready"]
-    with pytest.raises(FleetManagerError, match="SHA-256"):
+    with pytest.raises(FleetManagerError, match="no longer supported"):
         manager.validate_snapshot(saved)
     path.unlink()
     assert not manager.catalog()["ready"]
-    with pytest.raises(FleetManagerError, match="missing or unreadable"):
+    with pytest.raises(FleetManagerError, match="no longer supported"):
         manager.validate_snapshot(saved)
 
 
-def test_invalid_uploads_leave_configuration_and_storage_unchanged(manager, monkeypatch):
+def test_retired_uploads_reject_without_consuming_body_or_changing_storage(manager):
     before = manager.save(settings())
-    for body, filename, digest in [
-        (b"invalid", "broken.deb", None),
-        (package_bytes(), "../bad.deb", None),
-        (package_bytes(), "bad.rpm", None),
-        (package_bytes(), "valid.deb", "0" * 64),
-        (package_bytes(), "valid.deb", "invalid-checksum"),
-        (package_bytes(architecture="arm64"), "arm.deb", None),
-    ]:
-        with pytest.raises(FleetManagerError):
-            upload(manager, body, filename=filename, checksum=digest)
+
+    class UnreadableRequest:
+        @property
+        def headers(self):
+            pytest.fail("Retired upload must not consume the request")
+
+        async def stream(self):
+            pytest.fail("Retired upload must not consume the body")
+            yield b""
+
+    for filename in ("fleet.deb", "../bad.deb", "file.rpm"):
+        with pytest.raises(FleetManagerError, match="uploads have been removed") as error:
+            asyncio.run(manager.upload(UnreadableRequest(), filename))
+        assert error.value.status_code == 410
     assert manager.catalog() == before
-    assert not list(manager.upload_dir.glob("*"))
-    monkeypatch.setattr("gdeploy.fleetmanager.MAX_UPLOAD_BYTES", 1)
-    with pytest.raises(FleetManagerError, match="4 GiB"):
-        upload(manager)
-    assert not list(manager.upload_dir.glob("*"))
-
-
-def test_empty_incomplete_disconnected_and_low_space_uploads_are_removed(manager, monkeypatch):
-    for request in [StreamRequest([]), StreamRequest([package_bytes()], length=999), StreamRequest([b"part"], error=ClientDisconnect())]:
-        with pytest.raises(FleetManagerError):
-            asyncio.run(manager.upload(request, "test.deb"))
-    assert not list(manager.upload_dir.glob("*"))
-    monkeypatch.setattr("gdeploy.fleetmanager.shutil.disk_usage", lambda path: type("Disk", (), {"free": 0})())
-    with pytest.raises(FleetManagerError, match="space"):
-        upload(manager)
+    assert not manager.upload_dir.exists()
     assert not manager.db.fleetmanager_files()
 
 
-@pytest.mark.parametrize("status", ["queued", "running", "cleaning"])
+@pytest.mark.parametrize("status", ["queued", "running", "stopping", "cleaning"])
 def test_main_and_dependency_protected_by_active_job_after_clear(manager, spec, status):
     saved = offline(manager)
     manager.db.create("job", spec, {"fleetmanager": saved})
@@ -343,13 +351,13 @@ def test_symlink_packages_directory_and_source_are_never_followed(manager, tmp_p
     assert manager.catalog()["packages"] == []
     manager.upload_dir.symlink_to(outside, target_is_directory=True)
     manager.recover_uploads()
-    with pytest.raises(FleetManagerError, match="symbolic link"):
-        upload(manager)
+    with pytest.raises(FleetManagerError, match="uploads have been removed"):
+        asyncio.run(manager.upload(StreamRequest([package_bytes()]), "fleet.deb"))
     assert list(outside.iterdir()) == [target]
 
 
 def test_delete_rejects_replaced_symlink_and_allows_missing_registration(manager, tmp_path):
-    result = upload(manager)
+    result = legacy_upload(manager)
     item = manager.db.fleetmanager_files()[0]
     path = Path(item["path"])
     target = tmp_path / "keep.deb"
@@ -364,7 +372,7 @@ def test_delete_rejects_replaced_symlink_and_allows_missing_registration(manager
 
 
 def test_recovery_cleans_only_own_unregistered_regular_uploads(manager):
-    upload(manager)
+    legacy_upload(manager)
     for name in ["1" * 32 + ".partial", "2" * 32 + ".deb", "manual.deb"]:
         (manager.upload_dir / name).write_bytes(b"pending")
     manager.recover_uploads()

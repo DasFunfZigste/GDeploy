@@ -45,26 +45,6 @@ def smoke_splunk_package():
     return gzip.compress(body.getvalue(), mtime=0)
 
 
-def smoke_fleet_package():
-    """Valid Debian container with no executable payload; metadata validation only."""
-    control = b"Package: corelight-fleet\nVersion: 29.2.2-1\nArchitecture: amd64\nMaintainer: GDeploy test\nDescription: smoke fixture only\n"
-
-    def tar(contents):
-        output = io.BytesIO()
-        with tarfile.open(fileobj=output, mode="w") as archive:
-            if contents:
-                member = tarfile.TarInfo("./control")
-                member.size = len(contents)
-                archive.addfile(member, io.BytesIO(contents))
-        return gzip.compress(output.getvalue(), mtime=0)
-
-    result = b"!<arch>\n"
-    for name, content in (("debian-binary", b"2.0\n"), ("control.tar.gz", tar(control)), ("data.tar.gz", tar(None))):
-        result += f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(content):<10}`\n".encode()
-        result += content + (b"\n" if len(content) % 2 else b"")
-    return result
-
-
 @lru_cache(maxsize=1)
 def smoke_fleet_pem():
     """Ephemeral test identity; never a Corelight license or a real deployment."""
@@ -195,7 +175,7 @@ def verify_login_and_storage(url, credentials, write=False):
     package_body = smoke_splunk_package()
     package_checksum = hashlib.sha256(package_body).hexdigest()
     publisher_checksum = hashlib.sha512(package_body).hexdigest()
-    fleet_body, fleet_pem = smoke_fleet_package(), smoke_fleet_pem()
+    fleet_pem = smoke_fleet_pem()
     if write:
         request(
             "/api/settings",
@@ -211,14 +191,11 @@ def verify_login_and_storage(url, credentials, write=False):
             f"/api/settings/splunk-package/upload?filename=container-smoke-linux-amd64.tgz&sha512={publisher_checksum}",
             package_body, "POST", session["csrf_token"],
         )
-        fleet_upload = request(
-            "/api/settings/fleetmanager/packages/upload?filename=corelight-fleet-smoke.deb",
-            fleet_body, "POST", session["csrf_token"],
-        )
         request(
             "/api/settings/fleetmanager",
-            {"mode": "offline", "community_string": "smoke-community-only", "license_pem": fleet_pem,
-             "license_name": "smoke-license.pem", "package_id": fleet_upload["uploaded_package_id"]},
+            {"mode": "online", "community_string": "smoke-community-only", "license_pem": fleet_pem,
+             "license_name": "smoke-license.pem", "repository_token": "smoke-repository-only",
+             "online_version": "29.2.2-1"},
             "PUT", session["csrf_token"],
         )
         saved_keys = request(
@@ -231,7 +208,7 @@ def verify_login_and_storage(url, credentials, write=False):
     assert "password" not in settings
     assert settings["iso_configured"] is True
     assert settings["splunk_configured"] is True
-    assert settings["fleetmanager_configured"] is True and settings["fleetmanager_mode"] == "offline"
+    assert settings["fleetmanager_configured"] is True and settings["fleetmanager_mode"] == "online"
     assert settings["ssh_key_count"] == 1
     ssh_keys = request("/api/settings/ssh-keys")
     assert ssh_keys["count"] == 1 and ssh_keys["keys"][0]["public_key"] == SMOKE_SSH_KEY
@@ -247,13 +224,12 @@ def verify_login_and_storage(url, credentials, write=False):
     assert package["selected"]["sha512"] == publisher_checksum
     assert package["items"][0]["can_delete"] is False
     fleet = request("/api/settings/fleetmanager")
-    assert fleet["ready"] and fleet["mode"] == "offline"
-    assert fleet["community_string_configured"]
+    assert fleet["ready"] and fleet["mode"] == "online"
+    assert fleet["community_string_configured"] and fleet["repository_token_configured"]
+    assert fleet["online_version"] == "29.2.2-1"
     assert fleet["license"]["sha256"] == hashlib.sha256(fleet_pem.encode()).hexdigest()
-    chosen = next(item for item in fleet["packages"] if item["id"] == fleet["package_id"])
-    assert chosen["package"] == "corelight-fleet" and chosen["architecture"] == "amd64"
-    assert chosen["sha256"] == hashlib.sha256(fleet_body).hexdigest() and not chosen["can_delete"]
-    assert "smoke-community-only" not in json.dumps(fleet) and "PRIVATE KEY" not in json.dumps(fleet)
+    assert fleet["packages"] == []
+    assert all(secret not in json.dumps(fleet) for secret in ("smoke-community-only", "smoke-repository-only", "PRIVATE KEY"))
     request("/api/logout", {}, "POST", session["csrf_token"])
     return credentials
 

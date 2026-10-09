@@ -179,7 +179,7 @@ def test_already_stopped_application_does_not_transfer_files_or_log_installation
     logs.assert_not_called()
 
 
-@pytest.mark.parametrize("point", ["write", "package", "extra", "before_script"])
+@pytest.mark.parametrize("point", ["write", "package", "before_script"])
 def test_stop_during_staging_removes_private_files_without_starting_installer(session, stop, monkeypatch, tmp_path, point):
     session.client = MagicMock()
     sftp_context = session.client.open_sftp.return_value
@@ -187,11 +187,10 @@ def test_stop_during_staging_removes_private_files_without_starting_installer(se
     execute = Mock(return_value="")
     monkeypatch.setattr(session, "_exec", execute)
     package = tmp_path / "splunk.tgz" if point == "package" else None
-    extra_files = {"fleetmanager.deb": tmp_path / "fleet.deb", "dependency-1.deb": tmp_path / "dependency.deb"}
 
     if point == "write":
         sftp.file.return_value.__enter__.return_value.write.side_effect = lambda contents: setattr(stop, "requested", True)
-    elif point in {"package", "extra"}:
+    elif point == "package":
         def transfer(source, target, *, callback):
             stop.requested = True
             callback(32768, 1024 * 1024)
@@ -201,7 +200,7 @@ def test_stop_during_staging_removes_private_files_without_starting_installer(se
         sftp_context.__exit__.side_effect = lambda *args: setattr(stop, "requested", True)
 
     with pytest.raises(RequestedStop) as caught:
-        session._run_script("installer", {"secret": "private-payload"}, package, extra_files=extra_files)
+        session._run_script("installer", {"secret": "private-payload"}, package)
     assert not isinstance(caught.value, guest.GuestConnectionError)
     execute.assert_called_once()
     assert execute.call_args.args[0].startswith("rm -rf -- /home/gdeploy/.gdeploy-")
@@ -209,7 +208,7 @@ def test_stop_during_staging_removes_private_files_without_starting_installer(se
     if point == "write":
         sftp.file.assert_called_once()
         sftp.put.assert_not_called()
-    elif point in {"package", "extra"}:
+    elif point == "package":
         sftp.put.assert_called_once()
 
 

@@ -4,6 +4,23 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-09
+
+### Fixed
+
+- FleetManager installation adds and verifies persistent guest UFW allow rules for **443/tcp** (GUI) and **1443/tcp** (sensor connectivity). UFW is installed if needed; existing enablement, policies, SSH rules and unrelated rules are preserved. Firewall failures produce a deployment error instead of reporting success from local service checks alone.
+
+### Changed
+
+- FleetManager now installs exclusively from the online Corelight repository. Removed the offline selector, installer/dependency selection and new `.deb` uploads from Setup, the deployment wizard and installation flow. Repository token, version dropdown, community string and product identity PEM are configured before preflight.
+- Existing offline defaults retain their license and community string for explicit online reconfiguration. Legacy offline job snapshots fail validation before provisioning with actionable guidance; their installation source is never silently changed. Existing VMs, logs, credentials and retained files are preserved, with cleanup available for unused legacy uploads.
+- Updated FleetManager instructions, network requirements and container smoke checks for repository installation.
+
+### Installation and compatibility
+
+- From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Finish active deployments before updating and preserve the data volume and encryption key. No schema migration is required.
+- Existing FleetManager VMs are not changed by rebuilding GDeploy. On each VM that needs these firewall rules, run `sudo ufw allow 443/tcp`, `sudo ufw allow 1443/tcp` and `sudo ufw status verbose`. Upstream firewalls still need to permit GUI and sensor traffic. The [FleetManager guide](https://github.com/DasFunfZigste/GDeploy/blob/v0.14.0/docs/FLEETMANAGER.md#existing-vm-firewall-rules) includes the walkthrough.
+
 ## [0.13.0] - 2026-10-08
 
 ### Added

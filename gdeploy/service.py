@@ -183,9 +183,6 @@ class DeploymentService:
                     f"Requested corelight-fleet version: {version or 'latest available'}. "
                     "Version availability will be checked from the VM during installation. "
                     "The VM must reach Ubuntu and Corelight repositories during installation."
-                    if fleet["mode"] == "online" else
-                    "Offline FleetManager package, community string and license are configured. "
-                    "Required dependencies must be installed or supplied as additional .deb files."
                 )
                 check("FleetManager configuration", True, message)
             except (FleetManagerError, OSError) as exc:
@@ -428,6 +425,10 @@ class DeploymentService:
             fleetmanager = secret_data.get("fleetmanager")
             artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.stage(deployment_id, "preflight", "Checking media, host capacity and deployment inputs")
+            # Retired or invalid queued FleetManager snapshots must fail before
+            # contacting ESXi. Never replace them with later Setup settings.
+            if any(vm["role"] == "fleetmanager" for vm in deployment["spec"]["vms"]):
+                self.fleetmanager.validate_snapshot(fleetmanager or {})
             result = self.preflight(
                 deployment["spec"], secret_data["esxi"], exclude_id=deployment_id, os_media=os_media or {},
                 splunk_package=splunk_package or {},
@@ -459,7 +460,6 @@ class DeploymentService:
                         # added to Setup after that deployment was queued.
                         authorized_ssh_keys=secret_data.get("authorized_ssh_keys", []),
                         log=lambda text, level: self.db.event(deployment_id, safe_error(text, secret_data), level),
-                        **({"offline": True} if vm["role"] == "fleetmanager" and fleetmanager["mode"] == "offline" else {}),
                     )
                     self._check_stop(deployment_id)
                     remote = f"gdeploy/{deployment_id}/{vm['name']}.iso"

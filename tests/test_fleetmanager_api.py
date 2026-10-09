@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from gdeploy.main import create_app
 from gdeploy.fleet_repository import FleetRepositoryError
-from test_fleetmanager import fake_metadata, license_pem, package_bytes
+from test_fleetmanager import fake_metadata, legacy_upload, license_pem, offline, package_bytes
 
 
 ENDPOINT = "/api/settings/fleetmanager"
@@ -96,36 +96,83 @@ def test_invalid_online_version_returns_validation_error_without_changing_settin
     assert signed_in.get(ENDPOINT).json() == before
 
 
-def test_offline_settings_clear_online_version_and_use_package_metadata(signed_in):
-    signed_in.put(ENDPOINT, json={**payload(), "online_version": "29.2.2-1"})
-    package = upload(signed_in).json()["uploaded_package_id"]
-    response = signed_in.put(ENDPOINT, json={"mode": "offline", "package_id": package, "online_version": "stale-selection"})
-    assert response.status_code == 200 and response.json()["ready"]
-    assert response.json()["online_version"] == ""
-    assert response.json()["packages"][0]["version"] == "29.2.2-1"
-    assert signed_in.app.state.db.fleetmanager_settings()["online_version"] == ""
-    assert signed_in.put(ENDPOINT, json={"mode": "online"}).json()["online_version"] == ""
+def test_offline_settings_rejected_without_changing_online_configuration(signed_in):
+    before = signed_in.put(ENDPOINT, json={**payload(), "online_version": "29.2.2-1"}).json()
+    response = signed_in.put(ENDPOINT, json={"mode": "offline"})
+    assert response.status_code == 422
+    assert "Offline FleetManager installation is no longer supported" in response.text
+    assert "save online repository access" in response.text
+    assert signed_in.get(ENDPOINT).json() == before
 
 
-def test_offline_upload_selection_and_protected_management(signed_in):
+@pytest.mark.parametrize("changes", [{"package_id": "upload_" + "1" * 32}, {"dependency_ids": []}])
+def test_package_selection_fields_are_no_longer_accepted(signed_in, changes):
+    before = signed_in.put(ENDPOINT, json=payload()).json()
+    assert signed_in.put(ENDPOINT, json={"mode": "online", **changes}).status_code == 422
+    assert signed_in.get(ENDPOINT).json() == before
+
+
+def test_retired_upload_api_is_actionable_and_does_not_create_storage(signed_in):
+    manager = signed_in.app.state.fleetmanager
     response = upload(signed_in)
-    assert response.status_code == 200
-    first = response.json()
-    main = first["uploaded_package_id"]
-    assert not first["ready"] and first["package_id"] is None
-    dependency = upload(signed_in, "libexample", "all").json()["uploaded_package_id"]
-    values = {**payload(), "mode": "offline", "repository_token": "", "package_id": main, "dependency_ids": [dependency]}
-    saved = signed_in.put(ENDPOINT, json=values)
-    assert saved.status_code == 200 and saved.json()["ready"]
-    assert signed_in.get("/api/settings").json()["fleetmanager_mode"] == "offline"
-    assert not saved.json()["repository_token_configured"]
-    for item in [main, dependency]:
-        assert signed_in.delete(ENDPOINT + "/packages/" + item).status_code == 409
-    signed_in.delete(ENDPOINT)
-    for item in [main, dependency]:
-        deleted = signed_in.delete(ENDPOINT + "/packages/" + item)
+    assert response.status_code == 410
+    assert "Configure online repository access" in response.text
+    assert not manager.upload_dir.exists()
+    assert manager.db.fleetmanager_files() == []
+    assert manager.selected() is None
+
+
+def test_legacy_offline_restart_preserves_secrets_license_and_protected_packages(signed_in, config):
+    manager = signed_in.app.state.fleetmanager
+    saved = offline(manager)
+    before = signed_in.get(ENDPOINT).json()
+    assert before["mode"] == "offline" and before["legacy_offline"] and not before["ready"]
+    assert before["license"]["name"] == saved["license_name"]
+    assert before["license"]["sha256"] == saved["license_sha256"]
+    assert before["community_string_configured"] and not before["repository_token_configured"]
+    assert any("no longer supported" in error for error in before["errors"])
+    summary = signed_in.get("/api/settings").json()
+    assert summary["fleetmanager_mode"] == "offline" and not summary["fleetmanager_configured"]
+    packages = [saved["package"]["id"], saved["dependencies"][0]["id"]]
+    for identity in packages:
+        assert signed_in.delete(ENDPOINT + "/packages/" + identity).status_code == 409
+    with TestClient(create_app(config, start_worker=False)) as restarted:
+        login = restarted.post("/api/login", json={"username": "admin", "password": "test-admin-passphrase"})
+        restarted.headers["X-CSRF-Token"] = login.json()["csrf_token"]
+        response = restarted.get(ENDPOINT)
+        assert response.json() == before
+        assert restarted.app.state.db.fleetmanager_settings() == saved
+        for secret in (saved["community_string"], saved["license_pem"]):
+            assert secret not in response.text
+            assert secret.encode() not in manager.db.path.read_bytes()
+    assert signed_in.delete(ENDPOINT).status_code == 200
+    for identity in packages:
+        deleted = signed_in.delete(ENDPOINT + "/packages/" + identity)
         assert deleted.status_code == 200
     assert deleted.json()["packages"] == []
+
+
+def test_explicit_online_migration_reuses_saved_secrets_despite_missing_legacy_package(signed_in):
+    manager = signed_in.app.state.fleetmanager
+    saved = offline(manager)
+    manager._path(saved["package"]).unlink()
+    missing_token = signed_in.put(ENDPOINT, json={"mode": "online"})
+    assert missing_token.status_code == 400
+    assert manager.selected() == saved
+    response = signed_in.put(ENDPOINT, json={
+        "mode": "online", "repository_token": "new-repository-token", "online_version": "29.2.2-1",
+        "community_string": "", "license_pem": "",
+    })
+    assert response.status_code == 200
+    assert response.json()["ready"] and not response.json()["legacy_offline"]
+    current = manager.selected()
+    assert current["mode"] == "online" and current["online_version"] == "29.2.2-1"
+    assert current["community_string"] == saved["community_string"]
+    assert current["license_pem"] == saved["license_pem"]
+    assert current["license_name"] == saved["license_name"]
+    assert current["package"] is None and current["dependencies"] == []
+    for item in (saved["package"], *saved["dependencies"]):
+        assert signed_in.delete(ENDPOINT + "/packages/" + item["id"]).status_code == 200
 
 
 def test_invalid_secret_values_and_pydantic_errors_do_not_echo_input(signed_in):
@@ -145,20 +192,19 @@ def test_invalid_secret_values_and_pydantic_errors_do_not_echo_input(signed_in):
         assert signed_in.get(ENDPOINT).json() == original
 
 
-def test_optional_checksum_and_mounted_selection(signed_in, config):
+def test_legacy_checksums_and_mounted_packages_remain_visible_for_cleanup(signed_in, config):
     checksum = hashlib.sha256(package_bytes()).hexdigest()
-    assert upload(signed_in, sha256=checksum).status_code == 200
-    before = signed_in.get(ENDPOINT).json()
-    assert upload(signed_in, sha256="0" * 64).status_code == 400
-    assert signed_in.get(ENDPOINT).json() == before
+    legacy = legacy_upload(signed_in.app.state.fleetmanager, checksum=checksum)
+    assert legacy["packages"][0]["sha256"] == checksum
     path = config.ubuntu_iso.with_name("fleet.deb")
     path.write_bytes(package_bytes())
     item = next(item for item in signed_in.get(ENDPOINT).json()["packages"] if item["source"] == "server")
+    assert item["version"] == "29.2.2-1" and not item["can_delete"]
     response = signed_in.put(ENDPOINT, json={**payload(), "mode": "offline", "package_id": item["id"]})
-    assert response.status_code == 200 and response.json()["ready"]
+    assert response.status_code == 422
     assert signed_in.delete(ENDPOINT + "/packages/" + item["id"]).status_code == 404
     assert path.exists()
-    assert signed_in.put(ENDPOINT, json={"mode": "offline", "package_id": "/etc/passwd"}).status_code == 404
+    assert signed_in.put(ENDPOINT, json={"mode": "offline", "package_id": "/etc/passwd"}).status_code == 422
 
 
 def test_settings_summary_never_scans_server_packages(signed_in, monkeypatch):
@@ -167,7 +213,7 @@ def test_settings_summary_never_scans_server_packages(signed_in, monkeypatch):
 
 
 def test_startup_recovers_partial_uploads_but_retains_registered_files(signed_in, config):
-    upload(signed_in)
+    legacy_upload(signed_in.app.state.fleetmanager)
     directory = config.data_dir / "fleetmanager-packages"
     partial = directory / ("1" * 32 + ".partial")
     partial.write_bytes(b"interrupted")

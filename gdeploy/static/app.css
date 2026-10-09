@@ -1613,45 +1613,6 @@ td {
   font-size:12px;
   line-height:1.65
 }
-.fleet-dependency-fieldset {
-  border:0;
-  padding:0;
-  margin:20px 0 0;
-  min-width:0
-}
-.fleet-dependency-fieldset legend {
-  font-size:12px;
-  font-weight:600
-}
-.fleet-dependencies {
-  display:grid;
-  gap:10px;
-  margin-top:12px
-}
-.fleet-dependency {
-  align-items:flex-start;
-  padding:12px;
-  border:1px solid var(--border);
-  border-radius:7px
-}
-.fleet-dependency span {
-  min-width:0;
-  overflow-wrap:anywhere
-}
-.fleet-dependency strong,.fleet-dependency small {
-  display:block;
-  font-size:11px
-}
-.fleet-dependency small {
-  margin-top:4px;
-  color:var(--muted)
-}
-.fleet-upload-actions {
-  margin:18px 0
-}
-#fleetmanager-panel .media-storage-body>.field {
-  margin-bottom:20px
-}
 #fleetmanager-panel a {
   color:var(--accent-strong)
 }

@@ -105,12 +105,18 @@ def test_fleetmanager_version_picker_loads_repository_options_without_saving_cre
     assert "Loading versions does not save your token or other setup changes." in script
 
 
-def test_fleetmanager_ui_saves_restores_and_clears_online_version_for_offline(client):
+def test_fleetmanager_ui_saves_and_restores_repository_version_without_offline_inputs(client):
     script = client.get("/static/app.js").text
     panel = script.split("function createFleetManagerPanel(", 1)[1].split("function createSSHAccessPanel(", 1)[0]
     assert "renderVersions(next.online_version || '')" in panel
-    assert "onlineVersion.disabled = locked || mode !== 'online'" in panel
-    assert "online_version: mode === 'online' ? onlineVersion.value.trim() : ''" in panel
+    assert "onlineVersion.disabled = locked" in panel
+    assert "const payload = {mode: 'online', online_version: onlineVersion.value.trim()}" in panel
+    assert "fleetmanager-mode" not in panel
+    assert "fleetmanager-package-files" not in panel
+    assert "fleetmanager-dependencies" not in panel
+    assert "packages/upload" not in panel
+    assert "id: 'fleetmanager-online-migration'" in panel
+    assert "next.legacy_offline === true" in panel
     assert "onlineVersion.addEventListener('change'" in panel
     assert "options.onDirty?.()" in panel
     assert "renderCatalog(next, !catalog)" in panel  # Refresh preserves an edited draft.
@@ -125,7 +131,7 @@ def test_fleetmanager_version_lookup_preserves_pins_and_ignores_stale_responses(
     assert "onlineVersion.value = selected" in picker
     assert "Your current selection has been kept." in picker
     assert "Existing choices may be outdated." in picker
-    assert "mode !== 'online') return" in picker
+    assert "if (!currentView() || busy || externalBusy || !catalog) return" in picker
     assert "state.session === session && request === versionRequest" in picker
     assert "token.value === draftToken" in picker
     assert "if (!currentRequest()) return" in picker
@@ -152,7 +158,7 @@ def test_fleetmanager_version_is_shown_in_setup_and_preflight_review(client):
     assert review.index("id: 'fleetmanager-review'") < review.index("'Preflight checks'")
     assert "Version: ${catalog.online_version} (exact)." in script
     assert "Version: latest available in the repository." in script
-    assert "Version: ${selected.version} from the selected .deb package." in script
+    assert "from the selected .deb package" not in script
 
 
 def test_new_wizard_requires_intentional_role_selection(client):

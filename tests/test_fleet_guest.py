@@ -10,7 +10,6 @@ import ssl
 import subprocess
 import urllib.error
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
@@ -47,18 +46,11 @@ def payload(license_pem, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(fleet, "SECRETS", set())
     return {"fleetmanager": {
-        "mode": "offline", "community_string": "private-community-should-never-be-logged",
+        "mode": "online", "community_string": "private-community-should-never-be-logged",
         "repository_token": "private-repository-token", "license_pem": license_pem,
         "license_sha256": hashlib.sha256(license_pem.encode()).hexdigest(), "license_name": "customer-fleet.pem",
-    }, "fleet_files": []}
+    }}
 
-
-def add_file(payload, tmp_path, filename="fleetmanager.deb", contents=b"verified installer bytes"):
-    path = tmp_path / filename
-    path.write_bytes(contents)
-    entry = {"filename": filename, "sha256": hashlib.sha256(contents).hexdigest()}
-    payload["fleet_files"].append(entry)
-    return path
 
 
 @pytest.fixture
@@ -76,6 +68,8 @@ def online_repository(payload, tmp_path, monkeypatch):
             return "\n".join(f" corelight-fleet | {version} | {fleet.REPOSITORY}any/ any/main amd64 Packages" for version in state["available"])
         if command[0] == "dpkg-query":
             return state["installed"]
+        if command == ["ufw", "show", "added"]:
+            return "ufw allow 443/tcp\nufw allow 1443/tcp\n"
         if command[-1].startswith("corelight-fleet") and state.get("install_error"):
             raise fleet.FleetInstallError("Requested Fleet Manager package could not be installed.")
         return ""
@@ -89,32 +83,26 @@ def online_repository(payload, tmp_path, monkeypatch):
     return state
 
 
-@pytest.mark.parametrize("changed", ["fleetmanager.deb", "dependency-1.deb"])
-def test_modified_transfer_stops_before_package_manager(payload, tmp_path, monkeypatch, changed):
-    add_file(payload, tmp_path)
-    add_file(payload, tmp_path, "dependency-1.deb", b"dependency bytes")
-    (tmp_path / changed).write_bytes(b"replaced while transferring")
-    runner = Mock(side_effect=AssertionError("No commands may run before verification"))
+@pytest.mark.parametrize("mode", ["offline", "unexpected", None])
+def test_removed_install_modes_fail_before_guest_commands(payload, monkeypatch, mode):
+    payload["fleetmanager"]["mode"] = mode
+    runner = Mock(side_effect=AssertionError("No guest command may run for an unsupported installation mode"))
     monkeypatch.setattr(fleet.subprocess, "run", runner)
-    with pytest.raises(fleet.FleetInstallError, match="SHA-256 changed during transfer"):
+    with pytest.raises(fleet.FleetInstallError, match="no longer supported|repository installation"):
         fleet.install(payload)
     runner.assert_not_called()
 
 
-@pytest.mark.parametrize("change", ["license", "missing_package", "symlink", "metadata", "duplicate"])
-def test_invalid_integrity_input_fails_before_any_install(payload, tmp_path, monkeypatch, change):
-    path = add_file(payload, tmp_path)
+@pytest.mark.parametrize("change", ["license", "digest", "community", "packages"])
+def test_invalid_input_fails_before_any_guest_command(payload, monkeypatch, change):
     if change == "license":
         payload["fleetmanager"]["license_pem"] += "changed"
-    elif change == "missing_package":
-        path.unlink()
-    elif change == "symlink":
-        path.rename(tmp_path / "elsewhere")
-        path.symlink_to(tmp_path / "elsewhere")
-    elif change == "metadata":
-        payload["fleet_files"][0]["sha256"] = "not-a-digest"
+    elif change == "digest":
+        payload["fleetmanager"]["license_sha256"] = "invalid-digest"
+    elif change == "community":
+        payload["fleetmanager"]["community_string"] = "invalid\ncommunity"
     else:
-        payload["fleet_files"].append(dict(payload["fleet_files"][0]))
+        payload["fleet_files"] = [{"filename": "fleetmanager.deb", "sha256": "a" * 64}]
     runner = Mock(side_effect=AssertionError("No command expected"))
     monkeypatch.setattr(fleet.subprocess, "run", runner)
     with pytest.raises(fleet.FleetInstallError):
@@ -122,8 +110,7 @@ def test_invalid_integrity_input_fails_before_any_install(payload, tmp_path, mon
     runner.assert_not_called()
 
 
-def test_generated_script_runs_same_integrity_guard(payload, tmp_path):
-    add_file(payload, tmp_path)
+def test_generated_script_runs_same_license_integrity_and_online_only_guard(payload):
     script = fleet.installer_script()
     source = re.search(r"python3 - <<'GDEPLOY_FLEET_PY'\n(.*)\nGDEPLOY_FLEET_PY", script, re.S)[1]
     namespace = {"__name__": "fleet_guard_test"}
@@ -131,16 +118,15 @@ def test_generated_script_runs_same_integrity_guard(payload, tmp_path):
     fingerprint = namespace["verify_transfers"](payload)
     certificate = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", payload["fleetmanager"]["license_pem"], re.S)[0]
     assert fingerprint == hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificate)).hexdigest()
-    (tmp_path / "fleetmanager.deb").write_bytes(b"replaced")
-    with pytest.raises(namespace["FleetInstallError"], match="SHA-256 changed"):
+    payload["fleetmanager"]["license_pem"] += "changed"
+    with pytest.raises(namespace["FleetInstallError"], match="license changed during transfer"):
+        namespace["verify_transfers"](payload)
+    payload["fleetmanager"]["mode"] = "offline"
+    with pytest.raises(namespace["FleetInstallError"], match="no longer supported"):
         namespace["verify_transfers"](payload)
 
 
-@pytest.mark.parametrize("online_version", [None, "29.2.2-1", "invalid-unused-online-version"])
-def test_offline_pipeline_uses_only_local_packages_and_preserves_configuration(payload, tmp_path, monkeypatch, online_version):
-    payload["fleetmanager"]["online_version"] = online_version
-    add_file(payload, tmp_path)
-    add_file(payload, tmp_path, "dependency-1.deb", b"dependency bytes")
+def test_online_pipeline_preserves_configuration_and_opens_ports_before_service_start(payload, tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "etc").mkdir(parents=True)
     (root / "etc/corelight-fleetd.conf").write_text(json.dumps({"log-level": "WARN", "retain-setting": "yes"}))
@@ -148,33 +134,29 @@ def test_offline_pipeline_uses_only_local_packages_and_preserves_configuration(p
     monkeypatch.setattr(fleet, "host_checks", lambda: None)
     monkeypatch.setattr(fleet.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()))
     monkeypatch.setattr(fleet, "verify_health", lambda fingerprint: None)
-    monkeypatch.setattr(fleet.urllib.request, "build_opener", Mock(side_effect=AssertionError("Offline network access")))
     observed = []
+
+    def repository(snapshot):
+        assert snapshot == payload["fleetmanager"]
+        assert (root / "usr/sbin/policy-rc.d").read_text() == "#!/bin/sh\nexit 101\n"
+        return "29.2.2-1"
 
     def runner(command, label, **kwargs):
         observed.append(command)
-        if command[0] == "apt-get":
-            policy = root / "usr/sbin/policy-rc.d"
-            assert policy.read_text() == "#!/bin/sh\nexit 101\n"
-            return ""
         assert not (root / "usr/sbin/policy-rc.d").exists()
-        if command[0] == "dpkg-query":
-            return "29.2.2-1"
+        if command == ["ufw", "show", "added"]:
+            return "ufw allow 443/tcp\nufw allow 1443/tcp\n"
         if command[0] == "runuser":
             assert kwargs["private"] is True
             return 'User "admin" successfully created.\nPassword: one-time-private-password\nFleetAdmin: true\n'
         return ""
 
+    monkeypatch.setattr(fleet, "configure_online_repository", repository)
     monkeypatch.setattr(fleet, "run", runner)
     result = fleet.install(payload)
     assert result == {"username": "admin", "password": "one-time-private-password", "password_change_required": True, "version": "29.2.2-1"}
-    apt = [command for command in observed if command[0] == "apt-get"]
-    assert len(apt) == 1
-    assert "update" not in apt[0] and "--no-download" in apt[0]
-    assert "Dir::Etc::sourcelist=/dev/null" in apt[0] and "Dir::Etc::sourceparts=-" in apt[0]
-    assert any(value.startswith("Dir::State::lists=") for value in apt[0])
-    assert "Dpkg::Options::=--force-confold" in apt[0]
-    assert apt[0][-2:] == ["./fleetmanager.deb", "./dependency-1.deb"]
+    assert observed[:3] == [["ufw", "allow", "443/tcp"], ["ufw", "allow", "1443/tcp"], ["ufw", "show", "added"]]
+    assert observed[3:6] == [["systemctl", "daemon-reload"], ["systemctl", "enable", "corelight-fleetd"], ["systemctl", "restart", "corelight-fleetd"]]
     config = json.loads((root / "etc/corelight-fleetd.conf").read_text())
     assert config["retain-setting"] == "yes" and config["log-level"] == "WARN"
     assert config["bind-address"] == ":443"
@@ -186,6 +168,58 @@ def test_offline_pipeline_uses_only_local_packages_and_preserves_configuration(p
     assert identity.read_text() == payload["fleetmanager"]["license_pem"]
     assert identity.stat().st_mode & 0o777 == 0o400
     assert (root / "etc/corelight-fleetd.conf").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_firewall_rules_are_idempotent_and_leave_ssh_policy_and_other_ports_unchanged(monkeypatch, enabled):
+    rules = {"ufw allow from 192.0.2.0/24 to any port 22 proto tcp", "ufw allow 9200/tcp"}
+    original = set(rules)
+    state = {"enabled": enabled, "default": "deny"}
+
+    def run(command, label, **kwargs):
+        assert kwargs["timeout"] <= 60
+        if command == ["ufw", "show", "added"]:
+            return "\n".join(sorted(rules)) + "\n"
+        assert command in (["ufw", "allow", "443/tcp"], ["ufw", "allow", "1443/tcp"])
+        rules.add(" ".join(command))
+        return "Rule added"
+
+    monkeypatch.setattr(fleet, "run", run)
+    fleet.configure_firewall()
+    fleet.configure_firewall()
+    assert rules == original | {"ufw allow 443/tcp", "ufw allow 1443/tcp"}
+    assert state == {"enabled": enabled, "default": "deny"}
+
+
+@pytest.mark.parametrize("reported", ["", "ufw allow 443/udp\nufw allow 1443/tcp", "ufw allow 443/tcp\nufw allow 14443/tcp"])
+def test_missing_firewall_rule_stops_before_service_start_or_admin_creation(payload, online_repository, monkeypatch, reported):
+    monkeypatch.setattr(fleet, "host_checks", lambda: None)
+    monkeypatch.setattr(fleet, "configure_fleet", lambda snapshot: None)
+    healthy = Mock(side_effect=AssertionError("Firewall rules must be verified first"))
+    admin = Mock(side_effect=AssertionError("No administrator yet"))
+    monkeypatch.setattr(fleet, "verify_health", healthy)
+    monkeypatch.setattr(fleet, "create_admin", admin)
+    original_run = fleet.run
+
+    def run(command, label, **kwargs):
+        return reported if command == ["ufw", "show", "added"] else original_run(command, label, **kwargs)
+
+    monkeypatch.setattr(fleet, "run", run)
+    with pytest.raises(fleet.FleetInstallError, match="UFW rule.*could not be verified"):
+        fleet.install(payload)
+    assert not any(command[0] == "systemctl" for command in online_repository["commands"])
+    healthy.assert_not_called()
+    admin.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [["ufw", "allow", "443/tcp"], ["ufw", "allow", "1443/tcp"], ["ufw", "show", "added"]])
+def test_firewall_command_failure_is_actionable_and_not_ignored(monkeypatch, failure):
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=1 if command == failure else 0, stdout=b"", stderr=b"ufw fixture failure")
+
+    monkeypatch.setattr(fleet.subprocess, "run", run)
+    with pytest.raises(fleet.FleetInstallError, match="Could not (allow|verify).*UFW"):
+        fleet.configure_firewall()
 
 
 @pytest.mark.parametrize("existing", ["none", "regular", "symlink"])
@@ -686,16 +720,13 @@ def test_https_exact_certificate_pin_accepts_private_identity(monkeypatch):
     response.begin.assert_called_once()
 
 
-def test_session_transfers_snapshot_files_and_returns_private_initial_password(payload, tmp_path, monkeypatch):
+def test_session_sends_only_online_settings_and_returns_private_initial_password(payload, monkeypatch):
     snapshot = dict(payload["fleetmanager"])
-    snapshot["package"] = {"path": str(tmp_path / "main.deb"), "sha256": "a" * 64}
-    snapshot["dependencies"] = [{"path": str(tmp_path / "dependency.deb"), "sha256": "b" * 64}]
     session = guest.GuestSession("192.0.2.20", "gdeploy", "ssh-private-key", "guest-password")
     logs = []
 
-    def scripted(script, data, *, extra_files):
-        assert extra_files == {"fleetmanager.deb": Path(snapshot["package"]["path"]), "dependency-1.deb": Path(snapshot["dependencies"][0]["path"])}
-        assert data["fleet_files"] == [{"filename": "fleetmanager.deb", "sha256": "a" * 64}, {"filename": "dependency-1.deb", "sha256": "b" * 64}]
+    def scripted(script, data):
+        assert "fleet_files" not in data
         assert data["fleetmanager"]["online_version"] == ""
         assert snapshot["community_string"] in session._secrets
         assert snapshot["repository_token"] in session._secrets
@@ -708,6 +739,18 @@ def test_session_transfers_snapshot_files_and_returns_private_initial_password(p
     assert result["services"] == [{"name": "Fleet Manager", "url": "https://192.0.2.20", "username": "admin", "password": "fleet-temporary-secret", "password_change_required": True, "version": "29.2.2", "community_string": snapshot["community_string"]}]
     assert "fleet-temporary-secret" in session._secrets
     assert "fleet-temporary-secret" not in "\n".join(logs)
+    assert "TCP 443/1443" in "\n".join(logs)
+
+
+@pytest.mark.parametrize("mode", ["offline", "unexpected", None])
+def test_session_rejects_removed_modes_before_guest_transfer(payload, monkeypatch, mode):
+    snapshot = {**payload["fleetmanager"], "mode": mode}
+    session = guest.GuestSession("192.0.2.20", "gdeploy", "ssh-private-key", "guest-password")
+    scripted = Mock(side_effect=AssertionError("No guest transfer or command expected"))
+    monkeypatch.setattr(session, "_run_script", scripted)
+    with pytest.raises(guest.GuestError, match="no longer supported|Configure Fleet Manager"):
+        session.install("fleetmanager", {}, fleetmanager=snapshot)
+    scripted.assert_not_called()
 
 
 @pytest.mark.parametrize("selection", [{}, {"online_version": None}, {"online_version": ""}, {"online_version": "1:29.2.2-1"}])
@@ -716,9 +759,9 @@ def test_session_forwards_selected_version_to_actual_generated_installer(payload
     session = guest.GuestSession("192.0.2.20", "gdeploy", "ssh-private-key", "guest-password")
     expected = selection.get("online_version") or ""
 
-    def scripted(script, data, *, extra_files):
+    def scripted(script, data):
         assert data["fleetmanager"]["online_version"] == expected
-        assert extra_files == {} and data["fleet_files"] == []
+        assert "fleet_files" not in data
         source = re.search(r"python3 - <<'GDEPLOY_FLEET_PY'\n(.*)\nGDEPLOY_FLEET_PY", script, re.S)[1]
         namespace = {"__name__": "fleet_version_test"}
         exec(compile(source, "fleet-guest-script", "exec"), namespace)
@@ -742,16 +785,7 @@ def test_session_rejects_invalid_online_selection_before_ssh(payload, monkeypatc
     scripted.assert_not_called()
 
 
-@pytest.mark.parametrize("filename", ["../outside", "/outside", "payload.json", "install.sh", "splunk.tgz", ".hidden", "line\nbreak.deb"])
-def test_extra_transfer_names_cannot_escape_or_replace_payload(tmp_path, filename):
-    session = guest.GuestSession("192.0.2.20", "gdeploy", "ssh-private-key", "guest-password")
-    session.client = Mock()
-    with pytest.raises(guest.GuestError, match="safe, unique"):
-        session._run_script("script", {}, extra_files={filename: tmp_path / "source"})
-    session.client.open_sftp.assert_not_called()
-
-
-def test_extra_transfer_partial_failure_cleans_private_staging(tmp_path, monkeypatch):
+def test_splunk_transfer_partial_failure_cleans_private_staging(tmp_path, monkeypatch):
     session = guest.GuestSession("192.0.2.20", "gdeploy", "ssh-private-key", "guest-password")
     session.client = MagicMock()
     sftp = session.client.open_sftp.return_value.__enter__.return_value
@@ -759,19 +793,19 @@ def test_extra_transfer_partial_failure_cleans_private_staging(tmp_path, monkeyp
     execute = Mock(return_value="")
     monkeypatch.setattr(session, "_exec", execute)
     with pytest.raises(guest.GuestError, match="Could not transfer"):
-        session._run_script("script", {}, extra_files={"fleetmanager.deb": tmp_path / "source"})
+        session._run_script("script", {}, tmp_path / "splunk.tgz")
     assert execute.call_count == 1 and execute.call_args.args[0].startswith("rm -rf -- /home/gdeploy/.gdeploy-")
 
 
-def test_extra_transfer_keeps_positional_splunk_contract_and_file_permissions(tmp_path, monkeypatch):
+def test_splunk_transfer_keeps_positional_contract_and_file_permissions(tmp_path, monkeypatch):
     session = guest.GuestSession("192.0.2.20", "gdeploy", "ssh-private-key", "guest-password")
     session.client = MagicMock()
     sftp = session.client.open_sftp.return_value.__enter__.return_value
     monkeypatch.setattr(session, "_exec", lambda *args, **kwargs: 'GDEPLOY_RESULT={"ok":true}\n')
-    result = session._run_script("script", {}, tmp_path / "splunk.tgz", extra_files={"fleetmanager.deb": tmp_path / "fleet.deb"})
+    result = session._run_script("script", {}, tmp_path / "splunk.tgz")
     assert result == {"ok": True}
     destinations = [call.args[1] for call in sftp.put.call_args_list]
-    assert destinations[0].endswith("/splunk.tgz") and destinations[1].endswith("/fleetmanager.deb")
+    assert len(destinations) == 1 and destinations[0].endswith("/splunk.tgz")
     assert all(call.args[1] == 0o600 for call in sftp.chmod.call_args_list)
 
 

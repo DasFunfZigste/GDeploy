@@ -9,7 +9,6 @@ import pytest
 
 from gdeploy.db import Database
 from gdeploy.fleetmanager import FleetManager, FleetManagerError
-from gdeploy.guest import _autoinstall_data
 from gdeploy.models import DeploymentSpec, VMSpec
 from gdeploy.service import DeploymentError, DeploymentService, safe_error
 from test_fleetmanager import license_pem
@@ -83,7 +82,8 @@ def fleet_job(config, spec, monkeypatch):
             }]}
 
     def build(source, output, *args, **kwargs):
-        calls.append(("iso-offline", kwargs.get("offline", False)))
+        assert "offline" not in kwargs
+        calls.append("build-iso")
         output.write_bytes(b"iso")
 
     monkeypatch.setattr(module, "GuestSession", Guest)
@@ -127,22 +127,20 @@ def test_missing_fleet_setup_links_to_actionable_setup_before_queue(fleet_job, m
     assert db.list() == [] and calls == []
 
 
-@pytest.mark.parametrize("mode", ["online", "offline"])
-def test_queued_fleet_secrets_and_mode_survive_setup_changes(fleet_job, mode):
+def test_queued_online_fleet_secrets_survive_setup_changes(fleet_job):
     service, db, spec, saved, calls = fleet_job
-    saved["mode"] = mode
     original = copy.deepcopy(saved)
     job = service.enqueue(spec)
     serialized = json.dumps(job)
     for secret in (saved["community_string"], saved["repository_token"], saved["license_pem"]):
         assert secret not in serialized
-    saved.update(mode="online" if mode == "offline" else "offline", community_string="new-secret",
+    saved.update(mode="online", community_string="new-secret",
                  repository_token="new-token", license_pem="new-license")
     db.claim()
     service.run(job["id"])
     completed = db.get(job["id"])
     assert completed["status"] == "completed"
-    assert ("iso-offline", mode == "offline") in calls
+    assert "build-iso" in calls
     assert ("install", original) in calls
     assert completed["vms"][0]["services"] == [{"name": "FleetManager", "url": "https://192.0.2.25"}]
     private = service.credentials(job["id"])["vms"][0]["services"][0]
@@ -206,6 +204,46 @@ def test_invalid_saved_version_stops_preflight_and_queue_before_vm_changes(fleet
     assert calls == [] and db.list() == []
 
 
+def test_legacy_offline_setup_fails_preflight_and_queue_without_creating_vms(fleet_job, monkeypatch):
+    service, db, spec, saved, calls = fleet_job
+    saved["mode"] = "offline"
+    before = copy.deepcopy(saved)
+    monkeypatch.setattr(service.fleetmanager, "validate_snapshot", FleetManager.validate_snapshot.__get__(service.fleetmanager))
+    result = service.preflight(spec)
+    check = next(check for check in result["checks"] if check["name"] == "FleetManager configuration")
+    assert not check["ok"] and "Offline FleetManager installation is no longer supported" in check["message"]
+    assert check["action"]["href"] == "#settings/packages/fleetmanager"
+    with pytest.raises(DeploymentError, match="save online repository access"):
+        service.enqueue(spec)
+    assert calls == [] and db.list() == [] and saved == before
+
+
+@pytest.mark.parametrize("retained_vm", [False, True])
+def test_queued_legacy_offline_snapshot_fails_before_esxi_and_preserves_resources(fleet_job, monkeypatch, retained_vm):
+    service, db, spec, saved, calls = fleet_job
+    job = service.enqueue(spec)
+    legacy = db.get(job["id"], private=True)
+    legacy["secrets"]["fleetmanager"]["mode"] = "offline"
+    # A restart/recovery must preserve artifacts and credentials of an old job.
+    if retained_vm:
+        legacy["vms"][0].update(vm_id="existing-fleet-vm", ip="192.0.2.25", status="os_ready")
+        legacy["resources"].append({"datastore": "datastore1", "path": "gdeploy/legacy/fleet.iso"})
+    db.update(job["id"], secrets=legacy["secrets"], vms=legacy["vms"], resources=legacy["resources"])
+    # Setup is valid online now; it must not silently replace the queued snapshot.
+    saved.update(mode="online", repository_token="new-repository-token", community_string="new-community")
+    monkeypatch.setattr(service.fleetmanager, "validate_snapshot", FleetManager.validate_snapshot.__get__(service.fleetmanager))
+    monkeypatch.setattr(service, "client", lambda *args: pytest.fail("Offline queued job contacted ESXi"))
+    db.claim()
+    service.run(job["id"])
+    result = db.get(job["id"], private=True)
+    assert result["status"] == "failed"
+    assert "Offline FleetManager installation is no longer supported" in result["error"]
+    assert "before creating a new deployment" in result["error"]
+    assert result["secrets"] == legacy["secrets"]
+    assert result["vms"] == legacy["vms"] and result["resources"] == legacy["resources"]
+    assert calls == []
+
+
 @pytest.mark.parametrize("when", ["before_vm", "after_os"])
 def test_stale_package_or_license_stops_safely(fleet_job, monkeypatch, when):
     service, db, spec, _, calls = fleet_job
@@ -237,9 +275,11 @@ def test_stale_package_or_license_stops_safely(fleet_job, monkeypatch, when):
 
 
 def test_other_roles_do_not_require_fleet_configuration(fleet_job, monkeypatch):
-    service, _, spec, _, _ = fleet_job
+    service, _, spec, saved, _ = fleet_job
     spec["vms"][0]["role"] = "ubuntu"
+    saved["mode"] = "offline"
     monkeypatch.setattr(service.fleetmanager, "selected", lambda: pytest.fail("Unrelated role reads Fleet secrets"))
+    monkeypatch.setattr(service.fleetmanager, "validate_snapshot", lambda value: pytest.fail("Unrelated role validates Fleet secrets"))
     assert service.preflight(spec)["ok"]
     assert service.enqueue(spec)["status"] == "queued"
 
@@ -260,16 +300,3 @@ def test_fleet_secrets_are_redacted_from_errors():
     error = safe_error("problem " + " ".join(values.values()), {"fleetmanager": values})
     assert "problem" in error and "[redacted]" in error
     assert all(value not in error for value in values.values())
-
-
-def test_offline_iso_uses_no_repository_candidates_and_keeps_guest_access(spec):
-    vm = dict(spec["vms"][0], role="fleetmanager")
-    install = _autoinstall_data(vm, "gdeploy", "test-password", "ssh-rsa TEST", offline=True)["autoinstall"]
-    assert install["apt"] == {"mirror-selection": {"primary": []}, "fallback": "offline-install", "geoip": False}
-    assert install["source"] == {"id": "ubuntu-server", "search_drivers": False}
-    assert install["network"]["ethernets"]["gdeploy"]["dhcp4"]
-    assert {"openssh-server", "open-vm-tools", "python3", "ca-certificates"}.issubset(install["packages"])
-    assert install["ssh"]["authorized-keys"] == ["ssh-rsa TEST"]
-    assert install["storage"]["layout"]["name"] == "direct"
-    online = _autoinstall_data(vm, "gdeploy", "test-password", "ssh-rsa TEST")["autoinstall"]
-    assert "apt" not in online

@@ -18,7 +18,6 @@ import re
 import shutil
 import socket
 import ssl
-import stat
 import subprocess
 import sys
 import time
@@ -120,10 +119,13 @@ def verify_transfers(payload):
     """Validate all snapshotted bytes before executing any package-manager command."""
     snapshot = payload["fleetmanager"]
     register_secrets(snapshot)
-    if snapshot.get("mode") not in {"online", "offline"}:
-        raise FleetInstallError("Choose ONLINE or OFFLINE for Fleet Manager in Setup.")
-    if snapshot["mode"] == "online":
-        requested_online_version(snapshot)
+    if snapshot.get("mode") == "offline":
+        raise FleetInstallError("OFFLINE Fleet Manager installation is no longer supported. Configure repository access in Setup and create a new deployment.")
+    if snapshot.get("mode") != "online":
+        raise FleetInstallError("Configure Fleet Manager repository installation in Setup.")
+    requested_online_version(snapshot)
+    if payload.get("fleet_files"):
+        raise FleetInstallError("Fleet Manager installation uses its repository; uploaded installer and dependency packages are no longer supported.")
     license_pem = snapshot.get("license_pem")
     license_sha256 = snapshot.get("license_sha256")
     if (
@@ -143,40 +145,6 @@ def verify_transfers(payload):
         fingerprint = hashlib.sha256(ssl.PEM_cert_to_DER_cert(certs[0])).hexdigest()
     except (ValueError, TypeError):
         raise FleetInstallError("Fleet Manager product identity certificate is invalid; select the vendor PEM in Setup.") from None
-    files = payload.get("fleet_files", [])
-    if snapshot["mode"] == "offline":
-        if not files or files[0].get("filename") != "fleetmanager.deb":
-            raise FleetInstallError("OFFLINE Fleet Manager installation requires a verified .deb package.")
-    elif files:
-        raise FleetInstallError("ONLINE Fleet Manager installation cannot use uploaded dependency packages.")
-    seen = set()
-    for item in files:
-        filename, expected = item.get("filename"), item.get("sha256")
-        if (
-            not isinstance(filename, str) or not re.fullmatch(r"fleetmanager\.deb|dependency-[0-9]+\.deb", filename)
-            or filename in seen or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
-        ):
-            raise FleetInstallError("Fleet Manager package transfer metadata is invalid; select its packages again in Setup.")
-        seen.add(filename)
-        try:
-            descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(descriptor, "rb") as stream:
-                before = os.fstat(stream.fileno())
-                if not stat.S_ISREG(before.st_mode):
-                    raise FleetInstallError("A transferred Fleet Manager package is not a regular file.")
-                digest = hashlib.sha256()
-                while chunk := stream.read(1024 * 1024):
-                    digest.update(chunk)
-                after = os.fstat(stream.fileno())
-            current = os.stat(filename, follow_symlinks=False)
-            def identity(info):
-                return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
-            if identity(before) != identity(after) or identity(after) != identity(current):
-                raise FleetInstallError("A Fleet Manager package changed during verification; no package was installed.")
-        except OSError:
-            raise FleetInstallError("A transferred Fleet Manager package is missing or unreadable; no package was installed.") from None
-        if not hmac.compare_digest(digest.hexdigest(), expected):
-            raise FleetInstallError("Fleet Manager package SHA-256 changed during transfer; no package was installed.")
     return fingerprint
 
 
@@ -387,7 +355,7 @@ def configure_online_repository(snapshot):
     if not isinstance(token, str) or not token or any(c.isspace() or ord(c) < 32 for c in token):
         raise FleetInstallError("ONLINE Fleet Manager installation requires the customer repository token in Setup.")
     run(["apt-get", "-q", "update"], "Could not update Ubuntu dependency repositories")
-    run(APT_INSTALL + ["--", "ca-certificates", "gnupg", "apt-transport-https"], "Could not install Fleet Manager repository prerequisites")
+    run(APT_INSTALL + ["--", "ca-certificates", "gnupg", "apt-transport-https", "ufw"], "Could not install Fleet Manager repository and firewall prerequisites")
     key = download_signing_key(token)
     binary_key = run(["gpg", "--batch", "--dearmor"], "Could not read the Fleet Manager repository signing key", input=key, binary=True, private=True)
     keyring = "/etc/apt/keyrings/corelight_fleet-stable-archive-keyring.gpg"
@@ -432,16 +400,16 @@ def installed_package_version(requested=""):
     return version
 
 
-def install_offline(files):
-    lists = Path.cwd() / "empty-apt-lists"
-    lists.mkdir(mode=0o700)
-    # Clear source files AND repository indexes. --no-download also prevents APT
-    # from fetching missing dependencies despite an existing host APT config.
-    command = APT_INSTALL[:-1] + [
-        "--no-download", "-o", "Dir::Etc::sourcelist=/dev/null", "-o", "Dir::Etc::sourceparts=-",
-        "-o", "Dir::State::lists=" + str(lists), "-o", "Acquire::Retries=0", "install", "--",
-    ] + ["./" + item["filename"] for item in files]
-    run(command, "OFFLINE Fleet Manager installation could not resolve its local packages; supply the missing Ubuntu dependencies as .deb files in Setup or use ONLINE mode")
+def configure_firewall():
+    """Add only Fleet Manager's inbound TCP rules; retain UFW state and policy."""
+    for port, purpose in ((443, "web interface"), (1443, "sensor connections")):
+        # UFW skips an existing identical rule, so this is safe to repeat. Do not
+        # reset/enable UFW or change SSH and unrelated application rules.
+        run(["ufw", "allow", f"{port}/tcp"], f"Could not allow Fleet Manager {purpose} through UFW on TCP {port}", timeout=60)
+    added = run(["ufw", "show", "added"], "Could not verify Fleet Manager UFW rules", timeout=30)
+    for port in (443, 1443):
+        if not re.search(rf"(?m)^ufw allow (?:in )?{port}/tcp(?: comment .*)?$", added):
+            raise FleetInstallError(f"Fleet Manager UFW rule for TCP {port} could not be verified; inspect sudo ufw show added and sudo ufw status verbose.")
 
 
 def configure_fleet(snapshot):
@@ -525,13 +493,10 @@ def install(payload):
     fingerprint = verify_transfers(payload)
     host_checks()
     snapshot = payload["fleetmanager"]
-    version = None
     with suppress_package_start():
-        if snapshot["mode"] == "online":
-            version = configure_online_repository(snapshot)
-        else:
-            install_offline(payload["fleet_files"])
+        version = configure_online_repository(snapshot)
         configure_fleet(snapshot)
+    configure_firewall()
     run(["systemctl", "daemon-reload"], "Could not reload the Fleet Manager service")
     run(["systemctl", "enable", "corelight-fleetd"], "Could not enable Fleet Manager at startup")
     run(["systemctl", "restart", "corelight-fleetd"], "Could not start Fleet Manager; check the product identity license")

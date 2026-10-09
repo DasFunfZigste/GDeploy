@@ -959,15 +959,11 @@
     return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
   function fleetManagerVersionSummary(catalog = {}) {
-    if (catalog.mode === 'offline') {
-      const selected = catalog.packages?.find(item => item.id === catalog.package_id);
-      return selected?.version ? `Version: ${selected.version} from the selected .deb package.` : 'Version: supplied by the selected .deb package.';
-    }
     return catalog.online_version ? `Version: ${catalog.online_version} (exact).` : 'Version: latest available in the repository.';
   }
   function createFleetManagerPanel(onChange, onBusy, options = {}) {
     const viewEpoch = state.routeEpoch, endpoint = '/api/settings/fleetmanager';
-    let catalog = null, mode = 'online', packageId = '', dependencyIds = new Set(), busy = '', externalBusy = false;
+    let catalog = null, busy = '', externalBusy = false;
     let versions = [], versionsLoaded = false, versionRequest = 0, versionsPending = false;
     const currentView = () => panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
     const changed = () => { successBox.hidden = true; options.onDirty?.(); };
@@ -975,6 +971,7 @@
     const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
     const badge = el('span', {class: 'status'}, 'Loading…');
     const savedSummary = el('div', {class: 'media-selected-summary', id: 'fleetmanager-summary'});
+    const migrationNotice = el('div', {id: 'fleetmanager-online-migration', class: 'alert alert-warning', role: 'status', hidden: true}, el('strong', {}, 'Repository setup required'), el('p', {}, 'Your saved setup uses the retired offline installation method. Provide repository access and save before deploying. Your saved community string and license can be reused; existing deployments and stored packages are preserved.'));
     const community = el('input', {id: 'fleetmanager-community', type: 'password', maxlength: 4096, autocomplete: 'new-password', spellcheck: 'false'});
     const communityHelp = el('small');
     const token = el('input', {id: 'fleetmanager-token', type: 'password', maxlength: 4096, autocomplete: 'new-password', spellcheck: 'false'});
@@ -986,40 +983,21 @@
     const refreshVersions = button('Load versions', 'button-small', loadVersions, 'refresh'); refreshVersions.id = 'fleetmanager-load-versions';
     const license = el('input', {id: 'fleetmanager-license', type: 'file', accept: '.pem', 'aria-describedby': 'fleetmanager-license-help'});
     const licenseHelp = el('small', {id: 'fleetmanager-license-help'});
-    const sourceRadio = value => el('input', {type: 'radio', name: 'fleetmanager-mode', value, checked: mode === value, onChange: () => { mode = value; changed(); inlineError(errorBox, ''); syncControls(); }});
-    const onlineRadio = sourceRadio('online'), offlineRadio = sourceRadio('offline');
     const onlineFields = el('div', {class: 'media-source-fields'}, field('Repository access token', token, tokenHelp), el('p', {class: 'media-help'}, 'Find your token under Downloads → Fleet Manager in the ', el('a', {href: 'https://my.corelight.cloud/', target: '_blank', rel: 'noopener noreferrer'}, 'Corelight customer portal', icon('link')), '. The VM needs internet access to the vendor repository and Ubuntu package repositories. The vendor repository remains configured for future updates.'), field('Version to install', onlineVersion, onlineVersionHelp), refreshVersions, versionsStatus, versionsError);
-    const packageSelect = el('select', {id: 'fleetmanager-package', 'aria-describedby': 'fleetmanager-package-help'});
-    const dependencyList = el('div', {class: 'fleet-dependencies', id: 'fleetmanager-dependencies'});
-    const offlineFields = el('div', {class: 'media-source-fields', hidden: true}, field('FleetManager .deb package', packageSelect, el('span', {id: 'fleetmanager-package-help'}, 'Choose a corelight-fleet package for amd64. Upload it below or place it in the server media folder and refresh.')), el('fieldset', {class: 'fleet-dependency-fieldset'}, el('legend', {}, 'Additional dependency packages'), el('p', {class: 'media-help'}, 'Optional .deb files for dependencies absent from the Ubuntu VM. Supply the full set required by your FleetManager version. Package installation does not fall back to internet repositories.'), dependencyList));
-    const uploadFiles = el('input', {id: 'fleetmanager-package-files', type: 'file', accept: '.deb', multiple: true});
-    const uploadHelp = el('small');
-    const checksum = el('input', {id: 'fleetmanager-package-sha256', type: 'text', maxlength: 64, pattern: '[a-fA-F0-9]{64}', placeholder: 'Optional 64-character SHA-256 checksum', class: 'mono', autocomplete: 'off', spellcheck: 'false'});
     const packageList = el('div', {class: 'stored-media-list', id: 'fleetmanager-package-list'});
-    const progress = el('progress', {max: 100, value: 0, 'aria-label': 'FleetManager package upload progress'});
-    const progressText = el('span', {role: 'status', 'aria-live': 'polite'});
-    const cancel = button('Cancel upload', 'button-ghost button-small', () => state.mediaUpload?.abort());
-    const progressBox = el('div', {class: 'media-progress', hidden: true}, progress, el('div', {}, progressText, cancel));
     const clear = button('Clear FleetManager setup', 'button-small button-ghost', () => confirmRemoval()); clear.id = 'fleetmanager-clear';
     function syncControls() {
       const locked = Boolean(busy || externalBusy || !catalog);
-      for (const radio of [onlineRadio, offlineRadio]) { radio.checked = radio.value === mode; radio.disabled = locked; }
-      onlineFields.hidden = mode !== 'online'; offlineFields.hidden = mode !== 'offline';
-      uploads.hidden = mode !== 'offline';
       community.disabled = locked; community.required = !catalog?.community_string_configured;
-      token.disabled = locked || mode !== 'online'; token.required = mode === 'online' && !catalog?.repository_token_configured;
-      onlineVersion.disabled = locked || mode !== 'online';
-      refreshVersions.disabled = locked || mode !== 'online';
+      token.disabled = locked; token.required = !catalog?.repository_token_configured;
+      onlineVersion.disabled = locked;
+      refreshVersions.disabled = locked;
       if (busy !== 'versions') refreshVersions.replaceChildren(icon('refresh'), versionsLoaded ? 'Refresh versions' : 'Load versions');
       license.disabled = locked; license.required = !catalog?.license;
-      packageSelect.disabled = locked || mode !== 'offline'; packageSelect.required = mode === 'offline';
-      for (const input of dependencyList.querySelectorAll('input')) input.disabled = locked || mode !== 'offline';
-      uploadFiles.disabled = locked; checksum.disabled = locked || uploadFiles.files.length > 1;
-      upload.disabled = locked || !uploadFiles.files.length;
       save.disabled = locked; refresh.disabled = Boolean(busy || externalBusy);
       clear.disabled = locked || (!catalog?.community_string_configured && !catalog?.license && !catalog?.repository_token_configured);
       for (const control of packageList.querySelectorAll('button[data-delete-id]')) control.disabled = locked || !catalog?.packages.find(item => item.id === control.dataset.deleteId)?.can_delete;
-      if (!busy) { save.replaceChildren(icon('check'), 'Save FleetManager setup'); upload.replaceChildren(icon('plus'), 'Upload packages'); }
+      if (!busy) save.replaceChildren(icon('check'), 'Save FleetManager setup');
       panel.setAttribute('aria-busy', busy ? 'true' : 'false');
     }
     function renderVersions(selected = onlineVersion.value) {
@@ -1028,7 +1006,7 @@
       onlineVersion.replaceChildren(...choices); onlineVersion.value = selected;
     }
     async function loadVersions() {
-      if (!currentView() || busy || externalBusy || !catalog || mode !== 'online') return;
+      if (!currentView() || busy || externalBusy || !catalog) return;
       versionsPending = false;
       const draftToken = token.value, session = state.session, request = ++versionRequest;
       if (!draftToken && !catalog.repository_token_configured) {
@@ -1037,7 +1015,7 @@
       if (draftToken && /[^\x21-\x7e]|:/.test(draftToken)) {
         inlineError(versionsError, 'The repository access token must use ASCII characters without whitespace or colons.'); token.focus(); return;
       }
-      const currentRequest = () => currentView() && state.session === session && request === versionRequest && mode === 'online' && token.value === draftToken;
+      const currentRequest = () => currentView() && state.session === session && request === versionRequest && token.value === draftToken;
       busy = 'versions'; if (options.wizard) onBusy(true); inlineError(versionsError, ''); delete versionsError.dataset.missingVersion; setBusy(refreshVersions, 'Loading versions…'); syncControls();
       try {
         const result = await api(`${endpoint}/versions`, {method: 'POST', body: {repository_token: draftToken}});
@@ -1053,31 +1031,27 @@
       }
     }
     function loadPendingVersions() {
-      if (versionsPending && currentView() && !panel.closest('[hidden]') && !busy && !externalBusy && mode === 'online') return loadVersions();
+      if (versionsPending && currentView() && !panel.closest('[hidden]') && !busy && !externalBusy) return loadVersions();
     }
     function renderCatalog(next, resetDraft = false) {
       catalog = next;
-      if (resetDraft) { mode = next.mode || 'online'; renderVersions(next.online_version || ''); packageId = next.package_id || ''; dependencyIds = new Set(next.dependency_ids || []); }
+      const legacyOffline = next.legacy_offline === true || next.mode === 'offline';
+      migrationNotice.hidden = !legacyOffline;
+      if (resetDraft) renderVersions(next.online_version || '');
       badge.className = next.ready ? 'status status-completed' : 'status'; badge.textContent = next.ready ? 'Ready for preflight' : 'Setup required';
       community.placeholder = next.community_string_configured ? 'Leave blank to keep the saved community string' : 'Community string for your sensor connections';
-      communityHelp.textContent = next.community_string_configured ? 'Community string saved. Enter a value only to replace it.' : 'Required for both installation methods. Use printable characters without quotation marks.';
+      communityHelp.textContent = next.community_string_configured ? 'Community string saved. Enter a value only to replace it.' : 'Required for sensor connections. Use printable characters without quotation marks.';
       token.placeholder = next.repository_token_configured ? 'Leave blank to keep the saved repository token' : 'Paste your Corelight repository access token';
       tokenHelp.textContent = next.repository_token_configured ? 'Repository token saved. Enter a value only to replace it.' : 'Required for online installation. This token is stored securely and is not displayed again.';
-      licenseHelp.textContent = next.license ? `Saved: ${next.license.name}. Choose a .pem file only to replace it.` : `Required for both methods. Upload the Corelight .pem license file, up to ${formatBytes(next.max_license_bytes)}.`;
-      savedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('server'), el('div', {}, el('span', {class: 'eyebrow'}, 'FLEETMANAGER SETUP'), el('strong', {}, next.ready ? `${next.mode === 'offline' ? 'Offline package' : 'Online repository'} configured` : 'Configure FleetManager before deploying'), el('p', {}, `Community string: ${next.community_string_configured ? 'saved' : 'needed'} · License: ${next.license ? next.license.name : 'needed'}`))));
-      savedSummary.append(el('p', {class: 'media-help', id: 'fleetmanager-saved-version'}, fleetManagerVersionSummary(next)));
+      licenseHelp.textContent = next.license ? `Saved: ${next.license.name}. Choose a .pem file only to replace it.` : `Upload the Corelight .pem license file, up to ${formatBytes(next.max_license_bytes)}.`;
+      savedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('server'), el('div', {}, el('span', {class: 'eyebrow'}, 'FLEETMANAGER SETUP'), el('strong', {}, next.ready ? 'Online repository configured' : 'Configure FleetManager before deploying'), el('p', {}, `Community string: ${next.community_string_configured ? 'saved' : 'needed'} · License: ${next.license ? next.license.name : 'needed'}`))));
+      if (!legacyOffline) savedSummary.append(el('p', {class: 'media-help', id: 'fleetmanager-saved-version'}, fleetManagerVersionSummary(next)));
       if (next.license?.not_after) savedSummary.append(el('p', {class: 'media-help'}, `License expires ${date(next.license.not_after, true)}.`));
       if (next.errors?.length) savedSummary.append(el('ul', {class: 'fleet-readiness-errors'}, next.errors.map(message => el('li', {}, message))));
       if (next.community_string_configured || next.license || next.repository_token_configured) savedSummary.append(clear);
       const packages = next.packages || [];
-      const mainPackages = packages.filter(item => item.package === 'corelight-fleet' && item.architecture === 'amd64' && item.available !== false);
-      packageSelect.replaceChildren(el('option', {value: ''}, mainPackages.length ? 'Choose a FleetManager package' : 'Upload a corelight-fleet .deb package'), ...mainPackages.map(item => el('option', {value: item.id}, `${item.name} · ${item.version} · ${formatBytes(item.size_bytes)}`))); packageSelect.value = packageId;
-      const dependencies = packages.filter(item => item.package !== 'corelight-fleet' && ['amd64', 'all'].includes(item.architecture) && item.available !== false);
-      dependencyList.replaceChildren(...dependencies.map(item => el('label', {class: 'check-label fleet-dependency'}, el('input', {type: 'checkbox', checked: dependencyIds.has(item.id), value: item.id, onChange: event => { if (event.target.checked) dependencyIds.add(item.id); else dependencyIds.delete(item.id); changed(); }}), el('span', {}, el('strong', {}, item.name), el('small', {}, `${item.package} ${item.version} · ${item.architecture}`)))));
-      if (!dependencies.length) dependencyList.append(el('p', {class: 'media-help'}, 'No dependency packages uploaded. Add any required .deb files below.'));
-      uploadHelp.textContent = `Upload one or more .deb files, up to ${formatBytes(next.max_upload_bytes)} each. Files are stored with GDeploy’s persistent data. Select packages and save setup after uploading.`;
-      packageList.replaceChildren(el('h4', {}, 'Available .deb packages', el('span', {class: 'count-badge'}, packages.length)));
-      if (!packages.length) packageList.append(el('p', {class: 'media-help'}, 'No FleetManager or dependency packages available yet.'));
+      packageStorage.hidden = options.wizard || !packages.length;
+      packageList.replaceChildren();
       for (const item of packages) {
         const reasonId = `fleet-delete-reason-${item.id}`;
         const remove = button('Delete', 'button-small button-danger', () => confirmRemoval(item)); remove.dataset.deleteId = item.id;
@@ -1094,7 +1068,7 @@
       try { const next = await api(endpoint); if (currentView()) { renderCatalog(next, !catalog); loaded = true; } }
       catch (error) { if (currentView()) { inlineError(errorBox, error.message); badge.textContent = 'Couldn’t load setup'; } }
       finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh'); if (options.wizard) onBusy(false); syncControls(); } }
-      if (loaded && mode === 'online' && (token.value || catalog?.repository_token_configured)) { versionsPending = true; await loadPendingVersions(); }
+      if (loaded && (token.value || catalog?.repository_token_configured)) { versionsPending = true; await loadPendingVersions(); }
     }
     function confirmRemoval(item = null) {
       if (!currentView() || busy || externalBusy || (item && !item.can_delete)) return;
@@ -1107,13 +1081,12 @@
         try {
           const next = await api(item ? `${endpoint}/packages/${encodeURIComponent(item.id)}` : endpoint, {method: 'DELETE'});
           if (!currentView()) return;
-          if (item) { if (packageId === item.id) packageId = ''; dependencyIds.delete(item.id); }
-          else { community.value = ''; token.value = ''; license.value = ''; versions = []; versionsLoaded = false; versionsPending = false; versionRequest++; inlineError(versionsError, ''); versionsStatus.textContent = 'Enter or reuse a saved repository token, then load available versions.'; }
+          if (!item) { community.value = ''; token.value = ''; license.value = ''; versions = []; versionsLoaded = false; versionsPending = false; versionRequest++; inlineError(versionsError, ''); versionsStatus.textContent = 'Enter or reuse a saved repository token, then load available versions.'; }
           renderCatalog(next, !item); dialog.close(); successBox.textContent = item ? `${item.name} deleted.` : 'FleetManager setup cleared. Uploaded packages and existing deployments are preserved.'; successBox.hidden = false;
         } catch (failure) { if (currentView()) inlineError(error, failure.message); }
         finally { delete dialog.dataset.busy; dismiss.disabled = false; remove.disabled = false; remove.replaceChildren(item ? 'Delete package' : 'Clear setup'); if (currentView()) { busy = ''; onBusy(false); syncControls(); } }
       });
-      dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, item ? 'Delete saved package?' : 'Clear FleetManager setup?')), el('div', {class: 'confirm-body'}, el('p', {}, item ? `Permanently delete ${item.name} and free ${formatBytes(item.size_bytes)}? Selected packages and files used by queued or running deployments are protected.` : 'Remove the saved community string, repository token, license, and package selections for future deployments. Existing deployments and uploaded packages are preserved.'), error, el('div', {class: 'confirm-actions'}, dismiss, remove)));
+      dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, item ? 'Delete saved package?' : 'Clear FleetManager setup?')), el('div', {class: 'confirm-body'}, el('p', {}, item ? `Permanently delete ${item.name} and free ${formatBytes(item.size_bytes)}? Files still referenced by saved setup or active deployments are protected.` : 'Remove the saved community string, repository token, license, and version selection for future deployments. Existing deployments and stored packages are preserved.'), error, el('div', {class: 'confirm-actions'}, dismiss, remove)));
       dialog.showModal(); dismiss.focus();
     }
     const refresh = button('Refresh', 'button-small', load, 'refresh'); refresh.id = 'fleetmanager-refresh';
@@ -1122,14 +1095,14 @@
     async function saveSettings() {
       if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return false;
       if (community.value && /["'\x00-\x1f\x7f]/.test(community.value)) { inlineError(errorBox, 'Use a community string without quotation marks or control characters.'); community.focus(); return false; }
-      if (mode === 'online' && token.value && /[^\x21-\x7e]|:/.test(token.value)) { inlineError(errorBox, 'The repository access token must use ASCII characters without whitespace or colons.'); token.focus(); return false; }
+      if (token.value && /[^\x21-\x7e]|:/.test(token.value)) { inlineError(errorBox, 'The repository access token must use ASCII characters without whitespace or colons.'); token.focus(); return false; }
       const file = license.files[0];
       if (file && (!file.name.toLowerCase().endsWith('.pem') || !file.size || file.size > catalog.max_license_bytes)) { inlineError(errorBox, `Choose a nonempty .pem license file no larger than ${formatBytes(catalog.max_license_bytes)}.`); license.focus(); return false; }
       busy = 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true; setBusy(save, 'Saving…'); syncControls();
       try {
-        const payload = {mode, online_version: mode === 'online' ? onlineVersion.value.trim() : '', package_id: packageId || null, dependency_ids: [...dependencyIds]};
+        const payload = {mode: 'online', online_version: onlineVersion.value.trim()};
         if (community.value) payload.community_string = community.value;
-        if (mode === 'online' && token.value) payload.repository_token = token.value;
+        if (token.value) payload.repository_token = token.value;
         if (file) { payload.license_pem = await file.text(); payload.license_name = file.name; }
         if (!currentView()) return false;
         const next = await api(endpoint, {method: 'PUT', body: payload});
@@ -1140,33 +1113,12 @@
       } catch (error) { if (currentView()) { inlineError(errorBox, error.message); errorBox.scrollIntoView({block: 'center'}); } return false; }
       finally { if (currentView()) { busy = ''; onBusy(false); syncControls(); } }
     }
-    const form = el('form', {onSubmit: event => { event.preventDefault(); if (options.onContinue) options.onContinue(); else saveSettings(); }}, el('div', {class: 'form-body'}, savedSummary, errorBox, successBox,
-      el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Installation method'), el('label', {}, onlineRadio, 'Online repository'), el('label', {}, offlineRadio, 'Offline package')),
-      field('Community string', community, communityHelp), field('Corelight license (.pem)', license, licenseHelp), onlineFields, offlineFields),
+    const form = el('form', {onSubmit: event => { event.preventDefault(); if (options.onContinue) options.onContinue(); else saveSettings(); }}, el('div', {class: 'form-body'}, savedSummary, migrationNotice, errorBox, successBox,
+      el('p', {class: 'media-help'}, 'FleetManager installs from the Corelight repository. Internet access is required during installation and for future package updates.'),
+      field('Community string', community, communityHelp), field('Corelight license (.pem)', license, licenseHelp), onlineFields, el('p', {class: 'media-help'}, 'GDeploy adds guest firewall rules for HTTPS TCP 443 and sensor connections on TCP 1443. Your network firewalls must also allow this traffic to the VM.')),
       el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, options.wizard ? 'Save & continue validates these settings and saves them as defaults for new deployments.' : 'Saved changes apply to new deployments.'), save));
-    const upload = button('Upload packages', 'button-primary button-small', async () => {
-      if (!currentView() || busy || externalBusy || !catalog) return;
-      const files = [...uploadFiles.files];
-      if (!files.length || files.some(file => !file.name.toLowerCase().endsWith('.deb') || !file.size || file.size > catalog.max_upload_bytes)) { inlineError(errorBox, `Choose nonempty .deb files no larger than ${formatBytes(catalog.max_upload_bytes)} each.`); return; }
-      if (files.length === 1 && !checksum.reportValidity()) return;
-      const expected = files.length === 1 ? checksum.value.trim().toLowerCase() : '';
-      busy = 'upload'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true; progressBox.hidden = false; progress.value = 0; cancel.disabled = false; setBusy(upload, 'Uploading…'); syncControls();
-      try {
-        for (const [index, file] of files.entries()) {
-          const next = await uploadMedia(file, expected, (loaded, total) => { if (currentView()) { progress.value = Math.round((index + loaded / total) / files.length * 100); progressText.textContent = `${file.name}: ${formatBytes(loaded)} of ${formatBytes(total)}${loaded >= total ? ' · Validating package…' : ''}`; } }, `${endpoint}/packages/upload`);
-          if (!currentView()) return;
-          const item = next.packages.find(candidate => candidate.id === next.uploaded_package_id);
-          if (item?.package === 'corelight-fleet') packageId = item.id; else if (item) dependencyIds.add(item.id);
-          renderCatalog(next);
-        }
-        uploadFiles.value = ''; checksum.value = ''; successBox.textContent = 'Packages uploaded. Select Offline package and save FleetManager setup to use them for new deployments.'; successBox.hidden = false;
-      } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
-      finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
-    }, 'plus'); upload.id = 'fleetmanager-upload';
-    const uploads = el('section', {class: 'media-storage'}, el('div', {class: 'surface-header'}, el('div', {}, el('h3', {}, 'Offline packages'), el('p', {}, 'Upload FleetManager and any required dependency .deb files.'))), el('div', {class: 'media-storage-body'}, field('Package files (.deb)', uploadFiles, uploadHelp), field('Expected SHA-256 · optional', checksum, 'Only for a single file. If supplied by your package source, GDeploy checks this value. Otherwise it records a checksum for future integrity checks.'), el('div', {class: 'fleet-upload-actions'}, upload), progressBox, packageList));
-    const panel = el('section', {class: 'surface', id: 'fleetmanager-panel', 'aria-labelledby': 'fleetmanager-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'fleetmanager-title'}, 'FleetManager'), el('p', {}, 'Configure Corelight FleetManager installation and sensor access.')), badge, refresh), form, uploads);
-    packageSelect.addEventListener('change', () => { packageId = packageSelect.value; changed(); });
-    uploadFiles.addEventListener('change', () => { checksum.value = ''; syncControls(); });
+    const packageStorage = el('section', {class: 'media-storage', id: 'fleetmanager-package-cleanup', hidden: true}, el('div', {class: 'surface-header'}, el('div', {}, el('h3', {}, 'Previously stored packages'), el('p', {}, 'These files are retained from earlier setup. New installations use the repository. Delete unneeded files to reclaim GDeploy storage.'))), el('div', {class: 'media-storage-body'}, packageList));
+    const panel = el('section', {class: 'surface', id: 'fleetmanager-panel', 'aria-labelledby': 'fleetmanager-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'fleetmanager-title'}, 'FleetManager'), el('p', {}, 'Configure Corelight FleetManager installation and sensor access.')), badge, refresh), form, packageStorage);
     onlineVersion.addEventListener('change', () => { changed(); inlineError(errorBox, ''); if (versionsError.dataset.missingVersion && (!onlineVersion.value || versions.includes(onlineVersion.value))) { inlineError(versionsError, ''); delete versionsError.dataset.missingVersion; } });
     token.addEventListener('input', () => { versionRequest++; versions = []; versionsLoaded = false; renderVersions(); inlineError(versionsError, ''); versionsStatus.textContent = 'Repository token changed. Load versions to refresh the choices for this token.'; syncControls(); });
     for (const input of [community, token, license]) input.addEventListener('input', () => { changed(); inlineError(errorBox, ''); });
@@ -1567,12 +1519,12 @@
       updateTab('ssh', sshCount > 0, sshCount ? `${sshCount} public ${sshCount === 1 ? 'key' : 'keys'} saved · optional` : 'Optional · add your public keys');
       const configuredSoftware = Number(Boolean(saved.splunk_configured)) + Number(Boolean(saved.fleetmanager_configured));
       updateTab('packages', configuredSoftware > 0, configuredSoftware ? `${configuredSoftware} software ${configuredSoftware === 1 ? 'configuration' : 'configurations'} ready` : 'Set up the software you plan to deploy');
-      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · when selected', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Open Software packages to upload or select the Splunk installer and verify its checksum.', 'layers'), item(saved.fleetmanager_configured, 'FleetManager · when selected', saved.fleetmanager_configured ? `${saved.fleetmanager_mode === 'offline' ? 'Offline package' : 'Online repository'}, community string, and license configured.` : 'Open Software packages → FleetManager to configure installation, community string, and license.', 'server')));
+      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · when selected', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Open Software packages to upload or select the Splunk installer and verify its checksum.', 'layers'), item(saved.fleetmanager_configured, 'FleetManager · when selected', saved.fleetmanager_configured ? 'Online repository, community string, and license configured.' : 'Open Software packages → FleetManager to configure installation, community string, and license.', 'server')));
     }
     mediaControls = createMediaPanel(catalog => { if (state.settings) state.settings.iso_configured = catalog.ready; renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
     sshControls = createSSHAccessPanel(count => { if (state.settings) state.settings.ssh_key_count = count; renderReadiness(); }, value => { sshBusy = value; syncControls(); }, initialSSHdraft);
     packagesControls = createSplunkPackagePanel(catalog => { if (state.settings) state.settings.splunk_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { packagesBusy = value; syncControls(); });
-    fleetControls = createFleetManagerPanel(catalog => { if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; state.settings.fleetmanager_mode = catalog.mode; } invalidatePreflight(); renderReadiness(); }, value => { fleetBusy = value; syncControls(); }, {onDirty: invalidatePreflight});
+    fleetControls = createFleetManagerPanel(catalog => { if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; } invalidatePreflight(); renderReadiness(); }, value => { fleetBusy = value; syncControls(); }, {onDirty: invalidatePreflight});
     panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form, defaultsPanel);
     panels.media = el('div', {id: 'setup-panel-media', role: 'tabpanel', 'aria-labelledby': 'setup-tab-media', tabindex: '0'}, mediaControls.panel);
     panels.ssh = el('div', {id: 'setup-panel-ssh', role: 'tabpanel', 'aria-labelledby': 'setup-tab-ssh', tabindex: '0'}, sshControls.panel);
@@ -1909,11 +1861,11 @@
   }
   function renderFleetConfiguration(content) {
     const wizard = state.wizard;
-    content.append(el('h3', {}, 'FleetManager configuration'), el('p', {class: 'muted'}, 'Choose how to install FleetManager, select an online version from the repository, and provide its community string, license, and repository token or offline packages. Saved values can be reused. Complete this step before running preflight.'));
+    content.append(el('h3', {}, 'FleetManager configuration'), el('p', {class: 'muted'}, 'Select a FleetManager version from the repository and provide its community string, license, and repository token. Saved values can be reused. Complete this step before running preflight.'));
     if (!wizard.fleetControls) {
       wizard.fleetControls = createFleetManagerPanel(catalog => {
         if (state.wizard !== wizard) return;
-        if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; state.settings.fleetmanager_mode = catalog.mode; }
+        if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; }
         wizard.fleetCatalog = catalog;
         wizard.fleetValidated = false; invalidatePreflight();
       }, busy => {
@@ -1997,12 +1949,12 @@
         invalidatePreflight(); renderWizard();
       }});
       const readiness = role === 'splunk' ? state.settings?.splunk_configured : role === 'fleetmanager' ? state.settings?.fleetmanager_configured : null;
-      const packageStatus = ['splunk', 'fleetmanager'].includes(role) ? el('small', {class: `role-package-status ${readiness ? 'ready' : ''}`}, readiness ? role === 'fleetmanager' ? `${state.settings.fleetmanager_mode === 'offline' ? 'Offline package' : 'Online repository'} configured` : 'Installer package configured' : role === 'fleetmanager' ? 'Configure after VM resources' : 'Installer package needed in Setup') : null;
+      const packageStatus = ['splunk', 'fleetmanager'].includes(role) ? el('small', {class: `role-package-status ${readiness ? 'ready' : ''}`}, readiness ? role === 'fleetmanager' ? 'Online repository configured' : 'Installer package configured' : role === 'fleetmanager' ? 'Configure after VM resources' : 'Installer package needed in Setup') : null;
       grid.append(el('label', {class: 'role-option'}, checkbox, roleIcon(role), el('span', {class: 'role-option-text'}, el('strong', {}, config.name), el('small', {}, config.description), packageStatus)));
     }
     content.append(el('div', {class: 'field-section-label'}, 'Software & roles', el('span', {}, `${wizard.selected.size} ${wizard.selected.size === 1 ? 'VM' : 'VMs'} selected`)), grid, el('div', {class: 'wizard-callout'}, icon('info'), el('span', {}, 'Selecting Kibana also selects Elasticsearch. GDeploy configures their connection, matching versions, and TLS. Splunk and FleetManager each run on their own VM.')));
     if (wizard.selected.has('splunk') && !state.settings?.splunk_configured) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'Add the Splunk Enterprise Linux x86_64 .tgz package and its publisher checksum in Setup. Your deployment draft will be kept while you do this.'), wizardSetupLink('Configure Splunk package')));
-    if (wizard.selected.has('fleetmanager')) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'After configuring VM resources, you’ll choose FleetManager’s installation method and provide its community string, license, and installation credentials before preflight.')));
+    if (wizard.selected.has('fleetmanager')) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'After configuring VM resources, you’ll select a FleetManager version and provide its repository token, community string, and license before preflight.')));
   }
   function renderResources(content) {
     const wizard = state.wizard;
@@ -2051,8 +2003,8 @@
     for (const vm of spec.vms) review.append(el('div', {class: 'review-vm'}, el('div', {class: 'review-vm-head'}, roleIcon(vm.role), el('strong', {}, vm.name)), el('small', {}, `${roleName(vm.role)} · ${vm.cpu} vCPU · ${vm.ram_gb} GB RAM · ${vm.disk_gb} GB disk`, el('br'), `${vm.datastore} · ${vm.network} · ${vm.ip_mode === 'dhcp' ? 'DHCP' : vm.address}`, vm.ip_mode === 'static' ? [el('br'), `Gateway ${vm.gateway} · DNS ${vm.dns.join(', ')}`] : null)));
     content.append(review);
     if (wizard.selected.has('fleetmanager')) {
-      const fleet = wizard.fleetCatalog || {mode: state.settings?.fleetmanager_mode};
-      const installation = fleet.mode === 'offline' ? 'Offline .deb packages. Package installation uses only the supplied files and installed dependencies.' : 'Online vendor repository. The VM needs internet access; the repository remains configured for future updates. Version availability is checked on the VM during installation.';
+      const fleet = wizard.fleetCatalog || {};
+      const installation = 'Corelight repository. The VM needs internet access; the repository remains configured for future updates. Version availability is checked on the VM during installation.';
       content.append(el('div', {class: 'wizard-callout', id: 'fleetmanager-review'}, icon('server'), el('span', {}, `FleetManager installation: ${installation} ${fleetManagerVersionSummary(fleet)} Saved community string and license are applied during installation.`)));
     }
     if (wizard.selected.has('splunk')) content.append(el('div', {class: 'license-box'}, el('label', {class: 'check-label'}, el('input', {type: 'checkbox', checked: wizard.accepted, disabled: wizard.busy, onChange: event => { if (wizard.busy) return; wizard.accepted = event.target.checked; invalidatePreflight(); renderWizard(); }}), el('span', {}, 'I have reviewed and accept the Splunk license terms applicable to the supplied package, and I authorize unattended acceptance during installation.'))));
