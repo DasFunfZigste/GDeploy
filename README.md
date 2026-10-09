@@ -66,7 +66,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The current iteration is **v0.15.0**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.15.0` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
+The current iteration is **v0.15.1**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.15.1` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 

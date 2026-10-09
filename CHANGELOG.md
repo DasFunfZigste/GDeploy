@@ -4,6 +4,19 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-09
+
+### Fixed
+
+- Keep FleetManager and Software Sensor configuration in the same deployment draft when going back to correct VM resources or a network conflict, retrying failed preflight, or visiting Setup and returning. Entered tokens, community strings, license keys, the selected FleetManager PEM file, version selection and sensor pairing token remain available without re-entry.
+- Keep entered credentials masked after **Save & continue**, and clearly identify reusable saved credentials. Returning to a configuration step no longer makes saved values look missing or discards unsaved replacements. Changes still require fresh preflight before deployment.
+- Retain draft configuration when temporarily deselecting and reselecting a software role. Draft secrets stay only in the open page's memory and are cleared when the wizard is discarded, the session ends or the deployment is queued. Explicitly clearing software setup still removes its credentials.
+
+### Installation and compatibility
+
+- From your existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the data volume and encryption key. No database migration is required; existing jobs and VMs are unchanged.
+- Browser refresh or closing the page still discards unsaved draft entries. Previously saved encrypted Setup credentials remain reusable; this update cannot recover unsaved input already lost by the old wizard.
+
 ## [0.15.0] - 2026-10-09
 
 ### Added

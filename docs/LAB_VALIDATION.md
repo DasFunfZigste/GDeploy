@@ -64,6 +64,14 @@ Save an exact selection and confirm it appears in review/preflight and survives 
 
 ## Corelight Software Sensor
 
+### Deployment draft recovery
+
+1. Enter FleetManager and Software Sensor credentials, select a PEM file and version, and supply a fresh sensor pairing token. Test Back/forward before saving and after **Save & continue**. All entered values and the selected file must survive in the same draft, while secret inputs remain masked. Existing encrypted defaults must be clearly labeled as reusable without replacements.
+2. Trigger a failed preflight with a duplicate static address or unavailable port group, go Back, fix only the VM networking, and rerun checks. Verify the original software configuration reaches the settings/deployment requests without re-entry. Repeat with preflight's configuration-edit action, a Setup detour, save failures, and temporary role deselection/reselection. Correcting a failed check must not queue work until the normal preflight/deploy flow succeeds.
+3. Verify secrets do not appear in localStorage, sessionStorage, URLs or ordinary settings responses. Cancel/close/Escape, logout, session expiry and successful queueing must discard temporary wizard inputs; a new draft must not inherit the prior pairing token or unsaved credentials/file. Test delayed API responses across those transitions. Explicit **Clear setup** must clear the corresponding credentials, while ordinary refresh retains edited inputs.
+
+### Sensor installation
+
 Use the [Software Sensor walkthrough](CORELIGHT_SENSOR.md), a valid sensor repository token and sensor license key, and an already-running FleetManager instance. Create a disposable sensor record in FleetManager to obtain its pairing URL, server SSL name and unique token. Keep all customer secrets out of acceptance records. This profile supports **Ubuntu 24.04 only** and requires the sensor license key before preflight.
 
 1. In **Setup → Software packages → Software Sensor**, save repository access, community string, license key, Fleet URL/SSL name and the IPv4 source network allowed to reach the sensor API. Reload and recreate the container with the same data volume; public responses must show saved-secret flags, and blank fields must retain encrypted values. Confirm authentication, completed account setup and CSRF protection apply. Pairing tokens must never be shared Setup defaults.

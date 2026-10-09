@@ -163,7 +163,7 @@ def test_fleetmanager_version_is_shown_in_setup_and_preflight_review(client):
 
 def test_new_wizard_requires_intentional_role_selection(client):
     script = client.get("/static/app.js").text
-    initializer = script.split("else state.wizard = ", 1)[1].split(";", 1)[0]
+    initializer = re.search(r"state\.wizard = (\{step: 0,.*?\});", script).group(1)
     assert "selected: new Set()" in initializer
     assert "autoDeploy: false" in initializer
     assert "wizard.step === 0 && !wizard.selected.size" in script

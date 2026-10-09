@@ -197,7 +197,7 @@
     state.routeEpoch++;
     state.mediaUpload?.abort();
     hideCredentials();
-    state.wizard = null;
+    discardWizard();
     state.settings = null;
     state.setupTab = null;
     state.packageTab = 'splunk';
@@ -216,7 +216,6 @@
     $('#deployments-subnav').hidden = true;
     $('#nav-deployments').setAttribute('aria-expanded', 'false');
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
-    $('#wizard-dialog').replaceChildren();
     page.replaceChildren();
     clearTimeout(state.toastTimer);
     $('#toast').hidden = true;
@@ -964,9 +963,9 @@
   }
   function createFleetManagerPanel(onChange, onBusy, options = {}) {
     const viewEpoch = state.routeEpoch, endpoint = '/api/settings/fleetmanager';
-    let catalog = null, busy = '', externalBusy = false;
+    let catalog = null, busy = '', externalBusy = false, disposed = false;
     let versions = [], versionsLoaded = false, versionRequest = 0, versionsPending = false;
-    const currentView = () => panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
+    const currentView = () => !disposed && panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
     const changed = () => { successBox.hidden = true; options.onDirty?.(); };
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
     const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
@@ -1040,12 +1039,12 @@
       migrationNotice.hidden = !legacyOffline;
       if (resetDraft) renderVersions(next.online_version || '');
       badge.className = next.ready ? 'status status-completed' : 'status'; badge.textContent = next.ready ? 'Ready for preflight' : 'Setup required';
-      community.placeholder = next.community_string_configured ? 'Leave blank to keep the saved community string' : 'Community string for your sensor connections';
-      communityHelp.textContent = next.community_string_configured ? 'Community string saved. Enter a value only to replace it.' : 'Required for sensor connections. Use printable characters without quotation marks.';
-      token.placeholder = next.repository_token_configured ? 'Leave blank to keep the saved repository token' : 'Paste your Corelight repository access token';
-      tokenHelp.textContent = next.repository_token_configured ? 'Repository token saved. Enter a value only to replace it.' : 'Required for online installation. This token is stored securely and is not displayed again.';
-      licenseHelp.textContent = next.license ? `Saved: ${next.license.name}. Choose a .pem file only to replace it.` : `Upload the Corelight .pem license file, up to ${formatBytes(next.max_license_bytes)}.`;
-      savedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('server'), el('div', {}, el('span', {class: 'eyebrow'}, 'FLEETMANAGER SETUP'), el('strong', {}, next.ready ? 'Online repository configured' : 'Configure FleetManager before deploying'), el('p', {}, `Community string: ${next.community_string_configured ? 'saved' : 'needed'} · License: ${next.license ? next.license.name : 'needed'}`))));
+      community.placeholder = next.community_string_configured ? 'Saved securely — no need to re-enter' : 'Community string for your sensor connections';
+      communityHelp.textContent = next.community_string_configured ? options.wizard ? 'Community string saved. Leave blank to reuse it; any value entered in this draft is kept when you go back.' : 'Community string saved. Leave blank to reuse it or enter a replacement.' : 'Required for sensor connections. Use printable characters without quotation marks.';
+      token.placeholder = next.repository_token_configured ? 'Saved securely — no need to re-enter' : 'Paste your Corelight repository access token';
+      tokenHelp.textContent = next.repository_token_configured ? options.wizard ? 'Repository token saved. Leave blank to reuse it; any value entered in this draft is kept when you go back.' : 'Repository token saved. Leave blank to reuse it or enter a replacement.' : 'Required for online installation. This token is stored securely.';
+      licenseHelp.textContent = next.license ? `Saved: ${next.license.name}. No need to upload it again. Choose a .pem file only to replace it.` : `Upload the Corelight .pem license file, up to ${formatBytes(next.max_license_bytes)}.`;
+      savedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('server'), el('div', {}, el('span', {class: 'eyebrow'}, 'FLEETMANAGER SETUP'), el('strong', {}, next.ready ? 'Online repository configured' : 'Configure FleetManager before deploying'), el('p', {}, `Community string: ${next.community_string_configured ? 'saved' : 'needed'} · Repository token: ${next.repository_token_configured ? 'saved' : 'needed'} · License: ${next.license ? next.license.name : 'needed'}`))));
       if (!legacyOffline) savedSummary.append(el('p', {class: 'media-help', id: 'fleetmanager-saved-version'}, fleetManagerVersionSummary(next)));
       if (next.license?.not_after) savedSummary.append(el('p', {class: 'media-help'}, `License expires ${date(next.license.not_after, true)}.`));
       if (next.errors?.length) savedSummary.append(el('ul', {class: 'fleet-readiness-errors'}, next.errors.map(message => el('li', {}, message))));
@@ -1082,7 +1081,7 @@
         try {
           const next = await api(item ? `${endpoint}/packages/${encodeURIComponent(item.id)}` : endpoint, {method: 'DELETE'});
           if (!currentView()) return;
-          if (!item) { community.value = ''; token.value = ''; license.value = ''; versions = []; versionsLoaded = false; versionsPending = false; versionRequest++; inlineError(versionsError, ''); versionsStatus.textContent = 'Enter or reuse a saved repository token, then load available versions.'; }
+          if (!item) { community.value = ''; token.value = ''; license.value = ''; versions = []; versionsLoaded = false; versionsPending = false; versionRequest++; inlineError(versionsError, ''); versionsStatus.textContent = 'Enter or reuse a saved repository token, then load available versions.'; options.onClear?.(); }
           renderCatalog(next, !item); dialog.close(); successBox.textContent = item ? `${item.name} deleted.` : 'FleetManager setup cleared. Uploaded packages and existing deployments are preserved.'; successBox.hidden = false;
         } catch (failure) { if (currentView()) inlineError(error, failure.message); }
         finally { delete dialog.dataset.busy; dismiss.disabled = false; remove.disabled = false; remove.replaceChildren(item ? 'Delete package' : 'Clear setup'); if (currentView()) { busy = ''; onBusy(false); syncControls(); } }
@@ -1108,7 +1107,8 @@
         if (!currentView()) return false;
         const next = await api(endpoint, {method: 'PUT', body: payload});
         if (!currentView()) return false;
-        community.value = ''; token.value = ''; license.value = ''; renderCatalog(next, true);
+        if (!options.wizard) { community.value = ''; token.value = ''; license.value = ''; }
+        renderCatalog(next, true);
         successBox.textContent = 'FleetManager setup saved. New FleetManager deployments will use this configuration.'; successBox.hidden = false;
         return next.ready;
       } catch (error) { if (currentView()) { inlineError(errorBox, error.message); errorBox.scrollIntoView({block: 'center'}); } return false; }
@@ -1117,18 +1117,18 @@
     const form = el('form', {onSubmit: event => { event.preventDefault(); if (options.onContinue) options.onContinue(); else saveSettings(); }}, el('div', {class: 'form-body'}, savedSummary, migrationNotice, errorBox, successBox,
       el('p', {class: 'media-help'}, 'FleetManager installs from the Corelight repository. Internet access is required during installation and for future package updates.'),
       field('Community string', community, communityHelp), field('Corelight license (.pem)', license, licenseHelp), onlineFields, el('p', {class: 'media-help'}, 'GDeploy adds guest firewall rules for HTTPS TCP 443 and sensor connections on TCP 1443. Your network firewalls must also allow this traffic to the VM.')),
-      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, options.wizard ? 'Save & continue validates these settings and saves them as defaults for new deployments.' : 'Saved changes apply to new deployments.'), save));
+      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, options.wizard ? 'Save & continue saves these defaults. Your entries and selected license stay in this draft while you correct settings or retry preflight.' : 'Saved changes apply to new deployments.'), save));
     const packageStorage = el('section', {class: 'media-storage', id: 'fleetmanager-package-cleanup', hidden: true}, el('div', {class: 'surface-header'}, el('div', {}, el('h3', {}, 'Previously stored packages'), el('p', {}, 'These files are retained from earlier setup. New installations use the repository. Delete unneeded files to reclaim GDeploy storage.'))), el('div', {class: 'media-storage-body'}, packageList));
     const panel = el('section', {class: 'surface', id: 'fleetmanager-panel', 'aria-labelledby': 'fleetmanager-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'fleetmanager-title'}, 'FleetManager'), el('p', {}, 'Configure Corelight FleetManager installation and sensor access.')), badge, refresh), form, packageStorage);
     onlineVersion.addEventListener('change', () => { changed(); inlineError(errorBox, ''); if (versionsError.dataset.missingVersion && (!onlineVersion.value || versions.includes(onlineVersion.value))) { inlineError(versionsError, ''); delete versionsError.dataset.missingVersion; } });
     token.addEventListener('input', () => { versionRequest++; versions = []; versionsLoaded = false; renderVersions(); inlineError(versionsError, ''); versionsStatus.textContent = 'Repository token changed. Load versions to refresh the choices for this token.'; syncControls(); });
     for (const input of [community, token, license]) input.addEventListener('input', () => { changed(); inlineError(errorBox, ''); });
-    return {panel, load, save: saveSettings, activate() { if (versionsPending) queueMicrotask(loadPendingVersions); }, canSave: () => Boolean(catalog && !busy && !externalBusy), setExternalBusy(value) { externalBusy = value; syncControls(); if (!value && versionsPending) queueMicrotask(loadPendingVersions); }};
+    return {panel, load, save: saveSettings, activate() { if (versionsPending) queueMicrotask(loadPendingVersions); }, canSave: () => Boolean(!disposed && catalog && !busy && !externalBusy), setExternalBusy(value) { externalBusy = value; syncControls(); if (!value && versionsPending) queueMicrotask(loadPendingVersions); }, dispose() { disposed = true; versionRequest++; versionsPending = false; community.value = ''; token.value = ''; license.value = ''; onlineVersion.replaceChildren(); versions = []; catalog = null; panel.remove(); }};
   }
   function createSensorPanel(onChange, onBusy, options = {}) {
     const endpoint = '/api/settings/corelight-sensor', viewEpoch = state.routeEpoch;
-    let catalog = null, busy = false, externalBusy = false;
-    const currentView = () => panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
+    let catalog = null, busy = false, externalBusy = false, disposed = false;
+    const currentView = () => !disposed && panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
     const errorBox = el('div', {id: 'sensor-settings-error', class: 'alert alert-error', role: 'alert', hidden: true});
     const successBox = el('div', {class: 'alert alert-success', role: 'status', hidden: true});
     const badge = el('span', {class: 'status'}, 'Loading…');
@@ -1159,8 +1159,8 @@
       badge.className = next.ready ? 'status status-completed' : 'status'; badge.textContent = next.ready ? 'Defaults ready' : 'Setup required';
       for (const [key, item] of Object.entries(secrets)) {
         const saved = Boolean(next[`${key}_configured`]);
-        item.input.placeholder = saved ? 'Leave blank to keep the saved value' : `Enter ${item.label.toLowerCase()}`;
-        item.help.textContent = saved ? 'Saved securely. Enter a value only to replace it.' : key === 'license_key' ? 'Required license key for the Software Sensor. This is a text key, not FleetManager’s PEM license.' : key === 'community_string' ? 'Use the community string from the existing FleetManager instance.' : 'Find this token under Downloads → Software Sensor in the Corelight customer portal.';
+        item.input.placeholder = saved ? 'Saved securely — no need to re-enter' : `Enter ${item.label.toLowerCase()}`;
+        item.help.textContent = saved ? options.wizard ? 'Saved securely. Leave blank to reuse it; any value entered in this draft is kept when you go back.' : 'Saved securely. Leave blank to reuse it or enter a replacement.' : key === 'license_key' ? 'Required license key for the Software Sensor. This is a text key, not FleetManager’s PEM license.' : key === 'community_string' ? 'Use the community string from the existing FleetManager instance.' : 'Find this token under Downloads → Software Sensor in the Corelight customer portal.';
       }
       summary.replaceChildren(el('strong', {}, next.ready ? 'Sensor defaults configured' : 'Configure the Software Sensor before deployment'), el('p', {class: 'media-help'}, 'Ubuntu 24.04 only · Online sensor-stable repository · A fresh Fleet pairing token is required for every sensor.'));
       if (next.errors?.length) summary.append(el('ul', {class: 'fleet-readiness-errors'}, next.errors.map(message => el('li', {}, message))));
@@ -1189,7 +1189,7 @@
       try {
         const next = await api(endpoint, {method: 'PUT', body: payload});
         if (!currentView()) return false;
-        for (const item of Object.values(secrets)) item.input.value = '';
+        if (!options.wizard) for (const item of Object.values(secrets)) item.input.value = '';
         renderCatalog(next, true); successBox.textContent = options.wizard ? 'Sensor defaults saved. The pairing token is used only for this deployment.' : 'Sensor defaults saved. Each deployment requires its own fresh pairing token.'; successBox.hidden = false;
         return next.ready;
       } catch (error) { if (currentView()) { inlineError(errorBox, error.message); errorBox.scrollIntoView({block: 'center'}); } return false; }
@@ -1206,6 +1206,8 @@
           const next = await api(endpoint, {method: 'DELETE'});
           if (!currentView()) return;
           for (const item of Object.values(secrets)) item.input.value = '';
+          if (pairing) { pairing.value = ''; options.onPairingToken?.(''); }
+          options.onClear?.();
           renderCatalog(next, true); dialog.close(); successBox.textContent = 'Sensor defaults cleared. Existing deployments are unchanged.'; successBox.hidden = false;
         } catch (failure) { if (currentView()) inlineError(error, failure.message); }
         finally { delete dialog.dataset.busy; cancel.disabled = false; confirm.disabled = false; confirm.replaceChildren('Clear sensor setup'); if (currentView()) { busy = false; onBusy(false); syncControls(); } }
@@ -1221,11 +1223,11 @@
       field('Sensor API allowed network (IPv4 CIDR)', apiNetwork, 'Source network allowed to reach the sensor API on TCP 443. The default 0.0.0.0/0 allows any IPv4 source; enter your management subnet to limit access.'),
       pairing ? field('New sensor pairing token', pairing, 'Unique to this sensor. It is sent only with this deployment and is never saved as a reusable Setup default. Create a fresh sensor record for each new deployment or redeployment.') : el('p', {class: 'media-help'}, 'The unique pairing token is entered during deployment, after VM resources. It is not stored in these defaults.'),
       el('p', {class: 'media-help'}, 'The management NIC needs a static or reserved IPv4 address. The second NIC receives mirrored traffic without an IP address. Prepare the ESXi monitoring port group and upstream traffic mirroring before deployment.')),
-      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, options.wizard ? 'Save & continue validates the required license and saves common defaults before preflight.' : 'Saved secrets are encrypted and apply only to new deployments.'), save));
+      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, options.wizard ? 'Save & continue saves common defaults. Your masked entries and pairing token stay in this draft while you correct settings or retry preflight.' : 'Saved secrets are encrypted and apply only to new deployments.'), save));
     const panel = el('section', {id: 'corelight-sensor-panel', class: 'surface', 'aria-labelledby': 'corelight-sensor-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'corelight-sensor-title'}, 'Corelight Software Sensor'), el('p', {}, 'Ubuntu 24.04 · Dedicated VM with management and monitoring NICs.')), badge, refresh), form);
     for (const input of [...Object.values(secrets).map(item => item.input), fleetUrl, sslName, apiNetwork]) input.addEventListener('input', dirty);
     pairing?.addEventListener('input', () => { options.onPairingToken?.(pairing.value); dirty(); });
-    return {panel, load, save: saveSettings, canSave: () => Boolean(catalog && !busy && !externalBusy), setExternalBusy(value) { externalBusy = value; syncControls(); }};
+    return {panel, load, save: saveSettings, canSave: () => Boolean(!disposed && catalog && !busy && !externalBusy), setExternalBusy(value) { externalBusy = value; syncControls(); }, dispose() { disposed = true; for (const input of [...Object.values(secrets).map(item => item.input), fleetUrl, sslName, apiNetwork, pairing].filter(Boolean)) input.value = ''; catalog = null; panel.remove(); }};
   }
   function createSSHAccessPanel(onSaved, onBusy, initialDraft) {
     const viewEpoch = state.routeEpoch;
@@ -1629,8 +1631,8 @@
     mediaControls = createMediaPanel(catalog => { if (state.settings) state.settings.iso_configured = catalog.ready; renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
     sshControls = createSSHAccessPanel(count => { if (state.settings) state.settings.ssh_key_count = count; renderReadiness(); }, value => { sshBusy = value; syncControls(); }, initialSSHdraft);
     packagesControls = createSplunkPackagePanel(catalog => { if (state.settings) state.settings.splunk_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { packagesBusy = value; syncControls(); });
-    fleetControls = createFleetManagerPanel(catalog => { if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; } invalidatePreflight(); renderReadiness(); }, value => { fleetBusy = value; syncControls(); }, {onDirty: invalidatePreflight});
-    sensorControls = createSensorPanel(catalog => { if (state.settings) state.settings.corelight_sensor_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { sensorBusy = value; syncControls(); }, {onDirty: invalidatePreflight});
+    fleetControls = createFleetManagerPanel(catalog => { if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; } invalidatePreflight(); renderReadiness(); }, value => { fleetBusy = value; syncControls(); }, {onDirty: invalidatePreflight, onClear: () => clearSuspendedWizardConfiguration('fleet')});
+    sensorControls = createSensorPanel(catalog => { if (state.settings) state.settings.corelight_sensor_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { sensorBusy = value; syncControls(); }, {onDirty: invalidatePreflight, onClear: () => clearSuspendedWizardConfiguration('sensor')});
     panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form, defaultsPanel);
     panels.media = el('div', {id: 'setup-panel-media', role: 'tabpanel', 'aria-labelledby': 'setup-tab-media', tabindex: '0'}, mediaControls.panel);
     panels.ssh = el('div', {id: 'setup-panel-ssh', role: 'tabpanel', 'aria-labelledby': 'setup-tab-ssh', tabindex: '0'}, sshControls.panel);
@@ -1658,7 +1660,7 @@
     }
     panels.packages = el('div', {id: 'setup-panel-packages', role: 'tabpanel', 'aria-labelledby': 'setup-tab-packages', tabindex: '0'}, softwareTabs, softwarePanels.splunk, softwarePanels.fleetmanager, softwarePanels['corelight-sensor']);
     selectSoftware(state.packageTab || 'splunk', false, false);
-    const draftBanner = returnToWizard ? el('div', {class: 'connection-banner'}, icon('clock'), el('div', {}, el('strong', {}, 'Your deployment draft is saved in this tab'), el('p', {}, 'Finish setup, then return to your VM names, resources, and network settings. Preflight will run again before deployment.')), returnToWizard) : null;
+    const draftBanner = returnToWizard ? el('div', {class: 'connection-banner'}, icon('clock'), el('div', {}, el('strong', {}, 'Your deployment draft is saved in this tab'), el('p', {}, 'Your VM settings, software configuration, and entered credentials are kept while you finish setup. Return to the deployment to run preflight again.')), returnToWizard) : null;
     page.replaceChildren(...[heading('Setup', 'Configure your host, OS installation media, SSH access, and software packages.'), draftBanner, steps, el('div', {class: 'settings-grid'}, el('div', {class: 'settings-main'}, panels.connection, panels.media, panels.ssh, panels.packages), el('aside', {}, readiness, el('p', {class: 'settings-note'}, 'Elasticsearch and Kibana are installed from Elastic’s package repository; guests need outbound network access.')))].filter(Boolean));
     selectSetupTab(state.setupTab || (settings.configured && !settings.iso_configured ? 'media' : 'connection'), {updateHash: false});
     renderReadiness(); renderCertificate(); renderNetworkDefaults(); syncControls(); mediaControls.load(); packagesControls.load(); fleetControls.load(); sensorControls.load(); sshControls.load();
@@ -1920,10 +1922,10 @@
     const dialog = $('#wizard-dialog');
     if (state.wizard?.suspended) {
       state.wizard.suspended = false; invalidatePreflight(); state.wizard.accepted = false; state.wizard.busy = true;
-      state.wizard.fleetControls = null; state.wizard.fleetValidated = false; state.wizard.sensorControls = null; state.wizard.sensorValidated = false;
+      state.wizard.fleetNeedsRefresh = true; state.wizard.fleetValidated = false; state.wizard.sensorNeedsRefresh = true; state.wizard.sensorValidated = false;
       if (configurationSteps().length && state.wizard.step > 2) state.wizard.step = 2;
     }
-    else state.wizard = {step: 0, name: '', selected: new Set(), vms: {}, accepted: false, autoDeploy: false, preflight: null, sensorPairingToken: '', busy: true, error: ''};
+    else { discardWizard(); state.wizard = {step: 0, name: '', selected: new Set(), vms: {}, accepted: false, autoDeploy: false, preflight: null, sensorPairingToken: '', busy: true, error: ''}; }
     dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), loading('Loading ESXi datastores and networks…')));
     dialog.showModal();
     const wizard = state.wizard;
@@ -1943,8 +1945,27 @@
   }
   function closeWizard() {
     if (state.wizard?.busy) return;
-    $('#wizard-dialog').close(); $('#wizard-dialog').replaceChildren(); state.wizard = null;
+    $('#wizard-dialog').close(); discardWizard();
     if (state.route === 'deployments') renderOverview();
+  }
+  function discardWizard() {
+    const wizard = state.wizard;
+    state.wizard = null;
+    if (wizard) {
+      wizard.sensorPairingToken = '';
+      wizard.fleetControls?.dispose(); wizard.sensorControls?.dispose();
+      wizard.fleetControls = null; wizard.sensorControls = null;
+    }
+    $('#wizard-dialog').replaceChildren();
+  }
+  function clearSuspendedWizardConfiguration(kind) {
+    const wizard = state.wizard;
+    if (!wizard?.suspended) return;
+    wizard[`${kind}Controls`]?.dispose();
+    wizard[`${kind}Controls`] = null; wizard[`${kind}Catalog`] = null;
+    wizard[`${kind}Validated`] = false; wizard[`${kind}NeedsRefresh`] = true;
+    if (kind === 'sensor') wizard.sensorPairingToken = '';
+    invalidatePreflight();
   }
   function wizardSetupLink(label, href = '#settings/packages') {
     if (!/^#settings\/(connection|media|ssh|packages(?:\/(?:splunk|fleetmanager|corelight-sensor))?)$/.test(href)) return null;
@@ -1952,10 +1973,10 @@
       event.preventDefault();
       if (!state.wizard || state.wizard.busy) return;
       invalidatePreflight(); state.wizard.suspended = true;
-      $('#wizard-dialog').close(); location.hash = href;
+      $('#wizard-dialog').close(); $('#wizard-dialog').replaceChildren(); location.hash = href;
     }}, label, icon('arrow'));
   }
-  $('#wizard-dialog').addEventListener('cancel', event => { if (state.wizard?.busy) event.preventDefault(); else { $('#wizard-dialog').replaceChildren(); state.wizard = null; if (state.route === 'deployments') renderOverview(); } });
+  $('#wizard-dialog').addEventListener('cancel', event => { if (state.wizard?.busy) event.preventDefault(); else { discardWizard(); if (state.route === 'deployments') renderOverview(); } });
   function wizardHeader() {
     const close = el('button', {type: 'button', class: 'icon-button dialog-close', 'aria-label': 'Close deployment wizard', onClick: closeWizard}, icon('close'));
     return el('div', {class: 'wizard-header'}, el('div', {}, el('h2', {id: 'wizard-title'}, 'New deployment'), el('p', {}, 'A ready-to-use environment, configured your way.')), close);
@@ -2044,7 +2065,7 @@
     const focusedId = $('#wizard-dialog').contains(document.activeElement) ? document.activeElement.id : '';
     ensureVMs();
     const steps = wizardSteps(), reviewStep = steps.length - 1;
-    const loadFleet = isFleetStep() && !wizard.fleetControls, loadSensor = isSensorStep() && !wizard.sensorControls;
+    const loadFleet = isFleetStep() && (!wizard.fleetControls || wizard.fleetNeedsRefresh), loadSensor = isSensorStep() && (!wizard.sensorControls || wizard.sensorNeedsRefresh);
     const sidebar = el('aside', {class: 'wizard-sidebar', 'aria-label': 'Deployment steps'});
     const compactSteps = ['Software', 'VMs', ...configurationSteps().map(role => role === 'fleetmanager' ? 'Fleet setup' : 'Sensor setup'), 'Review'];
     steps.forEach((label, index) => sidebar.append(el('div', {class: `wizard-step ${index === wizard.step ? 'active' : index < wizard.step ? 'done' : ''}`, ...(index === wizard.step ? {'aria-current': 'step'} : {})}, el('b', {}, index < wizard.step ? '✓' : index + 1), el('span', {class: 'wizard-step-label'}, label), el('span', {class: 'wizard-step-compact-label'}, compactSteps[index]))));
@@ -2070,8 +2091,8 @@
     if (wizard.busy) for (const control of $('#wizard-dialog').querySelectorAll('button,input,select')) control.disabled = true;
     else if (focusedId) document.getElementById(focusedId)?.focus({preventScroll: true});
     if (isFleetStep() || isSensorStep()) syncConfigurationWizardActions(wizard);
-    if (loadFleet) wizard.fleetControls.load();
-    if (loadSensor) wizard.sensorControls.load();
+    if (loadFleet) { wizard.fleetNeedsRefresh = false; wizard.fleetControls.load(); }
+    if (loadSensor) { wizard.sensorNeedsRefresh = false; wizard.sensorControls.load(); }
   }
   function renderBlueprint(content) {
     const wizard = state.wizard;
@@ -2088,7 +2109,8 @@
       const checkbox = el('input', {id: `role-${role}`, type: 'checkbox', checked: wizard.selected.has(role), 'aria-label': config.name, onChange: event => {
         if (wizard.busy) return;
         if (event.target.checked) wizard.selected.add(role); else wizard.selected.delete(role);
-        if (role === 'corelight_sensor' && !event.target.checked) { wizard.sensorPairingToken = ''; wizard.sensorControls = null; wizard.sensorValidated = false; }
+        if (role === 'corelight_sensor') wizard.sensorValidated = false;
+        if (role === 'fleetmanager') wizard.fleetValidated = false;
         if (role === 'kibana' && event.target.checked) wizard.selected.add('elasticsearch');
         if (role === 'elasticsearch' && !event.target.checked) wizard.selected.delete('kibana');
         invalidatePreflight(); renderWizard();
@@ -2175,9 +2197,9 @@
         let action = null;
         if (!check.ok && check.action?.href && typeof check.action.label === 'string') {
           action = check.action.href === '#settings/packages/fleetmanager' && wizard.selected.has('fleetmanager')
-            ? button('Edit FleetManager configuration', 'button-small wizard-setup-link', () => { if (wizard.busy) return; invalidatePreflight(); wizard.fleetControls = null; wizard.fleetValidated = false; wizard.step = configurationStep('fleetmanager'); renderWizard(); }, 'back')
+            ? button('Edit FleetManager configuration', 'button-small wizard-setup-link', () => { if (wizard.busy) return; invalidatePreflight(); wizard.fleetNeedsRefresh = true; wizard.fleetValidated = false; wizard.step = configurationStep('fleetmanager'); renderWizard(); }, 'back')
             : check.action.href === '#settings/packages/corelight-sensor' && wizard.selected.has('corelight_sensor')
-              ? button('Edit sensor configuration', 'button-small wizard-setup-link', () => { if (wizard.busy) return; invalidatePreflight(); wizard.sensorControls = null; wizard.sensorValidated = false; wizard.step = configurationStep('corelight_sensor'); renderWizard(); }, 'back')
+              ? button('Edit sensor configuration', 'button-small wizard-setup-link', () => { if (wizard.busy) return; invalidatePreflight(); wizard.sensorNeedsRefresh = true; wizard.sensorValidated = false; wizard.step = configurationStep('corelight_sensor'); renderWizard(); }, 'back')
               : wizardSetupLink(check.action.label, check.action.href);
         }
         return el('div', {class: `preflight-check ${check.ok ? '' : 'fail'}`}, icon(check.ok ? 'checkCircle' : 'alert'), el('div', {}, el('strong', {}, check.name), el('p', {}, check.message), action));
