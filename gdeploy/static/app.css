@@ -1173,11 +1173,11 @@ td {
   margin-top:4px;
   color:var(--muted)
 }
-#os-media-panel>.surface-header,#splunk-package-panel>.surface-header,#fleetmanager-panel>.surface-header {
+#os-media-panel>.surface-header,#splunk-package-panel>.surface-header,#fleetmanager-panel>.surface-header,#corelight-sensor-panel>.surface-header {
   flex-wrap:wrap;
   gap:12px
 }
-#os-media-panel>.surface-header>div,#splunk-package-panel>.surface-header>div,#fleetmanager-panel>.surface-header>div {
+#os-media-panel>.surface-header>div,#splunk-package-panel>.surface-header>div,#fleetmanager-panel>.surface-header>div,#corelight-sensor-panel>.surface-header>div {
   flex:1 1 220px
 }
 .media-selected-summary {
@@ -1534,7 +1534,7 @@ td {
     grid-template-columns:1fr;
     gap:10px
   }
-  #os-media-panel .form-footer,#splunk-package-panel .form-footer,#fleetmanager-panel .form-footer {
+  #os-media-panel .form-footer,#splunk-package-panel .form-footer,#fleetmanager-panel .form-footer,#corelight-sensor-panel .form-footer {
     flex-direction:column;
     align-items:stretch
   }
@@ -1584,6 +1584,7 @@ td {
 }
 .software-tabs {
   display:flex;
+  flex-wrap:wrap;
   gap:8px;
   padding:5px;
   margin:0 0 18px;
@@ -1592,7 +1593,8 @@ td {
   background:var(--panel)
 }
 .software-tabs button {
-  flex:1;
+  flex:1 1 120px;
+  min-width:0;
   padding:12px;
   border:1px solid transparent;
   border-radius:5px;
@@ -2395,6 +2397,9 @@ td {
   padding:11px 7px;
   margin-bottom:10px
 }
+.wizard-step-compact-label {
+  display:none
+}
 .wizard-step b {
   flex-shrink:0;
   width:24px;
@@ -3185,6 +3190,12 @@ td {
     min-width:0;
     overflow-wrap:normal
   }
+  .wizard-step-label {
+    display:none
+  }
+  .wizard-step-compact-label {
+    display:block
+  }
   .wizard-step b {
     width:20px;
     height:20px;
@@ -3582,4 +3593,17 @@ td {
   .ssh-key-info {
     flex-basis:100%
   }
+}
+
+.sensor-dhcp-reservation {
+  align-items:flex-start;
+  margin-top:14px;
+  color:var(--muted);
+  font-size:12px
+}
+#corelight-sensor-panel .field {
+  min-width:0
+}
+#corelight-sensor-panel .alert p {
+  margin-bottom:0
 }

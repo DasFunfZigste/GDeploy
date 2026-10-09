@@ -15,6 +15,10 @@ flowchart LR
   Kibana[Kibana VM] -->|Service token and verified TLS| Elastic[Elasticsearch VM]
   Splunk[Splunk VM]
   Fleet[FleetManager VM]
+  Sensor[Corelight Software Sensor VM]
+  SensorPackages[Corelight sensor-stable apt repository] --> Sensor
+  Sensor -->|TLS pairing 1443| ExistingFleet[Existing Fleet Manager]
+  Mirror[Traffic mirror or tap] -->|Monitoring NIC without an IP| Sensor
   FleetPackages[Authenticated Corelight apt repository] --> Fleet
 ```
 
@@ -28,7 +32,7 @@ The specification, generated credentials, ESXi connection snapshot and selected 
 
 The deployment wizard renders a separate configuration section for every selected role, all visible together. Each maps to its own existing VM specification containing name, CPU, RAM, disk, datastore, port group and IP configuration. The deployment name labels the group. Kibana requires a separate Elasticsearch VM; selecting the pair does not combine their settings or resources. This presentation change preserves the existing per-VM API format and provisioning flow.
 
-Selecting FleetManager adds **FleetManager configuration** after **Configure VMs** and before **Review & deploy**. The embedded configuration form reuses saved defaults and the settings API; **Save & continue** validates and saves before advancing, also updating defaults for future deployments. Review requires an explicit preflight action before queueing. Setup retains independent defaults and legacy upload cleanup. Deployments without FleetManager keep the three-step wizard. FleetManager uses online repository installation only.
+Selecting FleetManager adds **FleetManager configuration** after **Configure VMs** and before **Review & deploy**. The embedded configuration form reuses saved defaults and the settings API; **Save & continue** validates and saves before advancing, also updating defaults for future deployments. Review requires an explicit preflight action before queueing. Setup retains independent defaults and legacy upload cleanup. Software Sensor adds a configuration step, after FleetManager when both are selected. Jobs without either Corelight role keep the three-step wizard. FleetManager uses online repository installation only.
 
 Recovery: failed/interrupted → cleaning → reverted + new queued deployment. A cleanup or replacement-preflight error becomes cleanup_failed and can be retried. Cleanup only deletes tagged VMs with deployment-owned storage and explicitly recorded ISO paths. It never deletes a datastore or network.
 
@@ -77,3 +81,16 @@ The guest installs UFW if needed, adds persistent TCP 443/1443 allow rules, and 
 Complete data-volume backups include encrypted FleetManager configuration and any retained legacy dependency packages. Back up mounted media and guest application data separately. Older GDeploy releases do not support the FleetManager role; finish or resolve those jobs before rollback. Clearing settings or updating GDeploy never updates the configuration/license already installed inside a VM.
 
 An actual host/guest lab is required to establish integration compatibility. No simulated deployment mode is exposed to users, and production success is only reported after OS and application checks return successfully. FleetManager's API and installer tests do not establish live Corelight license, real vendor package, sensor or ESXi compatibility.
+
+
+## Corelight Software Sensor
+
+The `corelight_sensor` role installs on fresh minimal Ubuntu 24.04. Encrypted common settings contain repository token, required sensor license key, community string, Fleet pairing URL/SSL name and API network. The unique pairing token is request-only input to preflight, queue and sensor redeploy; it is stripped before storing the public specification and saved only in encrypted job secrets. Ordinary responses expose saved flags, not secrets.
+
+A persistent keyed token fingerprint is reserved transactionally with job insertion. Concurrent or later jobs cannot reuse it, including tokens from failed/stopped jobs. Preflight reports prior use and queueing rechecks atomically. Sensor redeploy requires a fresh token and valid current settings before destructive cleanup. GDeploy does not alter Fleet records.
+
+Sensor VMs are created with two VMXNET3 adapters and without installation media before ISO preparation. Their owned VM IDs and actual NIC MACs are persisted. MAC-specific netplan assigns an address only to management; monitoring disables DHCP, RA and link-local addressing. The ISO is uploaded and attached before power-on. Ordinary ownership-based recovery remains available if media creation/upload fails, and other VM roles retain their established provisioning path.
+
+Host capacity/reservations and guest resource checks enforce the sensor profile where observable. Guest checks require Ubuntu 24.04, x86-64-v3 CPU capabilities and 500 GB free space. SSD backing, actual traffic mirroring and throughput still require site verification. The installer configures the fixed sensor-stable repository over verified HTTPS with bounded redirects and root-only apt credentials, installs vendor packages and writes the documented `sensor` YAML subtree. It runs Corelight prepare/deploy/status commands. Kubernetes CNI owns the sensor firewall; FleetManager UFW rules are not applied.
+
+Readiness requires healthy sensor services including licensed sensor-core and connection-manager. It does not prove packet visibility or correct Fleet policy/export settings. The documented Suricata no-rules warning is surfaced without ignoring unrelated failures. All diagnostics must redact sensor secrets. Real licensed installation, ESXi/Fleet pairing and mirrored-traffic acceptance remain a lab exercise.

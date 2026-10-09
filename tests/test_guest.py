@@ -438,3 +438,34 @@ def test_splunk_package_validation_rejects_tar_traversal_and_link_writes(tmp_pat
     write = tarfile.TarInfo("splunk/linked-dir/file")
     with pytest.raises(guest.GuestError, match="linked directory"):
         guest._validate_splunk_archive(_archive(tmp_path, [link, write]))
+
+
+@pytest.mark.parametrize("mode", ["dhcp", "static"])
+def test_sensor_autoinstall_uses_minimal_source_and_two_mac_matched_interfaces(spec, mode):
+    spec.update(role="corelight_sensor", management_mac="00:50:56:aa:bb:01", monitor_mac="00:50:56:aa:bb:02", ip_mode=mode, dhcp_reserved=True)
+    if mode == "static":
+        spec.update(address="192.168.50.2/24", gateway="192.168.50.1", dns=["192.168.50.1"])
+    install = guest._autoinstall_data(spec, "gdeploy", "password", "ssh-rsa AAAA")["autoinstall"]
+    assert install["source"] == {"id": "ubuntu-server-minimal", "search_drivers": False}
+    networks = install["network"]["ethernets"]
+    assert networks["gdeploy"]["match"] == {"macaddress": spec["management_mac"]}
+    assert networks["gdeploy"]["set-name"] == "gdeploymgmt"
+    assert networks["gdeploy"]["dhcp4"] == (mode == "dhcp")
+    assert networks["monitoring"] == {
+        "match": {"macaddress": spec["monitor_mac"]}, "set-name": "gdeploymon", "dhcp4": False,
+        "dhcp6": False, "accept-ra": False, "link-local": [], "optional": True,
+    }
+    assert "vmxnet3" not in str(networks)
+    if mode == "static":
+        assert networks["gdeploy"]["addresses"] == ["192.168.50.2/24"]
+
+
+@pytest.mark.parametrize("change", [
+    {"management_mac": None}, {"monitor_mac": "bad"}, {"monitor_mac": "01:50:56:aa:bb:02"},
+    {"monitor_mac": "00:50:56:aa:bb:01"}, {"dhcp_reserved": False},
+])
+def test_sensor_autoinstall_rejects_unknown_or_duplicate_nic_identity_and_unreserved_dhcp(spec, change):
+    spec.update(role="corelight_sensor", management_mac="00:50:56:aa:bb:01", monitor_mac="00:50:56:aa:bb:02", dhcp_reserved=True)
+    spec.update(change)
+    with pytest.raises(guest.GuestError, match="Software Sensor"):
+        guest._autoinstall_data(spec, "gdeploy", "password", "ssh-rsa AAAA")

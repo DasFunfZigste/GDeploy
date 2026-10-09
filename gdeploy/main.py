@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool
 from . import __version__
 from .certificate_trust import CertificateTrust, CertificateTrustError, certificate_endpoint
 from .config import Config, hash_password, verify_password
+from .corelight_sensor import CorelightSensorError, CorelightSensorManager
 from .db import Database, DeploymentStopError, DeploymentVisibilityError, MediaStateError
 from .deployment_defaults import DeploymentDefaults, DeploymentDefaultsError
 from .fleetmanager import FleetManager, FleetManagerError
@@ -24,6 +25,7 @@ from .models import (
     CertificateApproval,
     CertificateHost,
     ConnectionSettings,
+    CorelightSensorSettings,
     DeploymentDefaultsSettings,
     DeploymentSpec,
     ESXiMediaSelection,
@@ -66,6 +68,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         app.state.packages.recover_uploads()
         app.state.fleetmanager = FleetManager(app.state.db, app.state.config)
         app.state.fleetmanager.recover_uploads()
+        app.state.corelight_sensor = CorelightSensorManager(app.state.db)
         app.state.login_lock = threading.Lock()
         if start_worker:
             app.state.service.start()
@@ -168,6 +171,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     async def deployment_defaults_error(request, exc):
         return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
+    @app.exception_handler(CorelightSensorError)
+    async def corelight_sensor_error(request, exc):
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
     @app.get("/api/health")
     def health(request: Request):
         service = request.app.state.service
@@ -260,6 +267,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "splunk_configured": request.app.state.packages.catalog()["ready"],
             "fleetmanager_configured": fleetmanager["ready"],
             "fleetmanager_mode": fleetmanager["mode"],
+            "corelight_sensor_configured": request.app.state.corelight_sensor.catalog()["ready"],
             "deployment_defaults": request.app.state.deployment_defaults.catalog(),
         }
 
@@ -283,6 +291,18 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.get("/api/settings/splunk-package")
     def splunk_package_settings(request: Request, current=Depends(authenticated)):
         return request.app.state.packages.catalog()
+
+    @app.get("/api/settings/corelight-sensor")
+    def corelight_sensor_settings(request: Request, current=Depends(authenticated)):
+        return request.app.state.corelight_sensor.catalog()
+
+    @app.put("/api/settings/corelight-sensor")
+    def save_corelight_sensor_settings(payload: CorelightSensorSettings, request: Request, current=Depends(authenticated)):
+        return request.app.state.corelight_sensor.save(payload)
+
+    @app.delete("/api/settings/corelight-sensor")
+    def clear_corelight_sensor_settings(request: Request, current=Depends(authenticated)):
+        return request.app.state.corelight_sensor.clear()
 
     @app.get("/api/settings/fleetmanager")
     def fleetmanager_settings(request: Request, current=Depends(authenticated)):
@@ -482,6 +502,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     def redeploy(deployment_id: UUID, payload: RedeployRequest, request: Request, current=Depends(authenticated)):
         service = request.app.state.service
         with service.action_lock:
+            if payload.sensor_pairing_token:
+                return service.redeploy(str(deployment_id), payload.confirm_name, sensor_pairing_token=payload.sensor_pairing_token)
             return service.redeploy(str(deployment_id), payload.confirm_name)
 
     app.mount("/static", StaticFiles(directory=STATIC, check_dir=False), name="static")

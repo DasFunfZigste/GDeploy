@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from .certificate_trust import certificate_endpoint
+from .corelight_sensor import CorelightSensorError, CorelightSensorManager
 from .guest import GuestConnectionError, GuestSession, build_seed_iso, generate_ssh_key
 from .fleetmanager import FleetManager, FleetManagerError
 from .media import MediaError, MediaManager
@@ -54,6 +55,7 @@ def safe_error(error, secret_data=None):
                             "reporting_key",
                             "community_string",
                             "license_pem",
+                            "license_key",
                         )
                     )
                     and isinstance(child, str)
@@ -79,6 +81,7 @@ class DeploymentService:
         self.media = MediaManager(db, config)
         self.packages = SplunkPackageManager(db, config)
         self.fleetmanager = FleetManager(db, config)
+        self.corelight_sensor = CorelightSensorManager(db)
         self.action_lock = threading.Lock()
         self.stop_event = threading.Event()
         self._wake_event = threading.Event()
@@ -146,7 +149,7 @@ class DeploymentService:
         except Exception as exc:
             raise DeploymentError(safe_error(exc, settings)) from None
 
-    def preflight(self, spec, settings=None, exclude_id=None, os_media=None, splunk_package=None, fleetmanager=None):
+    def preflight(self, spec, settings=None, exclude_id=None, os_media=None, splunk_package=None, fleetmanager=None, corelight_sensor=None):
         settings = settings or self.db.settings()
         checks = []
 
@@ -188,6 +191,16 @@ class DeploymentService:
             except (FleetManagerError, OSError) as exc:
                 check("FleetManager configuration", False, f"Open Setup → Software packages → FleetManager. {exc}")
                 checks[-1]["action"] = {"label": "Configure FleetManager", "href": "#settings/packages/fleetmanager"}
+        if any(vm["role"] == "corelight_sensor" for vm in spec["vms"]):
+            try:
+                sensor = self.corelight_sensor.snapshot(spec.get("sensor_pairing_token", "")) if corelight_sensor is None else self.corelight_sensor.validate_snapshot(corelight_sensor)
+                self.corelight_sensor.require_unused_token(sensor["pairing_token"], deployment_id=exclude_id)
+                check("Corelight Software Sensor configuration", True,
+                      "Repository access, required license, Fleet community string and a fresh pairing token are configured. "
+                      "Use Ubuntu 24.04 Server minimal installation media and SSD storage. The VM must reach Ubuntu/Corelight repositories and Fleet Manager; package availability and sensor health are checked during installation.")
+            except CorelightSensorError as exc:
+                check("Corelight Software Sensor configuration", False, str(exc))
+                checks[-1]["action"] = {"label": "Configure Corelight Software Sensor", "href": "#settings/packages/corelight-sensor"}
         check(
             "ISO builder",
             shutil.which("xorriso"),
@@ -255,6 +268,8 @@ class DeploymentService:
         check(
             "CPU limits",
             all(vm["cpu"] <= host["cpu_threads"] for vm in spec["vms"]),
+            f"Host exposes {host['cpu_threads']} logical CPUs; sensor deployments also require dedicated physical CPU capacity."
+            if any(vm["role"] == "corelight_sensor" for vm in spec["vms"]) else
             f"Host exposes {host['cpu_threads']} logical CPUs; CPU overcommit remains an administrator decision.",
         )
         # Conservatively count all pending reservations, including powered-on work.
@@ -265,11 +280,35 @@ class DeploymentService:
             ram + 2 <= free_memory,
             f"{ram} GiB requested/reserved plus 2 GiB headroom; {free_memory:.1f} GiB host memory available.",
         )
+        sensors = [vm for vm in spec["vms"] if vm["role"] == "corelight_sensor"]
+        if sensors:
+            # ESXi already accounts for reservations on created VMs. Include
+            # queued sensors whose reservations have not reached ESXi yet.
+            waiting = [vm for vm in reserved if vm["role"] == "corelight_sensor" and not vm.get("vm_id")]
+            cpu_mhz = host.get("cpu_mhz")
+            requested_cpu = sum(vm["cpu"] for vm in sensors + waiting)
+            needed_mhz = requested_cpu * cpu_mhz if isinstance(cpu_mhz, (int, float)) and cpu_mhz > 0 else None
+            free_cpu = host.get("free_cpu_reservation_mhz")
+            check("Sensor CPU reservation capacity", needed_mhz is not None and isinstance(free_cpu, (int, float)) and free_cpu >= needed_mhz,
+                  f"Sensor reservations require {needed_mhz if needed_mhz is not None else 'unknown'} MHz; ESXi reports {free_cpu if free_cpu is not None else 'unknown'} MHz unreserved. Readable host CPU and resource-pool reservation data is required.")
+            needed_ram = sum(vm["ram_gb"] for vm in sensors + waiting)
+            free_reserved_ram = host.get("free_memory_reservation_gb")
+            check("Sensor memory reservation capacity", isinstance(free_reserved_ram, (int, float)) and free_reserved_ram >= needed_ram,
+                  f"Sensor reservations require {needed_ram} GiB dedicated RAM; ESXi reports {free_reserved_ram if free_reserved_ram is not None else 'unknown'} GiB unreserved.")
         networks = {network["name"] for network in inventory["networks"]}
         stores = {store["name"]: store for store in inventory["datastores"]}
         iso_gb = iso_size / 1024**3 if iso_size is not None else 6
         for vm in spec["vms"]:
             check(f"{vm['name']} network", vm["network"] in networks, f"Port group: {vm['network']}")
+            if vm["role"] == "corelight_sensor":
+                monitor = vm.get("monitor_network")
+                check(f"{vm['name']} monitoring network", bool(monitor and monitor in networks),
+                      f"Monitoring port group: {monitor or 'not selected'}. Configure TAP/SPAN delivery and ESXi promiscuous mode for this dedicated capture network; it will have no IP address.")
+                check(f"{vm['name']} management address", vm.get("ip_mode") == "static" or vm.get("dhcp_reserved") is True,
+                      "Sensor management requires static IPv4 or an administrator-confirmed DHCP reservation.")
+                physical = host.get("cpu_cores")
+                check(f"{vm['name']} sensor CPU capacity", isinstance(physical, (int, float)) and vm["cpu"] <= physical,
+                      f"Sensor requires {vm['cpu']} dedicated physical CPU cores; host reports {physical if physical is not None else 'unknown'}. CPU over-subscription is unsupported.")
         for name in {vm["datastore"] for vm in spec["vms"]}:
             space = sum(
                 vm["disk_gb"] + iso_gb + vm["ram_gb"] for vm in spec["vms"] + reserved if vm["datastore"] == name
@@ -284,14 +323,22 @@ class DeploymentService:
             )
         return {"ok": all(item["ok"] for item in checks), "checks": checks}
 
-    def enqueue(self, spec, settings=None, parent_id=None):
+    def enqueue(self, spec, settings=None, parent_id=None, corelight_sensor=None):
         settings = settings or self.db.settings()
         os_media = self.media.selected()
         splunk_package = self.packages.selected() if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
         fleetmanager = self.fleetmanager.selected() if any(vm["role"] == "fleetmanager" for vm in spec["vms"]) else None
+        sensor = None
+        if any(vm["role"] == "corelight_sensor" for vm in spec["vms"]):
+            try:
+                sensor = self.corelight_sensor.snapshot(spec.get("sensor_pairing_token", "")) if corelight_sensor is None else self.corelight_sensor.validate_snapshot(corelight_sensor)
+                self.corelight_sensor.require_unused_token(sensor["pairing_token"])
+            except CorelightSensorError as exc:
+                raise DeploymentError(str(exc)) from None
         result = self.preflight(
             spec, settings, exclude_id=parent_id, os_media=os_media or {}, splunk_package=splunk_package or {},
             fleetmanager=fleetmanager or {},
+            corelight_sensor=sensor,
         )
         if not result["ok"]:
             raise DeploymentError(
@@ -314,6 +361,7 @@ class DeploymentService:
             "os_media": os_media,
             "splunk_package": splunk_package,
             "fleetmanager": fleetmanager,
+            "corelight_sensor": sensor,
             "authorized_ssh_keys": self.db.ssh_public_keys(),
             "vm_credentials": vm_credentials,
             "software": {
@@ -423,16 +471,21 @@ class DeploymentService:
             # Jobs from before package selection retain their environment source.
             splunk_package = secret_data.get("splunk_package") if "splunk_package" in secret_data else self.packages.legacy()
             fleetmanager = secret_data.get("fleetmanager")
+            sensor = secret_data.get("corelight_sensor")
             artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.stage(deployment_id, "preflight", "Checking media, host capacity and deployment inputs")
             # Retired or invalid queued FleetManager snapshots must fail before
             # contacting ESXi. Never replace them with later Setup settings.
             if any(vm["role"] == "fleetmanager" for vm in deployment["spec"]["vms"]):
                 self.fleetmanager.validate_snapshot(fleetmanager or {})
+            if any(vm["role"] == "corelight_sensor" for vm in deployment["spec"]["vms"]):
+                self.corelight_sensor.validate_snapshot(sensor or {})
+                self.corelight_sensor.require_unused_token(sensor["pairing_token"], deployment_id=deployment_id)
             result = self.preflight(
                 deployment["spec"], secret_data["esxi"], exclude_id=deployment_id, os_media=os_media or {},
                 splunk_package=splunk_package or {},
                 fleetmanager=fleetmanager or {},
+                corelight_sensor=sensor or {},
             )
             if not result["ok"]:
                 raise DeploymentError(
@@ -444,6 +497,17 @@ class DeploymentService:
                     self._check_stop(deployment_id)
                     credential = secret_data["vm_credentials"][vm["name"]]
                     self.stage(deployment_id, "preparing", f"Preparing unattended OS installation for {vm['name']}")
+                    if vm["role"] == "corelight_sensor":
+                        # ESXi assigns both MACs before ISO creation so autoinstall
+                        # can match each NIC explicitly without enabling capture DHCP.
+                        self.stage(deployment_id, "creating", f"Creating {vm['name']} with separate management and monitoring adapters")
+                        vm["vm_id"] = esxi.create_vm(vm, None, deployment_id)
+                        vm["status"] = "preparing"
+                        self.db.update(deployment_id, vms=vms)
+                        self._check_stop(deployment_id)
+                        vm.update(esxi.network_macs(vm["vm_id"], deployment_id))
+                        self.db.update(deployment_id, vms=vms)
+                        self._check_stop(deployment_id)
                     iso = artifact_dir / (vm["name"] + ".iso")
                     if os_media:
                         # A mounted file can be replaced while an earlier VM installs.
@@ -469,7 +533,10 @@ class DeploymentService:
                     esxi.upload_iso(vm["datastore"], remote, iso)
                     iso.unlink(missing_ok=True)
                     self._check_stop(deployment_id)
-                    vm["vm_id"] = esxi.create_vm(vm, f"[{vm['datastore']}] {remote}", deployment_id)
+                    if vm["role"] == "corelight_sensor":
+                        esxi.attach_iso(vm["vm_id"], f"[{vm['datastore']}] {remote}", deployment_id)
+                    else:
+                        vm["vm_id"] = esxi.create_vm(vm, f"[{vm['datastore']}] {remote}", deployment_id)
                     vm["status"] = "installing_os"
                     self.db.update(deployment_id, vms=vms)
                     self._check_stop(deployment_id)
@@ -493,7 +560,7 @@ class DeploymentService:
                     )
                 elastic = None
                 for vm in sorted(
-                    vms, key=lambda item: {"elasticsearch": 0, "kibana": 1, "splunk": 2, "fleetmanager": 3, "ubuntu": 4}[item["role"]]
+                    vms, key=lambda item: {"elasticsearch": 0, "kibana": 1, "splunk": 2, "fleetmanager": 3, "corelight_sensor": 4, "ubuntu": 5}[item["role"]]
                 ):
                     self._check_stop(deployment_id)
                     credential = secret_data["vm_credentials"][vm["name"]]
@@ -504,7 +571,12 @@ class DeploymentService:
                     if vm["role"] == "fleetmanager":
                         self.fleetmanager.validate_snapshot(fleetmanager or {})
                         fleet_options["fleetmanager"] = fleetmanager
-                    role_label = "operating system" if vm["role"] == "ubuntu" else vm["role"]
+                    if vm["role"] == "corelight_sensor":
+                        checked = self.corelight_sensor.validate_snapshot(sensor or {})
+                        fleet_options["corelight_sensor"] = {
+                            **checked, "management_mac": vm["management_mac"], "monitor_mac": vm["monitor_mac"],
+                        }
+                    role_label = {"ubuntu": "operating system", "corelight_sensor": "Corelight Software Sensor"}.get(vm["role"], vm["role"])
                     self.stage(deployment_id, "installing_software", f"Configuring {role_label} on {vm['name']}")
                     vm["status"] = "installing_software"
                     self.db.update(deployment_id, vms=vms)
@@ -549,7 +621,7 @@ class DeploymentService:
             deployment_id, outcome, vms=vms, resources=resources, secrets=secret_data, error=error,
         )
 
-    def redeploy(self, deployment_id, confirm_name):
+    def redeploy(self, deployment_id, confirm_name, *, sensor_pairing_token=""):
         deployment = self.db.get(deployment_id, private=True)
         if not deployment:
             raise DeploymentError("Deployment not found.")
@@ -557,6 +629,19 @@ class DeploymentService:
             raise DeploymentError("Only failed, stopped or interrupted deployments can be deleted and redeployed.")
         if confirm_name != deployment["name"]:
             raise DeploymentError("Type the exact deployment name to confirm deletion.")
+        replacement_spec = dict(deployment["spec"])
+        sensor = None
+        if any(vm["role"] == "corelight_sensor" for vm in deployment["spec"]["vms"]):
+            # A token from the old job is consumed even when installation failed.
+            # Validate the fresh replacement inputs before deleting any resources.
+            try:
+                sensor = self.corelight_sensor.snapshot(sensor_pairing_token)
+                self.corelight_sensor.require_unused_token(sensor["pairing_token"])
+            except CorelightSensorError as exc:
+                raise DeploymentError(str(exc)) from None
+            replacement_spec["sensor_pairing_token"] = sensor_pairing_token
+        elif sensor_pairing_token:
+            raise DeploymentError("Only Corelight Software Sensor deployments accept a pairing token.")
         self.db.update(deployment_id, status="cleaning", stage="cleaning", error=None)
         self.db.event(
             deployment_id,
@@ -574,12 +659,15 @@ class DeploymentService:
                     esxi.delete_iso(resource["datastore"], resource["path"], deployment_id)
             # Mark cleanup complete before re-running read-only preflight; no replacement on failure.
             self.db.update(deployment_id, resources=[])
-            replacement = self.enqueue(deployment["spec"], deployment["secrets"]["esxi"], parent_id=deployment_id)
+            replacement = self.enqueue(
+                replacement_spec, deployment["secrets"]["esxi"], parent_id=deployment_id,
+                **({"corelight_sensor": sensor} if sensor else {}),
+            )
             self.db.update(deployment_id, status="reverted", stage="reverted", error=None)
             self.db.event(deployment_id, "Cleanup complete; replacement deployment queued: " + replacement["id"])
             return replacement
         except Exception as exc:
-            error = safe_error(exc, deployment["secrets"])
+            error = safe_error(exc, {"previous": deployment["secrets"], "replacement_sensor": sensor})
             self.db.update(deployment_id, status="cleanup_failed", stage="cleanup_failed", error=error)
             self.db.event(deployment_id, "Delete/redeploy stopped: " + error, "error")
             raise DeploymentError(error) from None

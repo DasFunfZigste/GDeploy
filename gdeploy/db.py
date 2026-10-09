@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -32,6 +33,10 @@ class DeploymentStopError(ValueError):
     """A deployment is no longer eligible for a stop request."""
 
 
+class SensorPairingError(MediaStateError):
+    """A sensor pairing token cannot be assigned to another deployment."""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -41,6 +46,7 @@ class Database:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "gdeploy.sqlite3"
         self.cipher = Fernet(key.encode())
+        self._pairing_key = hashlib.sha256(("gdeploy-sensor-pairing:" + key).encode()).digest()
         with self.connect() as conn:
             conn.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -54,6 +60,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS splunk_package_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS fleetmanager_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS fleetmanager_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS corelight_sensor_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS sensor_pairing_tokens (fingerprint TEXT PRIMARY KEY, deployment_id TEXT NOT NULL UNIQUE);
                 CREATE TABLE IF NOT EXISTS deployments (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
                     stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -359,6 +367,29 @@ class Database:
             row = connection.execute("SELECT value FROM fleetmanager_settings WHERE id=1").fetchone()
         return self.unseal(row[0]) if row else None
 
+    def corelight_sensor_settings(self):
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM corelight_sensor_settings WHERE id=1").fetchone()
+        return self.unseal(row[0]) if row else None
+
+    def set_corelight_sensor_settings(self, value):
+        with self.connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO corelight_sensor_settings VALUES(1,?)", (self.seal(value),))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Corelight Software Sensor configuration updated"))
+
+    def clear_corelight_sensor_settings(self):
+        with self.connect() as connection:
+            if connection.execute("DELETE FROM corelight_sensor_settings WHERE id=1").rowcount:
+                connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Corelight Software Sensor configuration cleared"))
+
+    def _sensor_token_fingerprint(self, token):
+        return hmac.new(self._pairing_key, token.encode(), hashlib.sha256).hexdigest()
+
+    def sensor_pairing_token_used(self, token, *, deployment_id=None):
+        with self.connect() as connection:
+            row = connection.execute("SELECT deployment_id FROM sensor_pairing_tokens WHERE fingerprint=?", (self._sensor_token_fingerprint(token),)).fetchone()
+        return row is not None and row[0] != deployment_id
+
     def fleetmanager_files(self):
         with self.connect() as connection:
             rows = connection.execute("SELECT value FROM fleetmanager_files ORDER BY id").fetchall()
@@ -541,6 +572,8 @@ class Database:
             c.execute("DELETE FROM sessions WHERE token=?", (hashlib.sha256(token.encode()).hexdigest(),))
 
     def create(self, deployment_id, spec, secret_data, parent_id=None):
+        # Request-only pairing tokens must never be persisted in plaintext specs.
+        spec = {key: value for key, value in spec.items() if key != "sensor_pairing_token"}
         stamp = now()
         vms = [dict(vm, status="pending", services=[]) for vm in spec["vms"]]
         with self.connect() as c:
@@ -550,6 +583,12 @@ class Database:
             self._require_registered_media(c, secret_data.get("os_media"))
             self._require_registered_splunk_package(c, secret_data.get("splunk_package"))
             self._require_registered_fleetmanager(c, secret_data.get("fleetmanager"))
+            sensor = secret_data.get("corelight_sensor")
+            if sensor:
+                try:
+                    c.execute("INSERT INTO sensor_pairing_tokens VALUES(?,?)", (self._sensor_token_fingerprint(sensor["pairing_token"]), deployment_id))
+                except sqlite3.IntegrityError:
+                    raise SensorPairingError("This sensor pairing token was already assigned to a deployment. Create a new sensor record in Fleet Manager and use its fresh token.") from None
             c.execute(
                 """INSERT INTO deployments
                    (id,name,status,stage,created_at,updated_at,spec,vms,resources,secrets,error,parent_id)

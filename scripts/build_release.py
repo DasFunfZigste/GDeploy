@@ -33,6 +33,7 @@ DEPLOYMENT_FILES = (
     ("docs/OPERATIONS.md", "docs/OPERATIONS.md"),
     ("docs/LAB_VALIDATION.md", "docs/LAB_VALIDATION.md"),
     ("docs/FLEETMANAGER.md", "docs/FLEETMANAGER.md"),
+    ("docs/CORELIGHT_SENSOR.md", "docs/CORELIGHT_SENSOR.md"),
     ("docs/ARCHITECTURE.md", "docs/ARCHITECTURE.md"),
     ("docs/overview.png", "docs/overview.png"),
     ("media/.gitkeep", "media/.gitkeep"),

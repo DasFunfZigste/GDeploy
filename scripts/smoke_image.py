@@ -32,6 +32,18 @@ SMOKE_SSH_KEY = "ssh-ed25519 " + base64.b64encode(
     + bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
 ).decode("ascii") + " container-smoke"
 
+# Deliberately invalid vendor credentials exercise encrypted defaults only.
+# Smoke checks never contact the repository, pair a sensor, or provision a VM.
+SMOKE_SENSOR_SETTINGS = {
+    "repository_token": "smoke-sensor-repository-only",
+    "community_string": "smoke-sensor-community-only",
+    "license_key": "smoke-sensor-license-only",
+    "fleet_url": "https://fleet.example.invalid",
+    "server_sslname": "fleet.example.invalid",
+    "api_network": "192.0.2.0/24",
+}
+SMOKE_SENSOR_SECRETS = tuple(SMOKE_SENSOR_SETTINGS[key] for key in ("repository_token", "community_string", "license_key"))
+
 
 def smoke_splunk_package():
     """Tiny archive-format fixture; never deployed or represented as a vendor installer."""
@@ -142,7 +154,7 @@ def verify_login_and_storage(url, credentials, write=False):
     if session["must_change_credentials"]:
         assert write, "The chosen administrator account did not survive container recreation"
         assert request("/api/session")["must_change_credentials"] is True
-        for path in ("/api/settings", "/api/settings/ssh-keys", "/api/settings/splunk-package", "/api/settings/fleetmanager", "/api/deployments"):
+        for path in ("/api/settings", "/api/settings/ssh-keys", "/api/settings/splunk-package", "/api/settings/fleetmanager", "/api/settings/corelight-sensor", "/api/deployments"):
             try:
                 request(path)
             except urllib.error.HTTPError as error:
@@ -150,6 +162,14 @@ def verify_login_and_storage(url, credentials, write=False):
                 assert json.load(error)["detail"]["code"] == "credentials_change_required"
             else:
                 raise AssertionError("Default credentials were allowed to access deployment features")
+        for method in ("PUT", "DELETE"):
+            try:
+                request("/api/settings/corelight-sensor", SMOKE_SENSOR_SETTINGS if method == "PUT" else {}, method, session["csrf_token"])
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
+                assert json.load(error)["detail"]["code"] == "credentials_change_required"
+            else:
+                raise AssertionError("Default credentials were allowed to change sensor settings")
         new_username, new_password = "smoke-operator", secrets.token_urlsafe(24)
         result = request(
             "/api/account/setup",
@@ -198,6 +218,9 @@ def verify_login_and_storage(url, credentials, write=False):
              "online_version": "29.2.2-1"},
             "PUT", session["csrf_token"],
         )
+        sensor_saved = request("/api/settings/corelight-sensor", SMOKE_SENSOR_SETTINGS, "PUT", session["csrf_token"])
+        assert sensor_saved["ready"] and sensor_saved["configured"]
+        assert all(secret not in json.dumps(sensor_saved) for secret in SMOKE_SENSOR_SECRETS)
         saved_keys = request(
             "/api/settings/ssh-keys", {"public_keys": [SMOKE_SSH_KEY, SMOKE_SSH_KEY]},
             "PUT", session["csrf_token"],
@@ -209,6 +232,8 @@ def verify_login_and_storage(url, credentials, write=False):
     assert settings["iso_configured"] is True
     assert settings["splunk_configured"] is True
     assert settings["fleetmanager_configured"] is True and settings["fleetmanager_mode"] == "online"
+    assert settings["corelight_sensor_configured"] is True
+    assert all(secret not in json.dumps(settings) for secret in SMOKE_SENSOR_SECRETS)
     assert settings["ssh_key_count"] == 1
     ssh_keys = request("/api/settings/ssh-keys")
     assert ssh_keys["count"] == 1 and ssh_keys["keys"][0]["public_key"] == SMOKE_SSH_KEY
@@ -230,6 +255,19 @@ def verify_login_and_storage(url, credentials, write=False):
     assert fleet["license"]["sha256"] == hashlib.sha256(fleet_pem.encode()).hexdigest()
     assert fleet["packages"] == []
     assert all(secret not in json.dumps(fleet) for secret in ("smoke-community-only", "smoke-repository-only", "PRIVATE KEY"))
+    sensor = request("/api/settings/corelight-sensor")
+    assert sensor["ready"] and sensor["configured"]
+    assert all(sensor[key + "_configured"] for key in ("repository_token", "community_string", "license_key"))
+    assert sensor["fleet_url"] == "https://fleet.example.invalid:1443"
+    assert sensor["server_sslname"] == SMOKE_SENSOR_SETTINGS["server_sslname"]
+    assert sensor["api_network"] == SMOKE_SENSOR_SETTINGS["api_network"]
+    assert "pairing_token" not in sensor and "sensor_pairing_token" not in sensor
+    assert all(secret not in json.dumps(sensor) for secret in SMOKE_SENSOR_SECRETS)
+    retained_sensor = request(
+        "/api/settings/corelight-sensor", {"repository_token": "", "community_string": "", "license_key": ""},
+        "PUT", session["csrf_token"],
+    )
+    assert retained_sensor == sensor, "Saved sensor secrets did not survive a blank-field save or container recreation"
     request("/api/logout", {}, "POST", session["csrf_token"])
     return credentials
 
@@ -435,6 +473,7 @@ def smoke_automatic(image, source_compose=False, blank_env=False):
                 credential_values(chosen_credentials)[1],
                 saved["secret_key"],
                 saved["admin_password_hash"],
+                *SMOKE_SENSOR_SECRETS,
             )
             assert all(private_values)
             verify_logs(private_values)

@@ -232,12 +232,20 @@ Offline installation and new `.deb` uploads have been removed. Older offline def
 
 Back up the complete data volume and encryption key. See the [FleetManager walkthrough](FLEETMANAGER.md) for preparation, first sign-in, upgrades, cleanup and [firewall commands for an existing VM](FLEETMANAGER.md#existing-vm-firewall-rules). App updates do not reconfigure existing guests. Live licensed-package/ESXi/sensor acceptance is covered separately by the [lab checklist](LAB_VALIDATION.md#fleetmanager-installation).
 
+### Configure Corelight Software Sensor
+
+Select **Corelight Software Sensor** for a dedicated minimal Ubuntu 24.04 VM with two VMXNET3 adapters. Defaults are **4 vCPUs, 16 GiB RAM and a 600 GiB disk**. Use SSD-backed storage and dedicated host capacity. The management NIC needs a static or reserved DHCP address. Select a monitoring port group for the second NIC, which receives no IP, DHCP or default route. Configure the traffic mirror/tap outside GDeploy.
+
+After **Configure VMs**, complete **Sensor configuration** with the Software Sensor repository token, Fleet community string, required **sensor license key**, pairing URL, server SSL name and permitted sensor API network. Obtain a fresh pairing token from **Fleet Manager → Sensors → + New Sensor → corelightctl**, and enter it for this deployment. Common encrypted defaults are in **Setup → Software packages → Corelight Software Sensor**; pairing tokens are never shared defaults. A FleetManager `.pem` is not the sensor license key.
+
+An existing Fleet instance is required; GDeploy does not automatically create Fleet sensor records. Guest checks require licensed sensor-core and connection-manager to be healthy. **Delete & redeploy** needs a fresh pairing token, checked before deleting resources. Clearing defaults or updating GDeploy does not reconfigure existing sensors. See the [Software Sensor walkthrough](CORELIGHT_SENSOR.md) for repository access, resources, NIC behavior, CNI firewall, licensing and acceptance checks.
+
 ### Deploy your VMs
 
-1. Open **Setup**, listed above **Deployments** in the navigation, to finish ESXi and OS ISO configuration. Configure the package in **Software packages** if deploying Splunk. Select **New deployment**, enter a deployment label and choose OS only, Splunk, Elasticsearch, Kibana and/or FleetManager. A fresh wizard starts with no roles selected; choose at least one to continue. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk and FleetManager run independently.
+1. Open **Setup**, listed above **Deployments** in the navigation, to finish ESXi and OS ISO configuration. Configure the package in **Software packages** if deploying Splunk. Select **New deployment**, enter a deployment label and choose OS only, Splunk, Elasticsearch, Kibana, FleetManager and/or Corelight Software Sensor. A fresh wizard starts with no roles selected; choose at least one to continue. Each chosen role receives a separate VM. Kibana requires Elasticsearch and is configured to connect to it; Splunk and FleetManager run independently.
 2. In **Configure VMs**, fill in each role's visible section with its own VM name, CPU, RAM, disk size, datastore, port group and DHCP/static network settings. Elasticsearch and Kibana have separate sections and VM names. The deployment label groups the job; it is not a shared VM name. Use the section navigation to move between forms; all selected forms stay visible together. Review the separate values for every VM before continuing.
 3. When FleetManager is selected, complete **FleetManager configuration** with its community string, license, repository token and version choice, then select **Save & continue**. Existing defaults can be reused. This step appears before review even if FleetManager was configured previously.
-4. In **Review & deploy**, select **Run preflight**, address any reported issues, and then deploy. To queue the job immediately after successful checks, first check **Start deployment automatically when preflight passes**, then select **Run preflight & deploy**. The checkbox starts unchecked in every fresh wizard; failed checks stop either flow. Without FleetManager, the wizard goes directly from **Configure VMs** to this review step and remains three steps long.
+4. In **Review & deploy**, select **Run preflight**, address any reported issues, and then deploy. To queue the job immediately after successful checks, first check **Start deployment automatically when preflight passes**, then select **Run preflight & deploy**. The checkbox starts unchecked in every fresh wizard; failed checks stop either flow. Software Sensor adds its configuration step before review, after FleetManager configuration when both are selected. Jobs without either Corelight role keep the three-step wizard.
 5. Open the deployment to follow its stages and errors. In **Deployment logs**, select **View logs** to expand recorded events and sanitized diagnostic details, and **Copy logs** to copy them. The failure banner's **View deployment logs** opens the same view. When ready, use the application links and **Reveal credentials** panel for the VM passwords and application sign-in details.
 
 In **Setup → ESXi connection → Default port group**, load the saved host's port groups, choose the network for new VMs and save the default. Confirm that its VLAN and routing let GDeploy reach the guests on TCP 22. The default only applies to the ESXi host it was saved for, and the form checks that the group still exists. If it is missing or belongs to a different host, choose a port group explicitly or update the default. Clearing the default restores explicit selection. Saving or clearing affects new VM forms; existing job specifications and deliberate choices in an open deployment draft are preserved. Review each VM's port group before preflight.
@@ -328,7 +336,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from Deployments** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.14.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.15.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## Optional manual credentials
 
@@ -385,10 +393,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.14.0** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.15.0** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.14.0-deploy.tar.gz`
-- `gdeploy-0.14.0-linux-amd64.image.tar.gz`
+- `gdeploy-0.15.0-deploy.tar.gz`
+- `gdeploy-0.15.0-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -400,12 +408,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.14.0-deploy.tar.gz
-sudo docker load --input gdeploy-0.14.0-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.15.0-deploy.tar.gz
+sudo docker load --input gdeploy-0.15.0-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.14.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.15.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
@@ -439,6 +447,8 @@ Common startup issues:
 | Splunk preflight reports a missing package such as `/media/splunk.tgz` | Open **Setup → Software packages** or follow **Configure Splunk package** from preflight. Upload or select your licensed Linux x86_64 `.tgz` with its publisher SHA-512 or verified SHA-256; vendor filenames are supported. Use **Return to deployment** and rerun preflight. UI selection needs no environment edit or restart. |
 | Splunk package upload or verification fails | Check the package is at most 4 GiB, free space is sufficient, the publisher checksum matches, and the archive is Splunk Enterprise for Linux x86_64. Enter only the 128-character SHA-512 or 64-character SHA-256, without the filename from the checksum file. Use v0.8.1 or later for Splunk's `.sha512` value. Review the displayed archive error; a `.tgz` extension alone does not establish compatibility. The previous selection is retained. |
 | A saved Splunk package cannot be deleted | Clear its saved selection or choose another package. Queued, running or cleaning jobs retain deletion protection for their own package snapshots. Only unused app uploads can be deleted; mounted server files remain outside this control. |
+| Sensor preflight requests a pairing token | Create a new record in an existing Fleet Manager and enter its unique token in **Sensor configuration**. Tokens assigned to an earlier GDeploy job cannot be reused. Sensor delete-and-redeploy also requires a fresh token. |
+| Sensor cannot pair, is unlicensed or sees no traffic | Expand logs and inspect `sudo corelightctl sensor status`. Confirm the sensor license, Fleet community/SSL name, pairing endpoint, upstream TCP 1443 access and actual traffic delivery to the monitoring group. Never post secret configuration files. See the [sensor guide](CORELIGHT_SENSOR.md). |
 | FleetManager configuration does not appear before review | Update to v0.9.1 or later, refresh the browser and select the FleetManager role. After **Configure VMs**, its configuration step should appear even when defaults are already saved. Deployments without FleetManager keep the three-step flow. |
 | FleetManager configuration is invalid or later preflight reports it changed | Return to **FleetManager configuration**, supply or retain the community string and valid product identity PEM, plus the repository token and version choice, then choose **Save & continue**. Run preflight again from **Review & deploy**. Setup remains available for default settings and package management. |
 | FleetManager versions cannot load or refresh | Check the entered or saved repository token and its entitlement, then use **Load versions** or **Refresh versions**. The GDeploy container needs outbound HTTPS to Corelight and its download destination; guest connectivity alone is insufficient. Your current version selection is retained. Loading choices does not save a draft token; save configuration before deployment. |
@@ -461,6 +471,8 @@ Common startup issues:
 Version **0.12.0** adds Stop deployment and a saved, host-specific default port group. The new settings table is additive; preserve the complete data volume and encryption key. Finish or resolve active work before updating. Resolve pending stop requests before rollback to a release that does not understand them; older releases ignore the default port group. Updating does not resume failed/interrupted jobs or change networking on existing VMs.
 
 Version **0.11.1** adds repository version choices, starts fresh deployment forms with no selected roles, offers an unchecked option to deploy after successful preflight, and improves copying logs over HTTP. Existing saved exact versions and queued snapshots retain their choices; no data migration is required. Keep the existing data volume and encryption key. Updating does not resume failed jobs or change existing VMs.
+
+Version **0.15.0** adds encrypted Software Sensor settings/credentials and persistent pairing-token fingerprints. Back up the data volume and encryption key. Sensor jobs use two NICs and require a license key plus fresh Fleet pairing token. Older app versions cannot provision this role; finish jobs before rollback and keep the matching backup. Existing guests are not upgraded by updating GDeploy.
 
 Version **0.14.0** makes FleetManager installation online-only and adds guest UFW allow rules for TCP 443/1443. Retain the data volume and encryption key. Legacy offline defaults need a repository token and explicit online save; their license and community string are preserved. Old offline jobs are rejected before provisioning, without changing their snapshots or deleting retained resources. Existing guests need the [manual firewall commands](FLEETMANAGER.md#existing-vm-firewall-rules). Finish active deployments before upgrading.
 

@@ -491,3 +491,128 @@ def test_missing_object_task_fault_is_only_ignored_when_explicit(client):
     with pytest.raises(VMwareError, match="ManagedObjectNotFound"):
         client._wait_task(failure, "Update VM")
     assert client._wait_task(failure, "Destroy VM", missing_ok=True) is None
+
+
+def sensor_spec():
+    return dict(spec(), role="corelight_sensor", cpu=4, ram_gb=16, disk_gb=600, monitor_network="VM Network")
+
+
+def test_sensor_vm_creates_two_generated_adapters_before_media_and_reserves_cpu_memory(client):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    client._dc.vmFolder.CreateVM_Task.return_value = task(NS(_moId="sensor-1"))
+    assert client.create_vm(sensor_spec(), None, OWNER) == "sensor-1"
+    config = client._dc.vmFolder.CreateVM_Task.call_args.kwargs["config"]
+    devices = [change.device for change in config.deviceChange]
+    adapters = [device for device in devices if isinstance(device, vim.vm.device.VirtualEthernetCard)]
+    assert [device.key for device in adapters] == [4000, 4001]
+    assert all(device.addressType == "generated" and not device.macAddress for device in adapters)
+    assert not any(isinstance(device, vim.vm.device.VirtualCdrom) for device in devices)
+    assert any(isinstance(device, vim.vm.device.VirtualAHCIController) for device in devices)
+    assert config.cpuAllocation.reservation == 4 * 2700
+    assert config.memoryAllocation.reservation == 16 * 1024
+    assert config.memoryReservationLockedToMax is True
+
+
+@pytest.mark.parametrize("change", [{"cpu": 2}, {"ram_gb": 8}, {"disk_gb": 540}, {"monitor_network": "missing"}, {"cpu": 16}])
+def test_sensor_vm_rejects_insufficient_dedicated_specs_before_creation(client, change):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    with pytest.raises(VMwareError):
+        client.create_vm(dict(sensor_spec(), **change), None, OWNER)
+    client._dc.vmFolder.CreateVM_Task.assert_not_called()
+
+
+def test_sensor_requires_physical_cpu_frequency_metadata_for_reservation(client):
+    with pytest.raises(VMwareError, match="physical CPU capacity"):
+        client.create_vm(sensor_spec(), None, OWNER)
+    client._dc.vmFolder.CreateVM_Task.assert_not_called()
+
+
+def test_ordinary_vm_still_requires_iso(client):
+    with pytest.raises(VMwareError, match="media is required"):
+        client.create_vm(spec(), None, OWNER)
+
+
+def test_inventory_reports_physical_cores_frequency_and_free_reservation_capacity(client):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    client._host.parent.resourcePool.runtime = NS(cpu=NS(unreservedForVm=10800), memory=NS(unreservedForVm=20 * 1024**3))
+    host = client.inventory()["host"]
+    assert host["cpu_cores"] == 8
+    assert host["cpu_mhz"] == 2700
+    assert host["free_cpu_reservation_mhz"] == 10800
+    assert host["free_memory_reservation_gb"] == 20
+
+
+def sensor_vm():
+    vm = owned_vm()
+    vm.config.hardware.device = [
+        vm.config.hardware.device[0],
+        vim.vm.device.VirtualAHCIController(key=15000, busNumber=0),
+        vim.vm.device.VirtualVmxnet3(key=4000, addressType="generated", macAddress="00:50:56:aa:bb:01"),
+        vim.vm.device.VirtualVmxnet3(key=4001, addressType="generated", macAddress="00:50:56:aa:bb:02"),
+    ]
+    return vm
+
+
+def test_sensor_network_macs_use_original_device_keys_not_inventory_order(client):
+    vm = sensor_vm()
+    vm.config.hardware.device.reverse()
+    client._test_vms.append(vm)
+    assert client.network_macs(vm._moId, OWNER) == {"management_mac": "00:50:56:aa:bb:01", "monitor_mac": "00:50:56:aa:bb:02"}
+
+
+@pytest.mark.parametrize("failure", ["other-owner", "missing", "extra", "invalid", "multicast", "zero", "duplicate", "wrong-key"])
+def test_sensor_macs_reject_changed_ownership_or_hardware(client, failure):
+    vm = sensor_vm()
+    if failure == "other-owner":
+        vm.config.annotation = f"GDeploy:{OTHER}"
+    if failure == "missing":
+        vm.config.hardware.device.pop()
+    if failure == "extra":
+        vm.config.hardware.device.append(vim.vm.device.VirtualVmxnet3(key=4002, macAddress="00:50:56:aa:bb:03"))
+    if failure in {"invalid", "multicast", "zero", "duplicate"}:
+        vm.config.hardware.device[-1].macAddress = {"invalid": "bad", "multicast": "01:50:56:aa:bb:02", "zero": "00:00:00:00:00:00", "duplicate": "00:50:56:aa:bb:01"}[failure]
+    if failure == "wrong-key":
+        vm.config.hardware.device[-1].key = 4002
+    client._test_vms.append(vm)
+    with pytest.raises(VMwareError):
+        client.network_macs(vm._moId, OWNER)
+
+
+def test_attach_iso_adds_only_owned_media_to_powered_off_sensor(client):
+    vm = sensor_vm()
+    client._test_vms.append(vm)
+    client.attach_iso(vm._moId, f"[datastore1] {ISO}", OWNER)
+    changes = vm.ReconfigVM_Task.call_args.kwargs["spec"].deviceChange
+    assert len(changes) == 1 and changes[0].operation == "add"
+    assert changes[0].device.backing.fileName == f"[datastore1] {ISO}"
+    assert changes[0].device.controllerKey == 15000
+    assert changes[0].device.connectable.startConnected is True
+
+
+@pytest.mark.parametrize("failure", ["other-owner", "external-iso", "external-vm", "other-datastore", "powered-on", "cdrom", "no-sata", "not-iso"])
+def test_attach_iso_rejects_unowned_media_or_mutated_vm_without_reconfigure(client, failure):
+    vm = sensor_vm()
+    path = f"[datastore1] {ISO}"
+    if failure == "other-owner":
+        vm.config.annotation = f"GDeploy:{OTHER}"
+    if failure == "external-iso":
+        path = f"[datastore1] gdeploy/{OTHER}/sensor.iso"
+    if failure == "external-vm":
+        vm.config.files.vmPathName = "[datastore1] unmanaged/vm.vmx"
+    if failure == "other-datastore":
+        path = f"[other-store] {ISO}"
+    if failure == "powered-on":
+        vm.runtime.powerState = "poweredOn"
+    if failure == "cdrom":
+        vm.config.hardware.device.append(vim.vm.device.VirtualCdrom(key=16000))
+    if failure == "no-sata":
+        vm.config.hardware.device.pop(1)
+    if failure == "not-iso":
+        path = f"[datastore1] {BASE}/something.vmdk"
+    client._test_vms.append(vm)
+    with pytest.raises(VMwareError):
+        client.attach_iso(vm._moId, path, OWNER)
+    vm.ReconfigVM_Task.assert_not_called()

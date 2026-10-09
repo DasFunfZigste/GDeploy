@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .ssh_keys import MAX_SSH_KEY_BYTES, MAX_SSH_KEYS
+from .corelight_sensor import pairing_token
 
 FLEETMANAGER_VERSION_PATTERN = r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~\-]*"
 FLEETMANAGER_ONLINE_ONLY = (
@@ -150,8 +151,18 @@ class FleetManagerVersionLookup(StrictModel):
         return value
 
 
+class CorelightSensorSettings(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False, strict=True)
+    repository_token: str = Field(default="", max_length=4096)
+    community_string: str = Field(default="", max_length=4096)
+    license_key: str = Field(default="", max_length=65536)
+    fleet_url: str = Field(default="", max_length=2048)
+    server_sslname: str = Field(default="", max_length=253)
+    api_network: str = Field(default="0.0.0.0/0", max_length=18)
+
+
 class VMSpec(StrictModel):
-    role: Literal["ubuntu", "splunk", "elasticsearch", "kibana", "fleetmanager"]
+    role: Literal["ubuntu", "splunk", "elasticsearch", "kibana", "fleetmanager", "corelight_sensor"]
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$")
     cpu: int = Field(ge=1, le=128, strict=True)
     ram_gb: int = Field(ge=2, le=2048, strict=True)
@@ -162,14 +173,25 @@ class VMSpec(StrictModel):
     address: str | None = None
     gateway: str | None = None
     dns: list[str] = Field(default_factory=list, max_length=4)
+    monitor_network: str | None = Field(default=None, min_length=1, max_length=128)
+    dhcp_reserved: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def validate_network(self):
-        minimum = {"ubuntu": 2, "splunk": 4, "elasticsearch": 8, "kibana": 4, "fleetmanager": 8}[self.role]
+        minimum = {"ubuntu": 2, "splunk": 4, "elasticsearch": 8, "kibana": 4, "fleetmanager": 8, "corelight_sensor": 16}[self.role]
         if self.ram_gb < minimum:
             raise ValueError(f"{self.role} requires at least {minimum} GiB RAM for this deployment profile.")
         if self.role == "fleetmanager" and (self.cpu < 2 or self.disk_gb < 60):
             raise ValueError("FleetManager requires at least 2 vCPUs and a 60 GiB disk; 80 GiB or more is recommended.")
+        if self.role == "corelight_sensor":
+            if self.cpu < 4 or self.disk_gb < 550:
+                raise ValueError("Corelight Software Sensor requires at least 4 vCPUs, 16 GiB RAM and a 550 GiB disk on SSD storage (600 GiB recommended).")
+            if not self.monitor_network:
+                raise ValueError("Choose a monitoring port group for the second Corelight Software Sensor adapter.")
+            if self.ip_mode == "dhcp" and not self.dhcp_reserved:
+                raise ValueError("Corelight Software Sensor requires static IPv4 or a confirmed DHCP reservation for its management interface.")
+        elif self.monitor_network is not None:
+            raise ValueError("A monitoring port group is only supported for Corelight Software Sensor.")
         if self.ip_mode == "static":
             if not self.address or "/" not in self.address or not self.gateway or not self.dns:
                 raise ValueError("Static networking requires IPv4 address/prefix, gateway and DNS servers.")
@@ -205,8 +227,14 @@ class VMSpec(StrictModel):
 
 class DeploymentSpec(StrictModel):
     name: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
-    vms: list[VMSpec] = Field(min_length=1, max_length=5)
+    vms: list[VMSpec] = Field(min_length=1, max_length=6)
     splunk_license_accepted: bool = False
+    sensor_pairing_token: str = Field(default="", max_length=4096, repr=False)
+
+    @field_validator("sensor_pairing_token", mode="before")
+    @classmethod
+    def validate_pairing_token(cls, value):
+        return pairing_token(value) if value != "" else ""
 
     @model_validator(mode="after")
     def validate_topology(self):
@@ -222,8 +250,16 @@ class DeploymentSpec(StrictModel):
             raise ValueError("Kibana requires a separate Elasticsearch VM in this deployment.")
         if "splunk" in roles and not self.splunk_license_accepted:
             raise ValueError("Confirm acceptance of the Splunk software license before deployment.")
+        if self.sensor_pairing_token and "corelight_sensor" not in roles:
+            raise ValueError("Only Corelight Software Sensor deployments accept a pairing token.")
         return self
 
 
 class RedeployRequest(StrictModel):
     confirm_name: str
+    sensor_pairing_token: str = Field(default="", max_length=4096, repr=False)
+
+    @field_validator("sensor_pairing_token", mode="before")
+    @classmethod
+    def validate_pairing_token(cls, value):
+        return pairing_token(value) if value != "" else ""

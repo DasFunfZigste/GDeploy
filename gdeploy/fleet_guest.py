@@ -233,12 +233,19 @@ def _repository_url_origin(url, label):
     return parsed.scheme, host, port
 
 
-def download_repository_file(token, relative_path, *, max_bytes=1024 * 1024, timeout=60, resource="signing key"):
+def download_repository_file(token, relative_path, *, max_bytes=1024 * 1024, timeout=60, resource="signing key", repository=None):
     """Fetch a fixed-repository resource with bounded, credential-safe redirects.
 
     Initial paths cannot choose a host, escape the repository, or contain a query.
     HTTPS redirects chosen by the repository may contain signed query strings.
     """
+    if repository is None:
+        repository = REPOSITORY
+    elif not isinstance(repository, str) or repository not in {
+        "https://pkgrepos.corelight.cloud/corelight/fleet-stable/",
+        "https://pkgrepos.corelight.cloud/corelight/sensor-stable/",
+    }:
+        raise RepositoryDownloadError("Choose a supported Corelight package repository.")
     if not isinstance(resource, str) or resource not in {"signing key", "package metadata"}:
         raise RepositoryDownloadError("Choose a supported Fleet Manager repository resource.")
     if (
@@ -261,7 +268,7 @@ def download_repository_file(token, relative_path, *, max_bytes=1024 * 1024, tim
         "The Fleet Manager repository returned an invalid signing key." if signing_key
         else "The Fleet Manager repository returned empty or oversized package metadata."
     )
-    current = REPOSITORY + relative_path
+    current = repository + relative_path
     original_origin = _repository_url_origin(current, label)
     may_authenticate = True
     authorization = "Basic " + base64.b64encode((token + ":").encode()).decode()

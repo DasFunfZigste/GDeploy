@@ -336,6 +336,20 @@ class ESXiClient:
             "cpu_threads": int(host.hardware.cpuInfo.numCpuThreads),
             "memory_gb": round(memory_bytes / 1024**3, 3),
         }
+        cores = getattr(host.hardware.cpuInfo, "numCpuCores", None)
+        hz = getattr(host.hardware.cpuInfo, "hz", None)
+        if isinstance(cores, int) and cores > 0:
+            host_info["cpu_cores"] = cores
+        if isinstance(hz, int) and hz >= 1000000:
+            host_info["cpu_mhz"] = hz // 1000000
+        pool_runtime = getattr(host.parent.resourcePool, "runtime", None)
+        for resource, field, divisor in (
+            ("cpu", "free_cpu_reservation_mhz", 1),
+            ("memory", "free_memory_reservation_gb", 1024**3),
+        ):
+            available = getattr(getattr(pool_runtime, resource, None), "unreservedForVm", None)
+            if isinstance(available, (int, float)) and available >= 0:
+                host_info[field] = round(available / divisor, 3)
         usage_mb = getattr(host.summary.quickStats, "overallMemoryUsage", None)
         if isinstance(usage_mb, (int, float)):
             host_info["free_memory_gb"] = round(max(0, memory_bytes - usage_mb * 1024**2) / 1024**3, 3)
@@ -604,7 +618,7 @@ class ESXiClient:
             response.close()
 
     @_guarded("Create virtual machine")
-    def create_vm(self, spec: dict, iso_path: str, owner_id: str) -> str:
+    def create_vm(self, spec: dict, iso_path: str | None, owner_id: str) -> str:
         owner_id = _owner(owner_id)
         self._require_connection()
         name = spec.get("name")
@@ -616,13 +630,30 @@ class ESXiClient:
                 raise VMwareError(f"VM {key} must be a positive integer no greater than {maximum}.")
         datastore = spec.get("datastore")
         self._datastore(datastore)
-        iso_datastore, iso_relative = _split_datastore_path(iso_path, owner_id)
-        _relative_path(iso_relative, owner_id, iso=True)
-        if iso_datastore != datastore:
-            raise VMwareError("Installation media must be on the VM's selected datastore.")
+        sensor = spec.get("role") == "corelight_sensor"
+        if iso_path is None and not sensor:
+            raise VMwareError("Installation media is required before creating this VM.")
+        if iso_path is not None:
+            iso_datastore, iso_relative = _split_datastore_path(iso_path, owner_id)
+            _relative_path(iso_relative, owner_id, iso=True)
+            if iso_datastore != datastore:
+                raise VMwareError("Installation media must be on the VM's selected datastore.")
         networks = [net for net in self._host.network if net.name == spec.get("network")]
         if len(networks) != 1 or isinstance(networks[0], vim.dvs.DistributedVirtualPortgroup):
             raise VMwareError("Choose a standard ESXi port group that exists uniquely on this host.")
+        cpu_mhz = None
+        if sensor:
+            monitors = [net for net in self._host.network if net.name == spec.get("monitor_network")]
+            if len(monitors) != 1 or isinstance(monitors[0], vim.dvs.DistributedVirtualPortgroup):
+                raise VMwareError("Choose a standard ESXi monitoring port group that exists uniquely on this host.")
+            networks.extend(monitors)
+            cores = getattr(self._host.hardware.cpuInfo, "numCpuCores", None)
+            hz = getattr(self._host.hardware.cpuInfo, "hz", None)
+            if not isinstance(cores, int) or not isinstance(hz, int) or hz < 1000000 or spec["cpu"] > cores:
+                raise VMwareError("Software Sensor requires verified physical CPU capacity for dedicated CPU and memory reservations.")
+            if spec["cpu"] < 4 or spec["ram_gb"] < 16 or spec["disk_gb"] < 550:
+                raise VMwareError("Software Sensor requires at least 4 CPUs, 16 GiB memory and a 550 GiB disk.")
+            cpu_mhz = hz // 1000000
         if any(vm.name == name for vm in self._objects(vim.VirtualMachine)):
             raise VMwareError(
                 "A VM with this name already exists on ESXi. Choose another name or clean up the prior deployment."
@@ -641,27 +672,21 @@ class ESXiClient:
             ),
         )
         sata = vim.vm.device.VirtualAHCIController(key=15000, busNumber=0)
-        cdrom = vim.vm.device.VirtualCdrom(
-            key=16000,
-            controllerKey=sata.key,
-            unitNumber=0,
-            backing=vim.vm.device.VirtualCdrom.IsoBackingInfo(fileName=iso_path),
-            connectable=vim.vm.device.VirtualDevice.ConnectInfo(
-                startConnected=True, connected=True, allowGuestControl=False
-            ),
-        )
-        nic = vim.vm.device.VirtualVmxnet3(
-            key=4000,
-            addressType="generated",
-            backing=vim.vm.device.VirtualEthernetCard.NetworkBackingInfo(
-                deviceName=networks[0].name, network=networks[0]
-            ),
-            connectable=vim.vm.device.VirtualDevice.ConnectInfo(
-                startConnected=True, connected=True, allowGuestControl=False
-            ),
-        )
+        devices = [scsi, disk, sata]
+        if iso_path is not None:
+            devices.append(vim.vm.device.VirtualCdrom(
+                key=16000, controllerKey=sata.key, unitNumber=0,
+                backing=vim.vm.device.VirtualCdrom.IsoBackingInfo(fileName=iso_path),
+                connectable=vim.vm.device.VirtualDevice.ConnectInfo(startConnected=True, connected=True, allowGuestControl=False),
+            ))
+        for index, network in enumerate(networks):
+            devices.append(vim.vm.device.VirtualVmxnet3(
+                key=4000 + index, addressType="generated",
+                backing=vim.vm.device.VirtualEthernetCard.NetworkBackingInfo(deviceName=network.name, network=network),
+                connectable=vim.vm.device.VirtualDevice.ConnectInfo(startConnected=True, connected=True, allowGuestControl=False),
+            ))
         device_changes = []
-        for device in (scsi, disk, sata, cdrom, nic):
+        for device in devices:
             change = vim.vm.device.VirtualDeviceSpec(operation="add", device=device)
             if device is disk:
                 change.fileOperation = "create"
@@ -694,6 +719,10 @@ class ESXiClient:
                 ],
             ),
         )
+        if sensor:
+            config.cpuAllocation = vim.ResourceAllocationInfo(reservation=spec["cpu"] * cpu_mhz, limit=-1)
+            config.memoryAllocation = vim.ResourceAllocationInfo(reservation=spec["ram_gb"] * 1024, limit=-1)
+            config.memoryReservationLockedToMax = True
         vm = self._wait_task(
             self._dc.vmFolder.CreateVM_Task(config=config, pool=self._host.parent.resourcePool, host=self._host),
             "Create virtual machine",
@@ -722,6 +751,46 @@ class ESXiClient:
             raise VMwareError("The deployment's VM is no longer present on ESXi.")
         self._assert_owned(vm, owner_id)
         return vm
+
+    @_guarded("Read sensor network addresses")
+    def network_macs(self, vm_id: str, owner_id: str) -> dict:
+        vm = self._owned_vm(vm_id, owner_id)
+        adapters = [device for device in vm.config.hardware.device if isinstance(device, vim.vm.device.VirtualEthernetCard)]
+        if len(adapters) != 2 or {device.key for device in adapters} != {4000, 4001}:
+            raise VMwareError("Software Sensor requires its original management and monitoring network adapters.")
+        result = {}
+        for device in adapters:
+            mac = getattr(device, "macAddress", None)
+            if not isinstance(device, vim.vm.device.VirtualVmxnet3) or not isinstance(mac, str) or not re.fullmatch(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}", mac) or int(mac[:2], 16) & 1 or mac.lower() == "00:00:00:00:00:00":
+                raise VMwareError("ESXi did not return valid generated sensor network addresses.")
+            result["management_mac" if device.key == 4000 else "monitor_mac"] = mac.lower()
+        if result["management_mac"] == result["monitor_mac"]:
+            raise VMwareError("Sensor management and monitoring network addresses must be distinct.")
+        return result
+
+    @_guarded("Attach installation media")
+    def attach_iso(self, vm_id: str, iso_path: str, owner_id: str) -> None:
+        vm = self._owned_vm(vm_id, owner_id)
+        self._assert_owned_storage(vm, owner_id)
+        datastore, relative = _split_datastore_path(iso_path, owner_id)
+        _relative_path(relative, owner_id, iso=True)
+        vm_datastore, _ = _split_datastore_path(vm.config.files.vmPathName, owner_id)
+        if datastore != vm_datastore:
+            raise VMwareError("Installation media must be on the VM's selected datastore.")
+        if vm.runtime.powerState != "poweredOff":
+            raise VMwareError("Power off the deployment VM before attaching its installation media.")
+        devices = vm.config.hardware.device
+        controllers = [device for device in devices if isinstance(device, vim.vm.device.VirtualAHCIController) and device.key == 15000]
+        if len(controllers) != 1 or any(isinstance(device, vim.vm.device.VirtualCdrom) or device.key == 16000 for device in devices):
+            raise VMwareError("The deployment VM's installation-media devices changed; refusing to replace existing devices.")
+        cdrom = vim.vm.device.VirtualCdrom(
+            key=16000, controllerKey=15000, unitNumber=0,
+            backing=vim.vm.device.VirtualCdrom.IsoBackingInfo(fileName=iso_path),
+            connectable=vim.vm.device.VirtualDevice.ConnectInfo(startConnected=True, connected=True, allowGuestControl=False),
+        )
+        self._wait_task(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(deviceChange=[
+            vim.vm.device.VirtualDeviceSpec(operation="add", device=cdrom),
+        ])), "Attach installation media")
 
     @_guarded("Power on virtual machine")
     def power_on(self, vm_id: str, owner_id: str) -> None:

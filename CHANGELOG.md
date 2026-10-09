@@ -4,6 +4,23 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-09
+
+### Added
+
+- **Corelight Software Sensor** as a deployment option on a dedicated minimal **Ubuntu 24.04 amd64** VM. Installs `corelightctl` and `corelight-sensor` from the signed online Corelight repository, prepares the guest and configures Fleet Manager pairing.
+- A **Sensor configuration** step before preflight, plus encrypted common defaults in Setup. Requires a Software Sensor repository token, community string, sensor license key, Fleet pairing URL/server SSL name and a fresh per-deployment pairing token. FleetManager PEM files are not sensor licenses. Pairing tokens cannot be reused across jobs; delete-and-redeploy validates a new token before deleting resources.
+- Separate management and monitoring VMXNET3 adapters. Installation media matches the actual ESXi-generated MAC addresses; management uses static or reserved DHCP addressing, and monitoring has no assigned IP, DHCP, router advertisements or default route. Administrators select both port groups and configure their own traffic mirror/tap.
+- Sensor defaults of **4 vCPUs, 16 GiB RAM and a 600 GiB disk**, dedicated CPU/memory reservations, capacity preflight and guest checks for x86-64-v3 CPU support and 500 GB free under `/var`. SSD-backed storage is required by the vendor.
+- Sensor service verification that checks the licensed sensor core, API and Fleet connection. The documented Suricata no-rules warning is permitted; license, pairing and other service failures stop deployment with sanitized diagnostics. The sensor manages its guest firewall through Kubernetes; API TCP 443 access has a configurable IPv4 source network.
+- A [Software Sensor walkthrough](docs/CORELIGHT_SENSOR.md), lab acceptance checklist and automated coverage for configuration, token reuse, NIC creation, installation, secret handling and browser flows. The walkthrough is included in the release installation bundle.
+
+### Installation and compatibility
+
+- From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Finish active deployments before updating and preserve the data volume and encryption key. New settings/token-tracking tables are created automatically; existing deployments are retained.
+- This release supports Ubuntu 24.04 and online sensor installation. Debian and offline sensor installation are not enabled. Fleet Manager must already provide a sensor record and pairing details before preflight. Existing sensor VMs are not upgraded or reconfigured by updating GDeploy.
+- Automated checks do not replace a licensed deployment on ESXi, verification in Fleet Manager or validation of real mirrored traffic. GDeploy does not alter existing port-group security or switch mirroring.
+
 ## [0.14.0] - 2026-10-09
 
 ### Fixed

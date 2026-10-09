@@ -157,7 +157,24 @@ def _autoinstall_data(
         raise GuestError("Saved deployment SSH public keys are invalid. Review SSH access in Setup before redeploying.") from None
     automation_identity = " ".join(ssh_public_key.split()[:2])
     ssh_keys = [ssh_public_key] + [key for key in additional_keys if " ".join(key.split()[:2]) != automation_identity]
+    sensor = spec.get("role") == "corelight_sensor"
     network: dict = {"match": {"driver": "vmxnet3"}, "dhcp6": False}
+    monitor = None
+    if sensor:
+        macs = [spec.get(key) for key in ("management_mac", "monitor_mac")]
+        if any(
+            not isinstance(mac, str) or not re.fullmatch(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}", mac)
+            or int(mac[:2], 16) & 1 or mac.lower() == "00:00:00:00:00:00"
+            for mac in macs
+        ) or macs[0].lower() == macs[1].lower():
+            raise GuestError("Software Sensor installation requires two distinct ESXi-generated network addresses.")
+        if spec.get("ip_mode") == "dhcp" and spec.get("dhcp_reserved") is not True:
+            raise GuestError("Software Sensor management DHCP requires a reserved IPv4 address.")
+        network.update({"match": {"macaddress": macs[0].lower()}, "set-name": "gdeploymgmt", "accept-ra": False, "link-local": []})
+        monitor = {
+            "match": {"macaddress": macs[1].lower()}, "set-name": "gdeploymon",
+            "dhcp4": False, "dhcp6": False, "accept-ra": False, "link-local": [], "optional": True,
+        }
     if spec["ip_mode"] == "dhcp":
         network["dhcp4"] = True
     elif spec["ip_mode"] == "static":
@@ -201,6 +218,9 @@ def _autoinstall_data(
             "shutdown": "reboot",
         }
     }
+    if sensor:
+        data["autoinstall"]["source"] = {"id": "ubuntu-server-minimal", "search_drivers": False}
+        data["autoinstall"]["network"]["ethernets"]["monitoring"] = monitor
     return data
 
 
@@ -1000,7 +1020,7 @@ class GuestSession:
         self._check_cancelled()
         raise GuestError(f"Timed out verifying OS readiness: {last_pending}. Expand deployment logs and check the guest console.")
 
-    def _run_script(self, script: str, payload: dict, package: Path | None = None) -> dict:
+    def _run_script(self, script: str, payload: dict, package: Path | None = None, *, timeout: int = 2400) -> dict:
         self._check_cancelled()
         if self.client is None:
             raise GuestError("SSH session is not connected.")
@@ -1029,7 +1049,7 @@ class GuestSession:
             transferred = True
             # Once started, let this operation finish and return its credentials.
             # The caller persists the result before acknowledging a later stop.
-            output = self._exec(wrapper, timeout=2400, sudo=True, cancellable=False)
+            output = self._exec(wrapper, timeout=timeout, sudo=True, cancellable=False)
             results = [
                 line.removeprefix("GDEPLOY_RESULT=")
                 for line in output.splitlines()
@@ -1057,6 +1077,7 @@ class GuestSession:
         splunk_sha256: str | None = None,
         log: Callable[[str], None] = lambda message: None,
         fleetmanager: dict | None = None,
+        corelight_sensor: dict | None = None,
     ) -> dict:
         self._check_cancelled()
         self._secrets.update(value for value in secrets.values() if isinstance(value, str))
@@ -1064,6 +1085,25 @@ class GuestSession:
         if role == "ubuntu":
             log("Ubuntu installation verified; no application selected.")
             return {"services": []}
+        if role == "corelight_sensor":
+            from .sensor_guest import SensorInstallError, installer_script, secret_values, validate_snapshot
+
+            if not isinstance(corelight_sensor, dict):
+                raise GuestError("Configure Software Sensor settings and enter a new pairing token before deploying.")
+            self._secrets.update(secret_values(corelight_sensor))
+            try:
+                snapshot = validate_snapshot(corelight_sensor)
+            except SensorInstallError as error:
+                raise GuestError(str(error)) from None
+            payload["corelight_sensor"] = snapshot
+            log("Installing Corelight Software Sensor on minimal Ubuntu 24.04, configuring its monitoring interface and Fleet pairing, then verifying sensor services.")
+            result = self._run_script(installer_script(), payload, timeout=5400)
+            if not isinstance(result, dict) or result.get("healthy") is not True or not isinstance(result.get("version"), str) or not result["version"]:
+                raise GuestError("Software Sensor did not report a healthy sensor-core and verified installation result.")
+            return {"services": [{
+                "name": "Corelight Software Sensor API", "url": f"https://{self.ip}",
+                "community_string": snapshot["community_string"], "version": result["version"],
+            }]}
         if role == "fleetmanager":
             from .fleet_guest import FleetInstallError, installer_script, requested_online_version, secret_values
 
