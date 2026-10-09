@@ -1,5 +1,6 @@
 import copy
 import json
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -174,3 +175,25 @@ def test_pairing_token_claim_is_atomic_persistent_and_keeps_public_specs_clean(c
     with pytest.raises(CorelightSensorError, match="already assigned"):
         manager.require_unused_token(snapshot["pairing_token"])
     assert db.get(created[0], private=True) == before
+
+
+def test_sensor_pairing_policy_is_safe_and_present_on_detail_stop_and_visibility(signed_in, spec):
+    db = signed_in.app.state.db
+    manager = signed_in.app.state.corelight_sensor
+    manager.save(settings())
+    requested = sensor_spec(spec)
+    snapshot = manager.snapshot(requested["sensor_pairing_token"])
+    identifier = str(uuid.uuid4())
+    db.create(identifier, requested, {"corelight_sensor": snapshot})
+    endpoint = f"/api/deployments/{identifier}"
+    assert not signed_in.get(endpoint).json()["sensor_pairing"]["can_reuse"]
+    stopped = signed_in.post(endpoint + "/stop").json()
+    assert stopped["sensor_pairing"]["can_reuse"]
+    for hidden in (True, False):
+        response = signed_in.patch(endpoint + "/visibility", json={"hidden": hidden})
+        assert response.status_code == 200
+        assert response.json()["sensor_pairing"] == stopped["sensor_pairing"]
+        assert signed_in.get(endpoint).json()["sensor_pairing"] == stopped["sensor_pairing"]
+        for key in ("repository_token", "community_string", "license_key", "pairing_token"):
+            assert snapshot[key] not in response.text
+            assert snapshot[key] not in signed_in.get(endpoint).text

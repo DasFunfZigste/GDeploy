@@ -1,10 +1,13 @@
 import copy
 import json
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
 
-from gdeploy.db import Database
+from gdeploy.db import Database, SensorPairingError
 from gdeploy.models import DeploymentSpec
 from gdeploy.service import DeploymentError, DeploymentService, safe_error
 from test_corelight_sensor import sensor_spec, settings
@@ -232,8 +235,8 @@ def test_queued_sensor_requires_its_snapshot_before_contacting_esxi(sensor_job, 
     assert db.get(job["id"])["status"] == "failed" and calls == []
 
 
-@pytest.mark.parametrize("token", ["", "unique-pairing-secret", "bad token"])
-def test_sensor_redeploy_requires_fresh_token_before_any_cleanup(sensor_job, token):
+@pytest.mark.parametrize("token", ["bad token", "bad\ntoken"])
+def test_sensor_redeploy_rejects_invalid_token_before_any_cleanup(sensor_job, token):
     service, db, spec, calls, _, _ = sensor_job
     job = service.enqueue(spec)
     db.update(job["id"], status="failed")
@@ -304,3 +307,276 @@ def test_sensor_license_and_token_errors_are_redacted():
     snapshot = {"license_key": "private-license", "pairing_token": "private-pairing", "repository_token": "private-repository", "community_string": "private-community"}
     result = safe_error(" ".join(snapshot.values()), {"corelight_sensor": snapshot})
     assert result == "[redacted] [redacted] [redacted] [redacted]"
+
+
+@pytest.mark.parametrize("provided", ["", "unique-pairing-secret"])
+def test_early_sensor_replacement_keeps_original_context_and_transfers_only_its_claim(sensor_job, provided):
+    service, db, spec, calls, _, _ = sensor_job
+    job = service.enqueue(spec)
+    original = db.get(job["id"], private=True)["secrets"]["corelight_sensor"]
+    db.update(job["id"], status="failed")
+    service.corelight_sensor.save(settings(fleet_url="https://another-fleet.test", repository_token="another-repository"))
+    service.corelight_sensor.clear()
+    assert service.sensor_pairing_policy(job["id"])["can_reuse"]
+    replacement = service.redeploy(job["id"], job["name"], sensor_pairing_token=provided)
+    assert replacement["parent_id"] == job["id"]
+    assert db.get(replacement["id"], private=True)["secrets"]["corelight_sensor"] == original
+    assert db.sensor_pairing_token_used(original["pairing_token"], deployment_id=job["id"])
+    assert not db.sensor_pairing_token_used(original["pairing_token"], deployment_id=replacement["id"])
+    assert not service.sensor_pairing_policy(job["id"])["can_reuse"]
+    before = len(calls)
+    assert service.redeploy(job["id"], job["name"])["id"] == replacement["id"]
+    assert len(calls) == before
+    db.update(replacement["id"], status="failed")
+    grandchild = service.redeploy(replacement["id"], replacement["name"])
+    assert grandchild["parent_id"] == replacement["id"]
+    assert not db.sensor_pairing_token_used(original["pairing_token"], deployment_id=grandchild["id"])
+    with pytest.raises(SensorPairingError, match="already assigned"):
+        db.create("unrelated-job", spec, {"corelight_sensor": original})
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM sensor_pairing_tokens").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM sensor_redeployments").fetchone()[0] == 0
+    public = json.dumps(db.list()) + json.dumps(db.events(job["id"])) + json.dumps(service.sensor_pairing_policy(job["id"]))
+    for key in ("repository_token", "community_string", "license_key", "pairing_token"):
+        assert original[key] not in public
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("vm_status,allowed", [
+    ("pending", True), ("preparing", True), ("installing_os", True), ("os_ready", True),
+    ("installing_software", False), ("completed", False), ("", False), ("unknown", False),
+])
+def test_sensor_reuse_requires_reliable_per_sensor_progress(sensor_job, legacy, vm_status, allowed):
+    service, db, spec, calls, _, _ = sensor_job
+    job = service.enqueue(spec)
+    vms = [{**job["vms"][0], "status": vm_status}]
+    db.update(job["id"], status="interrupted", stage="installing_software", vms=vms)
+    if legacy:
+        with db.connect() as connection:
+            connection.execute("DELETE FROM sensor_installation_state WHERE deployment_id=?", (job["id"],))
+    assert service.sensor_pairing_policy(job["id"])["can_reuse"] is allowed
+    if not allowed:
+        calls.clear()
+        for token in ("", spec["sensor_pairing_token"]):
+            with pytest.raises(DeploymentError, match="fresh"):
+                service.redeploy(job["id"], job["name"], sensor_pairing_token=token)
+        assert calls == []
+
+
+def test_legacy_boot_order_failure_reuses_token_after_restart(sensor_job):
+    service, db, spec, _, hooks, _ = sensor_job
+    job = service.enqueue(spec)
+
+    def fail(*args):
+        raise RuntimeError("A specified parameter was not correct: configSpec.bootOptions.bootOrder")
+
+    hooks["create-vm"] = fail
+    db.claim()
+    service.run(job["id"])
+    with db.connect() as connection:
+        connection.execute("DELETE FROM sensor_installation_state WHERE deployment_id=?", (job["id"],))
+    reopened = Database(db.path.parent, service.config.secret_key)
+    reopened.recover()
+    assert reopened.sensor_pairing_policy(job["id"])["can_reuse"]
+    assert service.redeploy(job["id"], job["name"])["status"] == "queued"
+
+
+def test_sensor_install_attempt_is_durable_before_transfer_and_cannot_be_erased_by_finish(sensor_job):
+    service, db, spec, calls, hooks, _ = sensor_job
+    job = service.enqueue(spec)
+    original = db.get(job["id"], private=True)
+
+    def fail(*args):
+        with db.connect() as connection:
+            assert connection.execute("SELECT started FROM sensor_installation_state WHERE deployment_id=?", (job["id"],)).fetchone()[0] == 1
+        raise RuntimeError("Injected guest upload failure")
+
+    hooks["install"] = fail
+    db.claim()
+    service.run(job["id"])
+    assert not service.sensor_pairing_policy(job["id"])["can_reuse"]
+    db.update(job["id"], vms=original["vms"], secrets=original["secrets"])
+    reopened = Database(db.path.parent, service.config.secret_key)
+    assert not reopened.sensor_pairing_policy(job["id"])["can_reuse"]
+    calls.clear()
+    with pytest.raises(DeploymentError, match="already started"):
+        service.redeploy(job["id"], job["name"])
+    assert calls == []
+
+
+def test_sensor_reuse_is_not_affected_by_another_roles_installing_software_stage(sensor_job):
+    service, db, spec, _, _, _ = sensor_job
+    spec["vms"].append({**spec["vms"][0], "name": "second-ubuntu", "role": "ubuntu"})
+    job = service.enqueue(spec)
+    db.update(job["id"], status="failed", stage="installing_software", vms=[
+        {**job["vms"][0], "status": "os_ready"}, {**job["vms"][1], "status": "installing_software"},
+    ])
+    assert service.sensor_pairing_policy(job["id"])["can_reuse"]
+
+
+@pytest.mark.parametrize("damage", ["snapshot", "license", "claim", "runtime-vm", "services"])
+def test_unverifiable_original_sensor_state_fails_before_cleanup(sensor_job, damage):
+    service, db, spec, calls, _, _ = sensor_job
+    job = service.enqueue(spec)
+    value = db.get(job["id"], private=True)
+    if damage == "snapshot":
+        value["secrets"].pop("corelight_sensor")
+    elif damage == "license":
+        value["secrets"]["corelight_sensor"].pop("license_key")
+    elif damage == "claim":
+        with db.connect() as connection:
+            connection.execute("DELETE FROM sensor_pairing_tokens WHERE deployment_id=?", (job["id"],))
+    elif damage == "runtime-vm":
+        value["vms"] = []
+    else:
+        value["vms"][0]["services"] = [{"name": "Sensor"}]
+    db.update(job["id"], status="failed", secrets=value["secrets"], vms=value["vms"])
+    calls.clear()
+    assert not service.sensor_pairing_policy(job["id"])["can_reuse"]
+    with pytest.raises(DeploymentError):
+        service.redeploy(job["id"], job["name"])
+    assert calls == []
+
+
+def test_sensor_cleanup_failure_preserves_original_claim_for_retry_and_fresh_override(sensor_job):
+    service, db, spec, calls, hooks, _ = sensor_job
+    job = service.enqueue(spec)
+    db.update(job["id"], status="failed")
+
+    def fail(*args):
+        raise RuntimeError("ESXi unavailable")
+
+    hooks["find-owned"] = fail
+    with pytest.raises(DeploymentError, match="ESXi unavailable"):
+        service.redeploy(job["id"], job["name"])
+    pending = db.sensor_redeployment(job["id"])
+    assert pending["reuse"] and db.get(job["id"])["status"] == "cleanup_failed"
+    assert service.sensor_pairing_policy(job["id"])["can_reuse"]
+    assert len(db.list()) == 1
+    assert not db.sensor_pairing_token_used(spec["sensor_pairing_token"], deployment_id=job["id"], replacement_parent_id=job["id"])
+    service.corelight_sensor.clear()
+    calls.clear()
+    with pytest.raises(DeploymentError):
+        service.redeploy(job["id"], job["name"], sensor_pairing_token="replacement-fresh")
+    assert calls == [] and db.sensor_redeployment(job["id"]) == pending
+    service.corelight_sensor.save(settings(fleet_url="https://replacement.test"))
+    hooks.clear()
+    replacement = service.redeploy(job["id"], job["name"], sensor_pairing_token="replacement-fresh")
+    snapshot = db.get(replacement["id"], private=True)["secrets"]["corelight_sensor"]
+    assert snapshot["fleet_url"] == "https://replacement.test:1443" and snapshot["pairing_token"] == "replacement-fresh"
+    assert db.sensor_pairing_token_used(spec["sensor_pairing_token"])
+    assert not db.sensor_pairing_token_used(spec["sensor_pairing_token"], deployment_id=job["id"])
+
+
+def test_sensor_fresh_pending_token_is_reserved_and_settings_survive_restart_and_retry(sensor_job):
+    service, db, spec, _, hooks, _ = sensor_job
+    job = service.enqueue(spec)
+    db.update(job["id"], status="failed")
+
+    def fail(*args):
+        raise RuntimeError("ESXi unavailable")
+
+    hooks["find-owned"] = fail
+    with pytest.raises(DeploymentError):
+        service.redeploy(job["id"], job["name"], sensor_pairing_token="pending-fresh")
+    pending = db.sensor_redeployment(job["id"])
+    with pytest.raises(SensorPairingError, match="reserved"):
+        db.create("unrelated-new-job", spec, {"corelight_sensor": pending["snapshot"]})
+    service.corelight_sensor.clear()
+    reopened = Database(db.path.parent, service.config.secret_key)
+    reopened.recover()
+    assert reopened.sensor_pairing_token_used("pending-fresh")
+    hooks.clear()
+    replacement = service.redeploy(job["id"], job["name"], sensor_pairing_token="pending-fresh")
+    assert db.get(replacement["id"], private=True)["secrets"]["corelight_sensor"] == pending["snapshot"]
+    assert db.sensor_redeployment(job["id"]) is None
+
+
+def test_sensor_cleanup_reservation_serializes_duplicate_calls_across_service_instances(sensor_job):
+    service, db, spec, calls, hooks, _ = sensor_job
+    job = service.enqueue(spec)
+    db.update(job["id"], status="failed")
+    entered, release = threading.Event(), threading.Event()
+
+    def hold(*args):
+        entered.set()
+        assert release.wait(timeout=10)
+
+    hooks["find-owned"] = hold
+    other = DeploymentService(Database(db.path.parent, service.config.secret_key), service.config, service.client_factory)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(service.redeploy, job["id"], job["name"])
+        assert entered.wait(timeout=5)
+        try:
+            with pytest.raises(DeploymentError):
+                other.redeploy(job["id"], job["name"])
+        finally:
+            release.set()
+        replacement = first.result(timeout=10)
+    assert sum(call[0] == "find-owned" for call in calls) == 1
+    assert len(db.list()) == 2
+    assert other.redeploy(job["id"], job["name"])["id"] == replacement["id"]
+
+
+def test_sensor_replacement_insert_failure_rolls_back_claim_transfer(sensor_job):
+    service, db, spec, _, _, _ = sensor_job
+    job = service.enqueue(spec)
+    original = db.get(job["id"], private=True)["secrets"]
+    db.update(job["id"], status="failed")
+    plan = db.begin_sensor_redeployment(job["id"], job["name"], original["corelight_sensor"], reuse=True)
+    db.create(plan["replacement_id"], {**spec, "vms": []}, {})
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+        db.create(plan["replacement_id"], spec, original, parent_id=job["id"], sensor_replacement=plan)
+    assert db.get(job["id"])["status"] == "cleaning"
+    assert db.sensor_redeployment(job["id"])["operation_id"] == plan["operation_id"]
+    assert not db.sensor_pairing_token_used(spec["sensor_pairing_token"], deployment_id=job["id"], replacement_parent_id=job["id"])
+
+
+def test_sensor_transactional_event_failure_rolls_back_child_parent_and_claim(sensor_job):
+    service, db, spec, _, _, _ = sensor_job
+    job = service.enqueue(spec)
+    original = db.get(job["id"], private=True)["secrets"]
+    db.update(job["id"], status="failed")
+    plan = db.begin_sensor_redeployment(job["id"], job["name"], original["corelight_sensor"], reuse=True)
+    with db.connect() as connection:
+        connection.execute("CREATE TRIGGER fail_queued_event BEFORE INSERT ON events WHEN NEW.message='Deployment queued' "
+                           "BEGIN SELECT RAISE(ABORT, 'injected queued event failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="injected queued event failure"):
+        db.create(plan["replacement_id"], spec, original, parent_id=job["id"], sensor_replacement=plan)
+    assert db.get(plan["replacement_id"]) is None and db.get(job["id"])["status"] == "cleaning"
+    assert db.sensor_redeployment(job["id"])["operation_id"] == plan["operation_id"]
+    assert not db.sensor_pairing_token_used(spec["sensor_pairing_token"], deployment_id=job["id"], replacement_parent_id=job["id"])
+
+
+def test_sensor_stale_attempt_cannot_finish_or_reopen_a_replacement(sensor_job):
+    service, db, spec, _, _, _ = sensor_job
+    job = service.enqueue(spec)
+    original = db.get(job["id"], private=True)["secrets"]
+    db.update(job["id"], status="failed")
+    old = db.begin_sensor_redeployment(job["id"], job["name"], original["corelight_sensor"], reuse=True)
+    db.recover()
+    current = db.begin_sensor_redeployment(job["id"], job["name"], original["corelight_sensor"], reuse=True)
+    assert not db.fail_sensor_redeployment(job["id"], old["operation_id"], "stale error")
+    with pytest.raises(SensorPairingError, match="reservation changed"):
+        db.create(old["replacement_id"], spec, original, parent_id=job["id"], sensor_replacement=old)
+    db.create(current["replacement_id"], spec, original, parent_id=job["id"], sensor_replacement=current)
+    assert not db.fail_sensor_redeployment(job["id"], current["operation_id"], "late error")
+    assert db.get(job["id"])["status"] == "reverted"
+
+
+def test_sensor_postcommit_response_failure_returns_existing_child_without_duplicate_cleanup(sensor_job, monkeypatch):
+    service, db, spec, calls, _, _ = sensor_job
+    job = service.enqueue(spec)
+    db.update(job["id"], status="failed")
+    enqueue = service.enqueue
+
+    def commit_then_fail(*args, **kwargs):
+        enqueue(*args, **kwargs)
+        raise RuntimeError("Injected response failure after commit")
+
+    monkeypatch.setattr(service, "enqueue", commit_then_fail)
+    replacement = service.redeploy(job["id"], job["name"])
+    assert db.get(job["id"])["status"] == "reverted"
+    count = len(calls)
+    assert service.redeploy(job["id"], job["name"])["id"] == replacement["id"]
+    assert len(calls) == count and len(db.list()) == 2

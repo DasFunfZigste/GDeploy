@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .certificate_trust import certificate_endpoint
 from .corelight_sensor import CorelightSensorError, CorelightSensorManager
+from .db import SensorPairingError
 from .guest import GuestConnectionError, GuestSession, build_seed_iso, generate_ssh_key
 from .fleetmanager import FleetManager, FleetManagerError
 from .media import MediaError, MediaManager
@@ -194,9 +195,9 @@ class DeploymentService:
         if any(vm["role"] == "corelight_sensor" for vm in spec["vms"]):
             try:
                 sensor = self.corelight_sensor.snapshot(spec.get("sensor_pairing_token", "")) if corelight_sensor is None else self.corelight_sensor.validate_snapshot(corelight_sensor)
-                self.corelight_sensor.require_unused_token(sensor["pairing_token"], deployment_id=exclude_id)
+                self.corelight_sensor.require_unused_token(sensor["pairing_token"], deployment_id=exclude_id, replacement_parent_id=exclude_id)
                 check("Corelight Software Sensor configuration", True,
-                      "Repository access, required license, Fleet community string and a fresh pairing token are configured. "
+                      "Repository access, required license, Fleet community string and an eligible pairing token are configured. "
                       "Use Ubuntu 24.04 Server minimal installation media and SSD storage. The VM must reach Ubuntu/Corelight repositories and Fleet Manager; package availability and sensor health are checked during installation.")
             except CorelightSensorError as exc:
                 check("Corelight Software Sensor configuration", False, str(exc))
@@ -323,7 +324,7 @@ class DeploymentService:
             )
         return {"ok": all(item["ok"] for item in checks), "checks": checks}
 
-    def enqueue(self, spec, settings=None, parent_id=None, corelight_sensor=None):
+    def enqueue(self, spec, settings=None, parent_id=None, corelight_sensor=None, *, sensor_replacement=None):
         settings = settings or self.db.settings()
         os_media = self.media.selected()
         splunk_package = self.packages.selected() if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
@@ -332,7 +333,11 @@ class DeploymentService:
         if any(vm["role"] == "corelight_sensor" for vm in spec["vms"]):
             try:
                 sensor = self.corelight_sensor.snapshot(spec.get("sensor_pairing_token", "")) if corelight_sensor is None else self.corelight_sensor.validate_snapshot(corelight_sensor)
-                self.corelight_sensor.require_unused_token(sensor["pairing_token"])
+                self.corelight_sensor.require_unused_token(
+                    sensor["pairing_token"],
+                    deployment_id=parent_id if sensor_replacement and sensor_replacement["reuse"] else None,
+                    replacement_parent_id=parent_id if sensor_replacement else None,
+                )
             except CorelightSensorError as exc:
                 raise DeploymentError(str(exc)) from None
         result = self.preflight(
@@ -345,7 +350,7 @@ class DeploymentService:
                 "Preflight failed: "
                 + "; ".join(c["name"] + ": " + c["message"] for c in result["checks"] if not c["ok"])
             )
-        deployment_id = str(uuid.uuid4())
+        deployment_id = sensor_replacement["replacement_id"] if sensor_replacement else str(uuid.uuid4())
         vm_credentials = {}
         for vm in spec["vms"]:
             private, public = generate_ssh_key()
@@ -373,7 +378,7 @@ class DeploymentService:
                 },
             },
         }
-        self.db.create(deployment_id, spec, data, parent_id)
+        self.db.create(deployment_id, spec, data, parent_id, **({"sensor_replacement": sensor_replacement} if sensor_replacement else {}))
         return self.db.get(deployment_id)
 
     def _loop(self):
@@ -582,6 +587,10 @@ class DeploymentService:
                     self.db.update(deployment_id, vms=vms)
                     self._check_stop(deployment_id)
                     with self._guest_session(deployment_id, vm["ip"], credential) as guest:
+                        if vm["role"] == "corelight_sensor":
+                            # Keep this outside mutable VM/secret snapshots: a
+                            # crash, finish(), or cleanup must never erase it.
+                            self.db.mark_sensor_install_started(deployment_id)
                         installed = guest.install(
                             vm["role"],
                             secret_data["software"],
@@ -621,34 +630,57 @@ class DeploymentService:
             deployment_id, outcome, vms=vms, resources=resources, secrets=secret_data, error=error,
         )
 
+    def sensor_pairing_policy(self, deployment_id):
+        return self.db.sensor_pairing_policy(deployment_id)
+
     def redeploy(self, deployment_id, confirm_name, *, sensor_pairing_token=""):
         deployment = self.db.get(deployment_id, private=True)
         if not deployment:
             raise DeploymentError("Deployment not found.")
-        if deployment["status"] not in {"failed", "stopped", "interrupted", "cleanup_failed"}:
-            raise DeploymentError("Only failed, stopped or interrupted deployments can be deleted and redeployed.")
         if confirm_name != deployment["name"]:
             raise DeploymentError("Type the exact deployment name to confirm deletion.")
+        has_sensor = any(vm["role"] == "corelight_sensor" for vm in deployment["spec"]["vms"])
+        if has_sensor and deployment["status"] == "reverted":
+            committed = self.db.sensor_replacement_result(deployment_id)
+            if committed:
+                return committed
+        if deployment["status"] not in {"failed", "stopped", "interrupted", "cleanup_failed"}:
+            raise DeploymentError("Only failed, stopped or interrupted deployments can be deleted and redeployed.")
         replacement_spec = dict(deployment["spec"])
-        sensor = None
-        if any(vm["role"] == "corelight_sensor" for vm in deployment["spec"]["vms"]):
-            # A token from the old job is consumed even when installation failed.
-            # Validate the fresh replacement inputs before deleting any resources.
+        sensor, sensor_replacement = None, None
+        if has_sensor:
+            # Validate and reserve the exact token/context before any deletion.
+            # A retry with the same pending fresh token retains its frozen Setup.
             try:
-                sensor = self.corelight_sensor.snapshot(sensor_pairing_token)
-                self.corelight_sensor.require_unused_token(sensor["pairing_token"])
-            except CorelightSensorError as exc:
+                original_sensor = deployment["secrets"].get("corelight_sensor") or {}
+                reuse = not sensor_pairing_token or sensor_pairing_token == original_sensor.get("pairing_token")
+                if not reuse:
+                    pending = self.db.sensor_redeployment(deployment_id)
+                    if pending and not pending["reuse"] and pending["snapshot"]["pairing_token"] == sensor_pairing_token:
+                        sensor = self.corelight_sensor.validate_snapshot(pending["snapshot"])
+                    else:
+                        sensor = self.corelight_sensor.snapshot(sensor_pairing_token)
+                    self.corelight_sensor.require_unused_token(sensor["pairing_token"], replacement_parent_id=deployment_id)
+                else:
+                    policy = self.sensor_pairing_policy(deployment_id)
+                    if not policy["can_reuse"]:
+                        raise CorelightSensorError(policy["reason"])
+                    sensor = self.corelight_sensor.validate_snapshot(deployment["secrets"].get("corelight_sensor"))
+                sensor_replacement = self.db.begin_sensor_redeployment(
+                    deployment_id, confirm_name, sensor, reuse=reuse,
+                )
+            except (CorelightSensorError, SensorPairingError) as exc:
                 raise DeploymentError(str(exc)) from None
-            replacement_spec["sensor_pairing_token"] = sensor_pairing_token
         elif sensor_pairing_token:
             raise DeploymentError("Only Corelight Software Sensor deployments accept a pairing token.")
-        self.db.update(deployment_id, status="cleaning", stage="cleaning", error=None)
-        self.db.event(
-            deployment_id,
-            "Administrator confirmed permanent deletion of this deployment's VMs and disks, followed by redeployment.",
-            "warning",
-        )
+        else:
+            self.db.update(deployment_id, status="cleaning", stage="cleaning", error=None)
         try:
+            self.db.event(
+                deployment_id,
+                "Administrator confirmed permanent deletion of this deployment's VMs and disks, followed by redeployment.",
+                "warning",
+            )
             with self.client(deployment["secrets"]["esxi"]) as esxi:
                 owned = esxi.find_owned_vms(deployment_id)
                 ids = {item["vm_id"] for item in owned} | {vm["vm_id"] for vm in deployment["vms"] if vm.get("vm_id")}
@@ -661,15 +693,22 @@ class DeploymentService:
             self.db.update(deployment_id, resources=[])
             replacement = self.enqueue(
                 replacement_spec, deployment["secrets"]["esxi"], parent_id=deployment_id,
-                **({"corelight_sensor": sensor} if sensor else {}),
+                **({"corelight_sensor": sensor, "sensor_replacement": sensor_replacement} if sensor else {}),
             )
-            self.db.update(deployment_id, status="reverted", stage="reverted", error=None)
-            self.db.event(deployment_id, "Cleanup complete; replacement deployment queued: " + replacement["id"])
+            if not sensor_replacement:
+                self.db.update(deployment_id, status="reverted", stage="reverted", error=None)
+                self.db.event(deployment_id, "Cleanup complete; replacement deployment queued: " + replacement["id"])
             return replacement
         except Exception as exc:
             error = safe_error(exc, {"previous": deployment["secrets"], "replacement_sensor": sensor})
-            self.db.update(deployment_id, status="cleanup_failed", stage="cleanup_failed", error=error)
-            self.db.event(deployment_id, "Delete/redeploy stopped: " + error, "error")
+            if sensor_replacement:
+                committed = self.db.sensor_replacement_result(deployment_id)
+                if committed:
+                    return committed
+                self.db.fail_sensor_redeployment(deployment_id, sensor_replacement["operation_id"], error)
+            else:
+                self.db.update(deployment_id, status="cleanup_failed", stage="cleanup_failed", error=error)
+                self.db.event(deployment_id, "Delete/redeploy stopped: " + error, "error")
             raise DeploymentError(error) from None
 
     def credentials(self, deployment_id):

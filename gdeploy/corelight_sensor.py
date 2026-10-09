@@ -71,6 +71,40 @@ def validate_settings(value):
     }
 
 
+def pairing_reuse_policy(deployment, started, token_owner, *, allow_cleaning=False):
+    """Explain whether an original token is provably unexposed, without returning it."""
+    def result(allowed, reason):
+        return {"can_reuse": allowed, "reason": reason}
+
+    if not deployment or not any(vm.get("role") == "corelight_sensor" for vm in deployment["spec"]["vms"]):
+        return result(False, "This deployment does not contain a Corelight Software Sensor.")
+    statuses = {"failed", "stopped", "interrupted", "cleanup_failed"}
+    if allow_cleaning:
+        statuses.add("cleaning")
+    if deployment["status"] not in statuses:
+        return result(False, "Only failed, stopped or interrupted sensor deployments can reuse their saved pairing token.")
+    snapshot = deployment.get("secrets", {}).get("corelight_sensor")
+    try:
+        validate_settings(snapshot)
+        pairing_token(snapshot.get("pairing_token"))
+    except CorelightSensorError:
+        return result(False, "The original sensor configuration is unavailable or incomplete. Enter a fresh pairing token and check Sensor Setup.")
+    if token_owner != deployment["id"]:
+        return result(False, "The saved pairing token is no longer reserved for this deployment. Enter a fresh pairing token.")
+    if started is True:
+        return result(False, "Sensor software installation already started and may have used the saved pairing token. Enter a fresh token from a new sensor record in Fleet Manager.")
+    sensors = [vm for vm in deployment["vms"] if vm.get("role") == "corelight_sensor"]
+    expected = [vm["name"] for vm in deployment["spec"]["vms"] if vm.get("role") == "corelight_sensor"]
+    if sorted(vm.get("name", "") for vm in sensors) != sorted(expected) or any(vm.get("services") or vm.get("status") == "completed" for vm in sensors):
+        return result(False, "The saved deployment does not prove that sensor installation never started. Enter a fresh pairing token.")
+    # Older releases persisted each sensor's installing_software status before
+    # opening SSH or transferring its token. Global job stage is insufficient:
+    # another role may have installed software before the sensor was reached.
+    if any(vm.get("status") not in {"pending", "preparing", "installing_os", "os_ready"} for vm in sensors):
+        return result(False, "This deployment has no reliable record that sensor installation never started. Enter a fresh pairing token.")
+    return result(True, "Sensor software installation never started. Leave the token blank to reuse the saved token and original Fleet Manager settings, or enter a fresh token to use current Sensor Setup.")
+
+
 class CorelightSensorManager:
     def __init__(self, db):
         self.db = db
@@ -114,7 +148,7 @@ class CorelightSensorManager:
         value = validate_settings(snapshot)
         return {**value, "pairing_token": pairing_token(snapshot.get("pairing_token"))}
 
-    def require_unused_token(self, token, *, deployment_id=None):
+    def require_unused_token(self, token, *, deployment_id=None, replacement_parent_id=None):
         token = pairing_token(token)
-        if self.db.sensor_pairing_token_used(token, deployment_id=deployment_id):
+        if self.db.sensor_pairing_token_used(token, deployment_id=deployment_id, replacement_parent_id=replacement_parent_id):
             raise CorelightSensorError("This sensor pairing token was already assigned to a deployment. Create a new sensor record in Fleet Manager and use its fresh token.")

@@ -4,10 +4,11 @@ Run with ``pip install playwright && playwright install chromium``, then
 ``pytest -q tests/test_wizard_drafts_browser.py``. A custom browser cache can be
 selected with PLAYWRIGHT_BROWSERS_PATH. Missing Playwright/browser skips these
 optional tests. APIs, encrypted SQLite settings and preflight are real; ESXi is
-read-only synthetic inventory and the provisioning worker never starts.
+synthetic inventory/recorded cleanup and the provisioning worker never starts.
 """
 
 import hashlib
+import json
 import shutil
 import socket
 import threading
@@ -36,6 +37,9 @@ RESERVATION_ID = "c6c7c8aa-83c1-447d-bfe7-696621f633cc"
 
 
 class InventoryClient:
+    def __init__(self, cleanup_calls=None):
+        self.cleanup_calls = cleanup_calls if cleanup_calls is not None else []
+
     def __enter__(self):
         return self
 
@@ -50,10 +54,22 @@ class InventoryClient:
             "networks": [{"name": "Management"}, {"name": "Mirror"}], "vms": [],
         }
 
+    def find_owned_vms(self, deployment_id):
+        self.cleanup_calls.append(("find-owned", deployment_id))
+        return []
+
+    def destroy_vm(self, vm_id, deployment_id):
+        self.cleanup_calls.append(("destroy-vm", vm_id, deployment_id))
+
+    def delete_iso(self, datastore, path, deployment_id):
+        self.cleanup_calls.append(("delete-iso", datastore, path, deployment_id))
+
 
 class FixtureService(DeploymentService):
     def client(self, settings):
-        return InventoryClient()
+        if not hasattr(self, "cleanup_calls"):
+            self.cleanup_calls = []
+        return InventoryClient(self.cleanup_calls)
 
 
 def make_license(path):
@@ -117,6 +133,7 @@ def ui(tmp_path, monkeypatch, chromium):
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.route("**/api/settings/fleetmanager/versions", lambda route: route.fulfill(json={"versions": ["29.2.2-1", "29.2.1-1"]}))
     fixture = WizardUI(page, base, db, license_path)
+    fixture.service = app.state.service
     try:
         fixture.sign_in()
         yield fixture
@@ -398,3 +415,182 @@ def test_failed_configuration_save_keeps_masked_values_and_file_for_retry(ui, ro
     ui.back.click()
     ui.configuration()
     ui.assert_values()
+
+
+SAVED_PAIRING_TOKEN = "saved-encrypted-sensor-pairing-token"
+FRESH_PAIRING_TOKEN = "fresh-replacement-sensor-pairing-token"
+BOOT_ORDER_FAILURE = "Create virtual machine failed: vmodl.fault.InvalidArgument: configSpec.bootOptions.bootOrder"
+
+
+def failed_sensor_job(ui, state="early"):
+    ui.service.corelight_sensor.save({
+        "repository_token": "retry-repository-token", "community_string": "retry-community-secret",
+        "license_key": "retry-sensor-license", "fleet_url": "https://fleet.example.test:1443",
+        "server_sslname": "fleet.example.test", "api_network": "192.0.2.0/24",
+    })
+    specification = {
+        "name": "retry-sensor", "sensor_pairing_token": SAVED_PAIRING_TOKEN,
+        "splunk_license_accepted": False,
+        "vms": [{"role": "corelight_sensor", "name": "retry-sensor-vm", "cpu": 4, "ram_gb": 16,
+                 "disk_gb": 600, "datastore": "fast-ssd", "network": "Management", "monitor_network": "Mirror",
+                 "ip_mode": "static", "address": "192.0.2.30/24", "gateway": "192.0.2.1", "dns": ["192.0.2.1"],
+                 "dhcp_reserved": False}],
+    }
+    job = ui.service.enqueue(specification)
+    assert ui.db.claim() == job["id"]
+    record = ui.db.get(job["id"], private=True)
+    vm = record["vms"][0]
+    if state == "legacy_boot_order":
+        vm["status"] = "pending"
+        ui.db.event(job["id"], "Creating retry-sensor-vm with separate management and monitoring adapters")
+    else:
+        vm["vm_id"] = "fixture-sensor-vm"
+        vm["status"] = "os_ready"
+    if state == "started":
+        ui.db.mark_sensor_install_started(job["id"])
+        vm["status"] = "installing_software"
+    elif state == "downgraded_started":
+        # An older worker can advance a job without knowing about the marker.
+        # A marker initialized to zero must not override its persisted progress.
+        vm["status"] = "installing_software"
+    elif state == "downgraded_completed":
+        vm["status"] = "completed"
+    elif state == "unknown":
+        vm["status"] = "unknown"
+    if state in {"legacy_boot_order", "unknown"}:
+        with ui.db.connect() as connection:
+            connection.execute("DELETE FROM sensor_installation_state WHERE deployment_id=?", (job["id"],))
+    ui.db.update(job["id"], status="failed", stage="failed", vms=[vm],
+                 error=BOOT_ORDER_FAILURE if state == "legacy_boot_order" else "Synthetic sensor deployment failure")
+    ui.service.cleanup_calls.clear()
+    return ui.db.get(job["id"], private=True)
+
+
+def open_sensor_redeploy(ui, job, *, expected_reuse):
+    ui.page.goto(ui.base + "/#deployment/" + job["id"])
+    expect(ui.page.locator("#deployment-detail-status")).to_have_text("Failed")
+    ui.page.get_by_role("button", name="Delete & redeploy", exact=True).click()
+    dialog = ui.page.locator("#confirm-dialog")
+    token = dialog.locator("#redeploy-sensor-pairing-token")
+    confirm = dialog.locator("input[type=text]")
+    submit = dialog.get_by_role("button", name="Delete & redeploy", exact=True)
+    expect(token).to_have_attribute("type", "password")
+    expect(token).to_have_value("")
+    assert token.evaluate("node => node.required") is (not expected_reuse)
+    expect(submit).to_be_disabled()
+    confirm.fill(job["name"] + "-wrong")
+    expect(submit).to_be_disabled()
+    confirm.fill(job["name"])
+    if expected_reuse:
+        expect(submit).to_be_enabled()
+        expect(dialog.locator("#redeploy-sensor-token-help")).to_contain_text("Leave blank to reuse")
+    else:
+        expect(submit).to_be_disabled()
+    for body in (ui.page.content(), json.dumps(ui.page.request.get(ui.base + "/api/deployments/" + job["id"]).json())):
+        assert SAVED_PAIRING_TOKEN not in body
+    ui.assert_private()
+    return dialog, token, confirm, submit
+
+
+def assert_replacement_token(ui, previous, token):
+    expect(ui.page.locator("#confirm-dialog")).not_to_be_visible()
+    expect(ui.page.locator("#deployment-detail-status")).to_have_text("Queued")
+    new_id = ui.page.url.split("#deployment/")[1]
+    assert new_id != previous["id"]
+    replacement = ui.db.get(new_id, private=True)
+    assert replacement["parent_id"] == previous["id"]
+    assert replacement["spec"] == previous["spec"]
+    assert replacement["secrets"]["corelight_sensor"]["pairing_token"] == token
+    assert ui.db.get(previous["id"])["status"] == "reverted"
+    public = ui.page.request.get(ui.base + "/api/deployments/" + new_id).text()
+    listing = ui.page.request.get(ui.base + "/api/deployments").text()
+    assert token not in public + listing + ui.page.content()
+    assert "sensor_pairing_token" not in replacement["spec"]
+    assert ui.service.cleanup_calls[0] == ("find-owned", previous["id"])
+    if previous["vms"][0].get("vm_id"):
+        assert ("destroy-vm", previous["vms"][0]["vm_id"], previous["id"]) in ui.service.cleanup_calls
+    ui.assert_private()
+
+
+@pytest.mark.parametrize("state", ["early", "legacy_boot_order"])
+def test_sensor_redeploy_blank_token_reuses_saved_encrypted_token_before_installer(ui, state):
+    job = failed_sensor_job(ui, state)
+    requests = []
+    ui.page.on("request", lambda request: requests.append(request.post_data_json) if request.url.endswith("/redeploy") else None)
+    dialog, token, _, submit = open_sensor_redeploy(ui, job, expected_reuse=True)
+    if state == "legacy_boot_order":
+        ui.page.set_viewport_size({"width": 390, "height": 844})
+        assert ui.page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert dialog.evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+    submit.click()
+    assert_replacement_token(ui, job, SAVED_PAIRING_TOKEN)
+    assert requests == [{"confirm_name": job["name"]}]
+    expect(token).to_have_value("")
+
+
+@pytest.mark.parametrize("state", ["early", "started"])
+def test_sensor_redeploy_explicit_fresh_token_overrides_old_encrypted_token(ui, state):
+    job = failed_sensor_job(ui, state)
+    _, token, _, submit = open_sensor_redeploy(ui, job, expected_reuse=state == "early")
+    token.fill(FRESH_PAIRING_TOKEN)
+    expect(submit).to_be_enabled()
+    submit.click()
+    assert_replacement_token(ui, job, FRESH_PAIRING_TOKEN)
+    expect(token).to_have_value("")
+
+
+@pytest.mark.parametrize("state", ["unknown", "started", "downgraded_started", "downgraded_completed"])
+def test_sensor_redeploy_unknown_or_started_requires_fresh_token_and_rejects_blank_before_cleanup(ui, state):
+    job = failed_sensor_job(ui, state)
+    dialog, token, _, submit = open_sensor_redeploy(ui, job, expected_reuse=False)
+    session = ui.page.request.get(ui.base + "/api/session").json()
+    response = ui.page.request.post(ui.base + "/api/deployments/" + job["id"] + "/redeploy",
+                                   headers={"X-CSRF-Token": session["csrf_token"]}, data={"confirm_name": job["name"]})
+    assert response.status in (400, 409)
+    assert ui.service.cleanup_calls == []
+    assert ui.db.get(job["id"])["status"] == "failed"
+    assert SAVED_PAIRING_TOKEN not in response.text()
+    token.fill("invalid token with spaces")
+    expect(submit).to_be_disabled()
+    token.fill(FRESH_PAIRING_TOKEN)
+    expect(submit).to_be_enabled()
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
+    expect(token).to_have_value("")
+    assert ui.service.cleanup_calls == []
+
+
+def test_sensor_redeploy_missing_public_policy_defaults_to_fresh_token_requirement(ui):
+    job = failed_sensor_job(ui)
+
+    def without_policy(route):
+        response = route.fetch()
+        data = response.json()
+        data.pop("sensor_pairing", None)
+        route.fulfill(response=response, json=data)
+
+    ui.page.route("**/api/deployments/" + job["id"], without_policy)
+    _, token, _, submit = open_sensor_redeploy(ui, job, expected_reuse=False)
+    expect(token).to_have_value("")
+    expect(submit).to_be_disabled()
+    assert ui.service.cleanup_calls == []
+
+
+def test_sensor_redeploy_rechecks_stale_optional_policy_before_cleanup(ui):
+    job = failed_sensor_job(ui)
+    dialog, token, _, submit = open_sensor_redeploy(ui, job, expected_reuse=True)
+    # Simulate a newer record that no longer proves the token was unused after
+    # the dialog received its policy. The server must independently recheck it.
+    with ui.db.connect() as connection:
+        connection.execute("DELETE FROM sensor_installation_state WHERE deployment_id=?", (job["id"],))
+    vms = job["vms"]
+    vms[0]["status"] = "unknown"
+    ui.db.update(job["id"], vms=vms)
+    submit.click()
+    expect(dialog.get_by_role("alert")).to_be_visible()
+    expect(dialog).to_be_visible()
+    assert ui.service.cleanup_calls == []
+    assert ui.db.get(job["id"])["status"] == "failed"
+    expect(token).to_be_enabled()
+    token.fill(FRESH_PAIRING_TOKEN)
+    submit.click()
+    assert_replacement_token(ui, job, FRESH_PAIRING_TOKEN)

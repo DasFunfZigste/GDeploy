@@ -1190,7 +1190,7 @@
         const next = await api(endpoint, {method: 'PUT', body: payload});
         if (!currentView()) return false;
         if (!options.wizard) for (const item of Object.values(secrets)) item.input.value = '';
-        renderCatalog(next, true); successBox.textContent = options.wizard ? 'Sensor defaults saved. The pairing token is used only for this deployment.' : 'Sensor defaults saved. Each deployment requires its own fresh pairing token.'; successBox.hidden = false;
+        renderCatalog(next, true); successBox.textContent = options.wizard ? 'Sensor defaults saved. The pairing token is reserved for this sensor deployment.' : 'Sensor defaults saved. Each new deployment requires its own fresh pairing token.'; successBox.hidden = false;
         return next.ready;
       } catch (error) { if (currentView()) { inlineError(errorBox, error.message); errorBox.scrollIntoView({block: 'center'}); } return false; }
       finally { if (currentView()) { busy = false; onBusy(false); syncControls(); } }
@@ -1221,7 +1221,7 @@
       field('FleetManager pairing URL', fleetUrl, 'Paste the HTTPS URL from the sensor record. FleetManager uses port 1443 by default.'),
       field('Fleet server SSL name (server_sslname)', sslName, 'Copy this value exactly from FleetManager’s sensor record; it identifies the server certificate.'),
       field('Sensor API allowed network (IPv4 CIDR)', apiNetwork, 'Source network allowed to reach the sensor API on TCP 443. The default 0.0.0.0/0 allows any IPv4 source; enter your management subnet to limit access.'),
-      pairing ? field('New sensor pairing token', pairing, 'Unique to this sensor. It is sent only with this deployment and is never saved as a reusable Setup default. Create a fresh sensor record for each new deployment or redeployment.') : el('p', {class: 'media-help'}, 'The unique pairing token is entered during deployment, after VM resources. It is not stored in these defaults.'),
+      pairing ? field('New sensor pairing token', pairing, 'Create a fresh sensor record for each new deployment. Its unique token is never saved as a reusable Setup default. If deployment fails before the sensor installer could receive it, Delete & redeploy may reuse the saved token; the recovery dialog will explain whether a new one is needed.') : el('p', {class: 'media-help'}, 'The unique pairing token is entered during deployment, after VM resources. It is not stored in these defaults.'),
       el('p', {class: 'media-help'}, 'The management NIC needs a static or reserved IPv4 address. The second NIC receives mirrored traffic without an IP address. Prepare the ESXi monitoring port group and upstream traffic mirroring before deployment.')),
       el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, options.wizard ? 'Save & continue saves common defaults. Your masked entries and pairing token stay in this draft while you correct settings or retry preflight.' : 'Saved secrets are encrypted and apply only to new deployments.'), save));
     const panel = el('section', {id: 'corelight-sensor-panel', class: 'surface', 'aria-labelledby': 'corelight-sensor-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'corelight-sensor-title'}, 'Corelight Software Sensor'), el('p', {}, 'Ubuntu 24.04 · Dedicated VM with management and monitoring NICs.')), badge, refresh), form);
@@ -1888,8 +1888,11 @@
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
     const confirm = el('input', {type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: data.name, required: true, 'aria-describedby': 'confirm-description'});
     const needsSensorToken = (data.vms || []).some(vm => vm.role === 'corelight_sensor');
-    const sensorToken = needsSensorToken ? el('input', {id: 'redeploy-sensor-pairing-token', type: 'password', maxlength: 4096, required: true, autocomplete: 'new-password', spellcheck: 'false'}) : null;
-    const canSubmit = () => confirm.value === data.name && (!sensorToken || Boolean(sensorToken.value) && !/[^\x21-\x7e]/.test(sensorToken.value));
+    const canReuseSensorToken = needsSensorToken && data.sensor_pairing?.can_reuse === true;
+    const pairingReason = typeof data.sensor_pairing?.reason === 'string' && data.sensor_pairing.reason.trim() ? data.sensor_pairing.reason : canReuseSensorToken ? 'The previous attempt stopped before the sensor installer could receive its pairing token.' : 'GDeploy cannot confirm that the saved pairing token is still unused.';
+    const sensorToken = needsSensorToken ? el('input', {id: 'redeploy-sensor-pairing-token', type: 'password', maxlength: 4096, required: !canReuseSensorToken, autocomplete: 'new-password', spellcheck: 'false', 'aria-describedby': 'redeploy-sensor-token-help'}) : null;
+    const sensorTokenHelp = needsSensorToken ? el('span', {id: 'redeploy-sensor-token-help'}, `${pairingReason} `, canReuseSensorToken ? 'Leave blank to reuse the original saved token and sensor configuration. To use current Setup settings, enter a fresh token from a new FleetManager sensor record. Saved secrets are not displayed.' : 'Create a fresh sensor record in your existing FleetManager instance and paste its unique pairing token. The replacement uses current Setup settings.', ' GDeploy validates token eligibility and sensor setup before deleting resources.') : null;
+    const canSubmit = () => confirm.value === data.name && (!sensorToken || (sensorToken.value ? sensorToken.value.length <= 4096 && !/[^\x21-\x7e]/.test(sensorToken.value) : canReuseSensorToken));
     const cancel = button('Cancel', '', () => dialog.close());
     const submit = button(data.status === 'cleanup_failed' ? 'Retry cleanup & redeploy' : 'Delete & redeploy', 'button-danger', async () => {
       if (!canSubmit()) return;
@@ -1897,7 +1900,7 @@
       dialog.dataset.busy = 'true';
       if (sensorToken) sensorToken.disabled = true;
       try {
-        const replacement = await api(`/api/deployments/${encodeURIComponent(data.id)}/redeploy`, {method: 'POST', body: {confirm_name: confirm.value, ...(sensorToken ? {sensor_pairing_token: sensorToken.value} : {})}});
+        const replacement = await api(`/api/deployments/${encodeURIComponent(data.id)}/redeploy`, {method: 'POST', body: {confirm_name: confirm.value, ...(sensorToken?.value ? {sensor_pairing_token: sensorToken.value} : {})}});
         if (sensorToken) sensorToken.value = '';
         dialog.close();
         notify('Previous resources removed. A fresh deployment is queued.');
@@ -1907,7 +1910,7 @@
     }, 'refresh');
     submit.disabled = true;
     for (const input of [confirm, sensorToken].filter(Boolean)) input.addEventListener('input', () => { submit.disabled = !canSubmit(); });
-    dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, 'Delete and start again?')), el('div', {class: 'confirm-body'}, el('p', {id: 'confirm-description'}, 'This permanently deletes the VMs, their disks, and installation media owned by ', el('strong', {}, data.name), '. A new deployment uses the same VM configuration, the current OS ISO selection in Setup, and freshly generated credentials. Shared datastores and unrelated VMs are preserved.'), el('p', {}, 'If cleanup fails, GDeploy stops before creating a replacement.'), errorBox, field(`Type “${data.name}” to confirm`, confirm), sensorToken ? field('New sensor pairing token', sensorToken, 'Create a fresh sensor record in your existing FleetManager instance and paste its unique pairing token. The previous token cannot be reused. GDeploy validates the new setup before deleting resources.') : null, el('div', {class: 'confirm-actions'}, cancel, submit)));
+    dialog.replaceChildren(el('div', {class: 'confirm-head'}, icon('alert'), el('h2', {id: 'confirm-title'}, 'Delete and start again?')), el('div', {class: 'confirm-body'}, el('p', {id: 'confirm-description'}, 'This permanently deletes the VMs, their disks, and installation media owned by ', el('strong', {}, data.name), '. A new deployment uses the same VM configuration, the current OS ISO selection in Setup, and freshly generated credentials. Shared datastores and unrelated VMs are preserved.'), el('p', {}, 'If cleanup fails, GDeploy stops before creating a replacement.'), errorBox, field(`Type “${data.name}” to confirm`, confirm), sensorToken ? field(canReuseSensorToken ? 'New sensor pairing token (optional)' : 'New sensor pairing token', sensorToken, sensorTokenHelp) : null, el('div', {class: 'confirm-actions'}, cancel, submit)));
     dialog.showModal();
     if (sensorToken) dialog.addEventListener('close', () => { sensorToken.value = ''; }, {once: true});
     confirm.focus();

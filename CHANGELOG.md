@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-10-09
+
+### Fixed
+
+- Make the replacement Software Sensor pairing token optional in **Delete & redeploy** when sensor installation never started. Leave the field blank to reuse that job's encrypted sensor configuration, including its original token. This includes existing jobs that failed at VM creation with `configSpec.bootOptions.bootOrder`, during media preparation or during OS installation.
+- Continue accepting a fresh replacement token with current Setup settings. If sensor installation may have started or the saved state is unknown, require a fresh token before deleting any resources. The dialog explains which path applies without revealing the saved token.
+- Record the sensor installation boundary durably and preserve token reservations through cleanup failures, restarts and repeated early-failure retries. Transfer an unused token only along the direct replacement chain; unrelated jobs and concurrent duplicate recovery cannot reuse it. Other VMs' software stages do not falsely mark the sensor token as used.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the complete data volume and original encryption key. Two additive sensor state/recovery tables are created automatically; existing jobs, saved settings and credentials remain intact.
+- Updating does not resume failed jobs or change existing VMs. **Delete & redeploy** still requires typed confirmation and permanently replaces any VMs/disks owned by that job. Finish or resolve active work before rollback; older workers do not maintain the new recovery state. Fleet Manager sensor records remain administrator-managed.
+- Automated checks cover recovery, token protection, browser behavior and container startup. Live ESXi provisioning and licensed Fleet pairing remain lab acceptance steps.
+
 ## [0.15.2] - 2026-10-09
 
 ### Fixed

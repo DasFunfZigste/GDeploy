@@ -33,7 +33,7 @@ Use the supported Ubuntu 24.04 live-server ISO in **Setup → OS installation me
 
 GDeploy encrypts saved repository/community/license secrets and the per-job pairing token. Ordinary settings/history responses contain saved-state flags and public configuration, not raw credentials. Blank secret fields retain existing common settings; clearing Setup removes defaults for future jobs without changing deployed sensors. Each queued job keeps its encrypted snapshot.
 
-GDeploy prevents a pairing token already assigned to another job from being reused, including concurrent requests. A failed or stopped job may already have used its token at Fleet Manager, so create a fresh Fleet sensor record for a replacement. Token tracking stays in the GDeploy data volume and must be preserved with the encryption key when upgrading or restoring backups.
+GDeploy prevents a pairing token already assigned to an unrelated job from being reused, including concurrent requests. A replacement may reuse its failed job's token only when GDeploy can verify that sensor installation never started. Token tracking stays in the GDeploy data volume and must be preserved with the encryption key when upgrading or restoring backups.
 
 ## What GDeploy installs
 
@@ -53,7 +53,9 @@ Completion requires healthy sensor services, including **sensor-core** and **con
 - Verify traffic arrives on the monitoring interface and reaches the intended analysis/export pipeline. A second NIC connected to a normal port group does not create a traffic mirror by itself.
 - Expand **Deployment logs** for installation and readiness failures. Useful guest commands are `sudo corelightctl sensor status`, `ip -br address` and `ip route`. Do not share `corelightctl.yaml`, repository auth files, license keys, pairing tokens or community strings in support logs.
 - **Stop deployment** stops GDeploy's automation while preserving created VMs; work already running inside the guest may continue. Hiding a job preserves its VM, logs and credentials.
-- **Delete & redeploy** permanently replaces the job's VMs/disks. For sensor jobs it requires a **fresh pairing token**, validated before cleanup; the previous token is never silently reused. It does not delete the old sensor record from Fleet Manager. Manage those Fleet records separately.
+- **Delete & redeploy** permanently replaces the job's VMs/disks. When sensor installation never started, the replacement pairing token is **optional**: leave it blank to reuse the original encrypted sensor configuration, including its pairing token. This covers the earlier VM-creation boot-order failure and failures during OS preparation. You can still supply a fresh token to use current sensor Setup settings instead.
+- If sensor installation may have started, or GDeploy cannot establish the previous attempt's state, the dialog requires a **fresh pairing token** from a new Fleet sensor record. GDeploy validates it before deleting resources. An early failure in another VM's application installation does not consume the sensor token. Recovery never deletes Fleet Manager sensor records; manage those separately.
+- If cleanup fails after you supplied a fresh replacement token, retrying with that same token retains the settings validated for that cleanup attempt. A different fresh token uses current Setup settings. Invalid replacement inputs do not discard the pending reservation.
 - Updating GDeploy does not upgrade or reconfigure existing sensors. Follow Corelight's supported backup and upgrade procedure for the sensor software, and keep the complete GDeploy data volume/encryption key and guest backups.
 
 Automated tests cover the configuration flow, secret handling, VM/NIC construction and installer behavior. A full licensed deployment on your ESXi host, actual Fleet pairing and real mirrored traffic require the [lab acceptance checks](LAB_VALIDATION.md#corelight-software-sensor).

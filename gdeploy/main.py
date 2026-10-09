@@ -453,6 +453,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         if not item:
             raise HTTPException(404, "Deployment not found.")
         item["events"] = request.app.state.db.events(str(deployment_id))
+        item["sensor_pairing"] = request.app.state.service.sensor_pairing_policy(str(deployment_id))
         return item
 
     @app.patch("/api/deployments/{deployment_id}/visibility")
@@ -469,6 +470,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         if item is None:
             raise HTTPException(404, "Deployment not found.")
         item["events"] = db.events(str(deployment_id))
+        item["sensor_pairing"] = request.app.state.service.sensor_pairing_policy(str(deployment_id))
         return item
 
     @app.post("/api/preflight")
@@ -496,6 +498,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         if item is None:
             raise HTTPException(404, "Deployment not found.")
         item["events"] = request.app.state.db.events(str(deployment_id))
+        item["sensor_pairing"] = request.app.state.service.sensor_pairing_policy(str(deployment_id))
         return item
 
     @app.post("/api/deployments/{deployment_id}/redeploy", status_code=201)
