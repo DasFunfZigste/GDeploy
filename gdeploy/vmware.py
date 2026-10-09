@@ -673,12 +673,14 @@ class ESXiClient:
         )
         sata = vim.vm.device.VirtualAHCIController(key=15000, busNumber=0)
         devices = [scsi, disk, sata]
+        boot_order = [vim.vm.BootOptions.BootableDiskDevice(deviceKey=disk.key)]
         if iso_path is not None:
             devices.append(vim.vm.device.VirtualCdrom(
                 key=16000, controllerKey=sata.key, unitNumber=0,
                 backing=vim.vm.device.VirtualCdrom.IsoBackingInfo(fileName=iso_path),
                 connectable=vim.vm.device.VirtualDevice.ConnectInfo(startConnected=True, connected=True, allowGuestControl=False),
             ))
+            boot_order.append(vim.vm.BootOptions.BootableCdromDevice())
         for index, network in enumerate(networks):
             devices.append(vim.vm.device.VirtualVmxnet3(
                 key=4000 + index, addressType="generated",
@@ -711,12 +713,10 @@ class ESXiClient:
                 bootRetryEnabled=True,
                 bootRetryDelay=10000,
                 efiSecureBootEnabled=False,
-                # A blank disk falls through to the installer. After Ubuntu's
-                # first reboot it boots the installed disk, avoiding reinstall.
-                bootOrder=[
-                    vim.vm.BootOptions.BootableDiskDevice(deviceKey=disk.key),
-                    vim.vm.BootOptions.BootableCdromDevice(),
-                ],
+                # Only reference devices in this request. Sensor media is
+                # attached later, after ESXi has assigned both NIC MACs.
+                # Disk-first boot avoids reinstalling after Ubuntu reboots.
+                bootOrder=boot_order,
             ),
         )
         if sensor:
@@ -780,17 +780,31 @@ class ESXiClient:
         if vm.runtime.powerState != "poweredOff":
             raise VMwareError("Power off the deployment VM before attaching its installation media.")
         devices = vm.config.hardware.device
+        disks = [device for device in devices if isinstance(device, vim.vm.device.VirtualDisk)]
+        if len(disks) != 1 or not isinstance(disks[0].key, int) or disks[0].key <= 0:
+            raise VMwareError("The deployment VM must have one identifiable boot disk before attaching installation media.")
         controllers = [device for device in devices if isinstance(device, vim.vm.device.VirtualAHCIController) and device.key == 15000]
-        if len(controllers) != 1 or any(isinstance(device, vim.vm.device.VirtualCdrom) or device.key == 16000 for device in devices):
+        if len(controllers) != 1 or any(
+            isinstance(device, vim.vm.device.VirtualCdrom) or device.key == 16000
+            or getattr(device, "controllerKey", None) == 15000 and getattr(device, "unitNumber", None) == 0
+            for device in devices
+        ):
             raise VMwareError("The deployment VM's installation-media devices changed; refusing to replace existing devices.")
         cdrom = vim.vm.device.VirtualCdrom(
             key=16000, controllerKey=15000, unitNumber=0,
             backing=vim.vm.device.VirtualCdrom.IsoBackingInfo(fileName=iso_path),
             connectable=vim.vm.device.VirtualDevice.ConnectInfo(startConnected=True, connected=True, allowGuestControl=False),
         )
-        self._wait_task(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(deviceChange=[
-            vim.vm.device.VirtualDeviceSpec(operation="add", device=cdrom),
-        ])), "Attach installation media")
+        self._wait_task(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(
+            deviceChange=[vim.vm.device.VirtualDeviceSpec(operation="add", device=cdrom)],
+            # Add the CD boot entry with its hardware, before the first power-on.
+            # A blank disk falls through to the ISO; the installed disk wins
+            # after reboot. Use ESXi's actual disk key, not a creation-time key.
+            bootOptions=vim.vm.BootOptions(bootOrder=[
+                vim.vm.BootOptions.BootableDiskDevice(deviceKey=disks[0].key),
+                vim.vm.BootOptions.BootableCdromDevice(),
+            ]),
+        )), "Attach installation media")
 
     @_guarded("Power on virtual machine")
     def power_on(self, vm_id: str, owner_id: str) -> None:

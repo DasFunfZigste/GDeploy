@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-10-09
+
+### Fixed
+
+- Fix Software Sensor VM creation failing on ESXi with `vmodl.fault.InvalidArgument: configSpec.bootOptions.bootOrder`. The sensor VM is created before its customized ISO exists; its initial boot order now includes only the disk, instead of referencing a CD/DVD drive that has not been added yet.
+- Add the ISO-backed CD/DVD drive and its boot entry together, before powering on the sensor VM. Use the actual ESXi disk device key and retain disk-first boot so the blank disk falls through to the installer and the installed OS boots after reboot. Reject missing/ambiguous boot disks and occupied installation-media slots before reconfiguration.
+- Add VMware request regressions that reject boot entries without corresponding hardware and cover sensor creation, ISO attachment and ordinary deployments with their ISO already attached. Existing EFI settings, NIC MAC matching and guest installation behavior are preserved.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the data volume and encryption key. No database migration is required.
+- Updating does not resume a failed job or modify an existing VM. Use the failed job's normal recovery flow for a replacement; sensor replacements require a fresh Fleet pairing token, while saved common repository/license settings remain reusable. Review the delete-and-redeploy confirmation for any resources retained by that job.
+- Automated checks validate the ESXi request structure and application/container behavior. A full deployment against ESXi 8.0 Update 3 remains a lab acceptance step.
+
 ## [0.15.1] - 2026-10-09
 
 ### Fixed

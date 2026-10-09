@@ -39,6 +39,8 @@ GDeploy prevents a pairing token already assigned to another job from being reus
 
 GDeploy creates two VMXNET3 adapters and reads their actual MAC addresses from ESXi before preparing the sensor ISO. The management and monitoring roles are matched by MAC, so Linux interface ordering cannot apply management DHCP or a static address to the monitoring adapter. The VM and installation media are recorded for the normal Stop, Hide and Delete & redeploy controls.
 
+The initial VM has disk-only boot configured. Once the ISO is ready, GDeploy adds the installation drive and its boot entry together before powering on. The disk stays first: it falls through to the ISO while empty and boots the installed OS after reboot. If an older release fails at VM creation with `configSpec.bootOptions.bootOrder`, update to **v0.15.2 or later** and use the failed job's recovery flow. This error occurs before Ubuntu or the sensor installer starts.
+
 After Ubuntu and SSH are ready, the guest installer validates resources and networking, configures the signed **sensor-stable** apt repository and installs **corelightctl** and **corelight-sensor**, with their dependencies. It uses the latest repository packages; the installed versions are recorded. Repository authentication is stored in a root-only apt file and remains available for deliberate future administration.
 
 The installer prepares the host with `corelightctl sensor prepare`, initializes `/etc/corelight/corelightctl.yaml` and supplies the license, community string, management/monitoring interfaces, Fleet pairing values and API access rule. It runs `corelightctl sensor deploy -v`, then checks `corelightctl sensor status`. The sensitive configuration is root-readable and diagnostic output is redacted.

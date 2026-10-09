@@ -85,6 +85,8 @@ Use the [Software Sensor walkthrough](CORELIGHT_SENSOR.md), a valid sensor repos
 
 Record actual package versions, Fleet connectivity and capture evidence separately. Unit tests, synthetic credentials, browser checks and container smoke tests establish application behavior; they do not establish licensed repository access, a complete ESXi installation or traffic-analysis acceptance.
 
+On ESXi **8.0 Update 3**, inspect the sensor's two-stage boot configuration: initial creation must have a disk-only boot order and no CD/DVD device. After ISO preparation, verify one reconfiguration adds the CD/DVD drive and disk-first/CD boot order before the first power-on, referencing the disk key ESXi actually assigned. Confirm the blank disk boots the ISO, the first Ubuntu reboot boots the installed disk, and normal post-installation media removal succeeds. Repeat an ordinary non-sensor deployment with its ISO supplied at creation. Automated device-presence checks do not replace these firmware and host acceptance checks.
+
 ## Splunk package configuration and deployment drafts
 
 1. Open **Setup → Software packages** and `/#settings/packages` on desktop and mobile. Upload a licensed Splunk Enterprise Linux x86_64 `.tgz` with its publisher SHA-512 from the official download URL's `.sha512` file, retaining its vendor filename. Repeat with a package in the mounted server media directory and with a verified SHA-256. Confirm the saved name, source, checksum algorithm/value and readiness state identify the intended package without an environment edit or container restart. Verify a pre-v0.8.1 SHA-256 selection still works without re-uploading.

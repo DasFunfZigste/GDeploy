@@ -23,6 +23,22 @@ def task(result=None, error=None, state=None):
     return NS(info=NS(state=state or ("error" if error else "success"), result=result, error=error))
 
 
+def validate_boot_devices(boot_options, devices):
+    """Model ESXi rejecting boot targets absent from the resulting VM hardware."""
+    for entry in boot_options.bootOrder:
+        if isinstance(entry, vim.vm.BootOptions.BootableDiskDevice):
+            present = sum(isinstance(device, vim.vm.device.VirtualDisk) and device.key == entry.deviceKey for device in devices) == 1
+        elif isinstance(entry, vim.vm.BootOptions.BootableCdromDevice):
+            present = any(isinstance(device, vim.vm.device.VirtualCdrom) for device in devices)
+        else:
+            raise AssertionError("Unexpected boot-device type in test VM")
+        if not present:
+            raise vmodl.fault.InvalidArgument(
+                invalidProperty="configSpec.bootOptions.bootOrder",
+                msg="configSpec.bootOptions.bootOrder references a device missing from the VM.",
+            )
+
+
 class NetworkStub:
     def InvokeAccessor(self, obj, info):
         assert info.name == "name"
@@ -508,6 +524,9 @@ def test_sensor_vm_creates_two_generated_adapters_before_media_and_reserves_cpu_
     assert [device.key for device in adapters] == [4000, 4001]
     assert all(device.addressType == "generated" and not device.macAddress for device in adapters)
     assert not any(isinstance(device, vim.vm.device.VirtualCdrom) for device in devices)
+    assert len(config.bootOptions.bootOrder) == 1
+    assert isinstance(config.bootOptions.bootOrder[0], vim.vm.BootOptions.BootableDiskDevice)
+    validate_boot_devices(config.bootOptions, devices)
     assert any(isinstance(device, vim.vm.device.VirtualAHCIController) for device in devices)
     assert config.cpuAllocation.reservation == 4 * 2700
     assert config.memoryAllocation.reservation == 16 * 1024
@@ -547,9 +566,12 @@ def test_inventory_reports_physical_cores_frequency_and_free_reservation_capacit
 
 def sensor_vm():
     vm = owned_vm()
+    vm.config.hardware.device[0].controllerKey = 1000
+    vm.config.hardware.device[0].unitNumber = 0
     vm.config.hardware.device = [
         vm.config.hardware.device[0],
         vim.vm.device.VirtualAHCIController(key=15000, busNumber=0),
+        vim.vm.device.ParaVirtualSCSIController(key=1000, busNumber=0, sharedBus="noSharing"),
         vim.vm.device.VirtualVmxnet3(key=4000, addressType="generated", macAddress="00:50:56:aa:bb:01"),
         vim.vm.device.VirtualVmxnet3(key=4001, addressType="generated", macAddress="00:50:56:aa:bb:02"),
     ]
@@ -585,11 +607,17 @@ def test_attach_iso_adds_only_owned_media_to_powered_off_sensor(client):
     vm = sensor_vm()
     client._test_vms.append(vm)
     client.attach_iso(vm._moId, f"[datastore1] {ISO}", OWNER)
-    changes = vm.ReconfigVM_Task.call_args.kwargs["spec"].deviceChange
+    configuration = vm.ReconfigVM_Task.call_args.kwargs["spec"]
+    changes = configuration.deviceChange
     assert len(changes) == 1 and changes[0].operation == "add"
     assert changes[0].device.backing.fileName == f"[datastore1] {ISO}"
     assert changes[0].device.controllerKey == 15000
     assert changes[0].device.connectable.startConnected is True
+    assert len(configuration.bootOptions.bootOrder) == 2
+    assert isinstance(configuration.bootOptions.bootOrder[0], vim.vm.BootOptions.BootableDiskDevice)
+    assert configuration.bootOptions.bootOrder[0].deviceKey == vm.config.hardware.device[0].key
+    assert isinstance(configuration.bootOptions.bootOrder[1], vim.vm.BootOptions.BootableCdromDevice)
+    validate_boot_devices(configuration.bootOptions, vm.config.hardware.device + [changes[0].device])
 
 
 @pytest.mark.parametrize("failure", ["other-owner", "external-iso", "external-vm", "other-datastore", "powered-on", "cdrom", "no-sata", "not-iso"])
@@ -616,3 +644,109 @@ def test_attach_iso_rejects_unowned_media_or_mutated_vm_without_reconfigure(clie
     with pytest.raises(VMwareError):
         client.attach_iso(vm._moId, path, OWNER)
     vm.ReconfigVM_Task.assert_not_called()
+
+
+@pytest.mark.parametrize("role", ["ubuntu", "splunk", "elasticsearch", "kibana", "fleetmanager", "corelight_sensor"])
+def test_creation_with_media_keeps_existing_disk_then_cd_boot_order(client, role):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    specification = sensor_spec() if role == "corelight_sensor" else dict(spec(), role=role)
+
+    def create(config, **kwargs):
+        devices = [change.device for change in config.deviceChange]
+        validate_boot_devices(config.bootOptions, devices)
+        assert len(config.bootOptions.bootOrder) == 2
+        assert isinstance(config.bootOptions.bootOrder[0], vim.vm.BootOptions.BootableDiskDevice)
+        assert isinstance(config.bootOptions.bootOrder[1], vim.vm.BootOptions.BootableCdromDevice)
+        return task(NS(_moId="created-with-media"))
+
+    client._dc.vmFolder.CreateVM_Task.side_effect = create
+    assert client.create_vm(specification, f"[datastore1] {ISO}", OWNER) == "created-with-media"
+
+
+def test_sensor_creates_disk_only_then_attaches_media_and_valid_boot_order_before_power_on(client):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    events = []
+    vm = owned_vm()
+
+    def create(config, **kwargs):
+        devices = [change.device for change in config.deviceChange]
+        validate_boot_devices(config.bootOptions, devices)
+        assert len(config.bootOptions.bootOrder) == 1
+        assert not any(isinstance(device, vim.vm.device.VirtualCdrom) for device in devices)
+        vm.config = NS(annotation=config.annotation, files=config.files, hardware=NS(device=devices), bootOptions=config.bootOptions)
+        for index, device in enumerate(device for device in devices if isinstance(device, vim.vm.device.VirtualEthernetCard)):
+            device.macAddress = f"00:50:56:aa:bb:{index + 1:02x}"
+        # Managed-device keys are read from the created VM on the later call.
+        # A fixed key in attach_iso would configure an absent boot device here.
+        disk = next(device for device in devices if isinstance(device, vim.vm.device.VirtualDisk))
+        disk.key = 2007
+        vm.config.bootOptions.bootOrder[0].deviceKey = disk.key
+        client._test_vms.append(vm)
+        events.append("create-powered-off-disk-only")
+        return task(vm)
+
+    def reconfigure(spec):
+        assert vm.runtime.powerState == "poweredOff"
+        assert len(spec.deviceChange) == 1 and spec.deviceChange[0].operation == "add"
+        cdrom = spec.deviceChange[0].device
+        assert isinstance(cdrom, vim.vm.device.VirtualCdrom)
+        assert cdrom.backing.fileName == f"[datastore1] {ISO}"
+        devices = vm.config.hardware.device + [cdrom]
+        options = spec.bootOptions or vm.config.bootOptions
+        validate_boot_devices(options, devices)
+        assert len(options.bootOrder) == 2
+        assert isinstance(options.bootOrder[0], vim.vm.BootOptions.BootableDiskDevice)
+        assert options.bootOrder[0].deviceKey == 2007
+        assert isinstance(options.bootOrder[1], vim.vm.BootOptions.BootableCdromDevice)
+        vm.config.hardware.device = devices
+        vm.config.bootOptions.bootOrder = options.bootOrder
+        events.append("attach-iso-and-disk-cd-order")
+        return task()
+
+    def power_on():
+        validate_boot_devices(vm.config.bootOptions, vm.config.hardware.device)
+        assert len(vm.config.bootOptions.bootOrder) == 2
+        assert events[-1] == "attach-iso-and-disk-cd-order"
+        vm.runtime.powerState = "poweredOn"
+        events.append("power-on")
+        return task()
+
+    client._dc.vmFolder.CreateVM_Task.side_effect = create
+    vm.ReconfigVM_Task.side_effect = reconfigure
+    vm.PowerOnVM_Task.side_effect = power_on
+    vm_id = client.create_vm(sensor_spec(), None, OWNER)
+    assert client.network_macs(vm_id, OWNER) == {"management_mac": "00:50:56:aa:bb:01", "monitor_mac": "00:50:56:aa:bb:02"}
+    vm.PowerOnVM_Task.assert_not_called()
+    client.attach_iso(vm_id, f"[datastore1] {ISO}", OWNER)
+    vm.PowerOnVM_Task.assert_not_called()
+    client.power_on(vm_id, OWNER)
+    assert events == ["create-powered-off-disk-only", "attach-iso-and-disk-cd-order", "power-on"]
+
+
+@pytest.mark.parametrize("failure", ["no-disk", "two-disks", "zero-disk-key", "negative-disk-key", "foreign-disk", "duplicate-sata", "occupied-sata"])
+def test_attach_iso_rejects_ambiguous_or_mutated_boot_devices_before_esxi_reconfiguration(client, failure):
+    vm = sensor_vm()
+    devices = vm.config.hardware.device
+    if failure == "no-disk":
+        devices.pop(0)
+    elif failure == "two-disks":
+        devices.append(vim.vm.device.VirtualDisk(
+            key=2007, controllerKey=1000, unitNumber=1,
+            backing=vim.vm.device.VirtualDisk.FlatVer2BackingInfo(fileName=f"[datastore1] {BASE}/lab/extra.vmdk"),
+        ))
+    elif failure in {"zero-disk-key", "negative-disk-key"}:
+        devices[0].key = 0 if failure == "zero-disk-key" else -1
+    elif failure == "foreign-disk":
+        devices[0].backing.fileName = f"[datastore1] gdeploy/{OTHER}/lab/disk.vmdk"
+    elif failure == "duplicate-sata":
+        devices.append(vim.vm.device.VirtualAHCIController(key=15000, busNumber=1))
+    else:
+        devices[0].controllerKey = 15000
+        devices[0].unitNumber = 0
+    client._test_vms.append(vm)
+    with pytest.raises(VMwareError):
+        client.attach_iso(vm._moId, f"[datastore1] {ISO}", OWNER)
+    vm.ReconfigVM_Task.assert_not_called()
+    vm.PowerOnVM_Task.assert_not_called()
