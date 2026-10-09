@@ -4,6 +4,21 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-10-09
+
+### Fixed
+
+- Remove the Software Sensor's dependency on ESXi generating MAC addresses before its first boot. Create its two VMXNET3 adapters with distinct manual MACs from VMware's supported range, excluding addresses already registered on the target ESXi host. Ordinary VM roles keep automatic MAC assignment.
+- Read back and verify the powered-off sensor's actual MAC addresses before preparing its Ubuntu ISO. Preserve the management/monitoring mapping and the order of ISO attachment followed by first power-on; the monitoring adapter still receives no IP configuration. This check identifies network adapters and does not test whether an IP address is unused.
+- Replace the generic `ESXi did not return valid generated sensor network addresses` error with specific MAC diagnostics identifying the adapter and reason. Log verified management and monitoring MACs in deployment details, and detect conflicting MACs in other VMs on the target host before proceeding.
+- Add regressions modeling standalone ESXi that leaves generated MACs unset until first power-on, supported manual allocation and collision handling, unchanged ordinary VM creation, and the reported failure followed by successful recovery with a blank replacement pairing token.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the complete data volume and original encryption key. No database migration is required.
+- Updating does not modify existing VMs or resume failed jobs. Use **Delete & redeploy** for the failed sensor job; a MAC-read failure occurs before sensor installation, so its replacement pairing token can remain blank when the saved state confirms this. Each replacement is a new VM; update any external DHCP reservation to its logged management MAC.
+- MAC collision checks cover registered VMs on the target host, not the entire LAN. Automated request/lifecycle and Docker checks do not replace a full installation against ESXi 8.0 Update 3 with licensed sensor software.
+
 ## [0.15.3] - 2026-10-09
 
 ### Fixed

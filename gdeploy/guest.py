@@ -167,7 +167,7 @@ def _autoinstall_data(
             or int(mac[:2], 16) & 1 or mac.lower() == "00:00:00:00:00:00"
             for mac in macs
         ) or macs[0].lower() == macs[1].lower():
-            raise GuestError("Software Sensor installation requires two distinct ESXi-generated network addresses.")
+            raise GuestError("Software Sensor installation requires two distinct, valid management and monitoring MAC addresses.")
         if spec.get("ip_mode") == "dhcp" and spec.get("dhcp_reserved") is not True:
             raise GuestError("Software Sensor management DHCP requires a reserved IPv4 address.")
         network.update({"match": {"macaddress": macs[0].lower()}, "set-name": "gdeploymgmt", "accept-ra": False, "link-local": []})

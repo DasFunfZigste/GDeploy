@@ -503,8 +503,8 @@ class DeploymentService:
                     credential = secret_data["vm_credentials"][vm["name"]]
                     self.stage(deployment_id, "preparing", f"Preparing unattended OS installation for {vm['name']}")
                     if vm["role"] == "corelight_sensor":
-                        # ESXi assigns both MACs before ISO creation so autoinstall
-                        # can match each NIC explicitly without enabling capture DHCP.
+                        # Verify both configured MACs before ISO creation so
+                        # autoinstall matches each NIC without enabling capture DHCP.
                         self.stage(deployment_id, "creating", f"Creating {vm['name']} with separate management and monitoring adapters")
                         vm["vm_id"] = esxi.create_vm(vm, None, deployment_id)
                         vm["status"] = "preparing"
@@ -512,6 +512,11 @@ class DeploymentService:
                         self._check_stop(deployment_id)
                         vm.update(esxi.network_macs(vm["vm_id"], deployment_id))
                         self.db.update(deployment_id, vms=vms)
+                        self.db.event(
+                            deployment_id,
+                            f"Verified sensor MAC addresses for {vm['name']}: "
+                            f"management {vm['management_mac']}; monitoring {vm['monitor_mac']}",
+                        )
                         self._check_stop(deployment_id)
                     iso = artifact_dir / (vm["name"] + ".iso")
                     if os_media:

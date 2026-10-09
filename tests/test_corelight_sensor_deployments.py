@@ -10,6 +10,7 @@ import pytest
 from gdeploy.db import Database, SensorPairingError
 from gdeploy.models import DeploymentSpec
 from gdeploy.service import DeploymentError, DeploymentService, safe_error
+from gdeploy.vmware import VMwareError
 from test_corelight_sensor import sensor_spec, settings
 from test_media_deployments import iso_file
 
@@ -55,7 +56,7 @@ def sensor_job(config, spec, monkeypatch):
 
         def network_macs(self, vm_id, identifier):
             record("network-macs", vm_id)
-            return {"management_mac": "00:50:56:aa:bb:01", "monitor_mac": "00:50:56:aa:bb:02"}
+            return {"management_mac": "00:50:56:20:bb:01", "monitor_mac": "00:50:56:20:bb:02"}
 
         def upload_iso(self, datastore, remote, local):
             record("upload-iso", datastore, remote)
@@ -115,7 +116,7 @@ def sensor_job(config, spec, monkeypatch):
     return service, db, spec, calls, hooks, inventory
 
 
-def test_sensor_uses_generated_macs_before_iso_and_snapshotted_private_settings(sensor_job):
+def test_sensor_verifies_configured_macs_before_iso_and_uses_snapshotted_private_settings(sensor_job):
     service, db, spec, calls, _, _ = sensor_job
     job = service.enqueue(spec)
     original = db.get(job["id"], private=True)["secrets"]["corelight_sensor"]
@@ -130,12 +131,13 @@ def test_sensor_uses_generated_macs_before_iso_and_snapshotted_private_settings(
     created = next(call for call in calls if call[0] == "create-vm")
     assert created[2] is None
     built = next(call[1] for call in calls if call[0] == "build-iso")
-    assert built["management_mac"] == "00:50:56:aa:bb:01" and built["monitor_mac"] == "00:50:56:aa:bb:02"
+    assert built["management_mac"] == "00:50:56:20:bb:01" and built["monitor_mac"] == "00:50:56:20:bb:02"
     installed = next(call[1] for call in calls if call[0] == "install")
     assert installed == {**original, "management_mac": built["management_mac"], "monitor_mac": built["monitor_mac"]}
     assert result["vms"][0]["management_mac"] == built["management_mac"]
     assert "sensor_pairing_token" not in result["spec"]
     public = json.dumps(result) + json.dumps(db.events(job["id"]))
+    assert f"Verified sensor MAC addresses for {built['name']}: management {built['management_mac']}; monitoring {built['monitor_mac']}" in public
     for key in ("repository_token", "community_string", "license_key", "pairing_token"):
         assert original[key] not in public
     assert service.credentials(job["id"])["vms"][0]["services"][0]["password"] == original["community_string"]
@@ -171,8 +173,53 @@ def test_sensor_stop_after_vm_creation_keeps_mac_mapping_without_provisioning_me
     service.run(job["id"])
     result = db.get(job["id"], private=True)
     assert result["status"] == "stopped" and result["vms"][0]["vm_id"] == "vm-sensor"
-    assert result["vms"][0]["monitor_mac"] == "00:50:56:aa:bb:02"
+    assert result["vms"][0]["monitor_mac"] == "00:50:56:20:bb:02"
     assert not any(call[0] in {"build-iso", "upload-iso", "power-on", "destroy-vm"} for call in calls)
+
+
+def test_sensor_mac_failure_before_iso_keeps_unused_pairing_token_for_successful_redeployment(sensor_job):
+    service, db, spec, calls, hooks, _ = sensor_job
+    job = service.enqueue(spec)
+    original = db.get(job["id"], private=True)["secrets"]["corelight_sensor"]
+
+    def fail(*args):
+        raise VMwareError("ESXi did not return valid generated sensor network addresses.")
+
+    hooks["network-macs"] = fail
+    db.claim()
+    service.run(job["id"])
+    failed = db.get(job["id"], private=True)
+    assert failed["status"] == "failed"
+    assert failed["vms"][0]["vm_id"] == "vm-sensor"
+    assert failed["vms"][0]["status"] == "preparing"
+    assert failed["resources"] == []
+    assert not any(call[0] in {"build-iso", "upload-iso", "attach-iso", "power-on", "install", "destroy-vm"} for call in calls)
+    assert service.sensor_pairing_policy(job["id"])["can_reuse"]
+    with db.connect() as connection:
+        assert connection.execute("SELECT started FROM sensor_installation_state WHERE deployment_id=?", (job["id"],)).fetchone()[0] == 0
+
+    del hooks["network-macs"]
+    # Recovery uses the encrypted original even if Setup is no longer populated.
+    service.corelight_sensor.clear()
+    calls.clear()
+    replacement = service.redeploy(job["id"], job["name"], sensor_pairing_token="")
+    assert ("destroy-vm", "vm-sensor") in calls
+    assert db.get(job["id"])["status"] == "reverted"
+    assert db.get(replacement["id"], private=True)["secrets"]["corelight_sensor"] == original
+    assert not db.sensor_pairing_token_used(original["pairing_token"], deployment_id=replacement["id"])
+
+    calls.clear()
+    db.claim()
+    service.run(replacement["id"])
+    completed = db.get(replacement["id"])
+    assert completed["status"] == "completed", completed["error"]
+    order = [call[0] for call in calls if call[0] != "inventory"]
+    assert order == ["create-vm", "network-macs", "build-iso", "upload-iso", "attach-iso", "power-on", "os-ready", "detach-iso", "delete-iso", "install"]
+    built = next(call[1] for call in calls if call[0] == "build-iso")
+    installed = next(call[1] for call in calls if call[0] == "install")
+    assert installed == {**original, "management_mac": built["management_mac"], "monitor_mac": built["monitor_mac"]}
+    assert completed["vms"][0]["management_mac"] == built["management_mac"]
+    assert completed["vms"][0]["monitor_mac"] == built["monitor_mac"]
 
 
 @pytest.mark.parametrize("missing", ["settings", "pairing", "license"])

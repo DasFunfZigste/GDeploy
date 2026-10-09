@@ -40,9 +40,12 @@ def validate_boot_devices(boot_options, devices):
 
 
 class NetworkStub:
+    def __init__(self, name="VM Network"):
+        self.name = name
+
     def InvokeAccessor(self, obj, info):
         assert info.name == "name"
-        return "VM Network"
+        return self.name
 
 
 @pytest.fixture
@@ -513,16 +516,20 @@ def sensor_spec():
     return dict(spec(), role="corelight_sensor", cpu=4, ram_gb=16, disk_gb=600, monitor_network="VM Network")
 
 
-def test_sensor_vm_creates_two_generated_adapters_before_media_and_reserves_cpu_memory(client):
+def test_sensor_vm_creates_two_manual_adapters_before_media_and_reserves_cpu_memory(client, monkeypatch):
     client._host.hardware.cpuInfo.numCpuCores = 8
     client._host.hardware.cpuInfo.hz = 2_700_000_000
+    random = MagicMock(side_effect=[0, (1 << 22) - 1])
+    monkeypatch.setattr(vmware.secrets, "randbelow", random)
     client._dc.vmFolder.CreateVM_Task.return_value = task(NS(_moId="sensor-1"))
     assert client.create_vm(sensor_spec(), None, OWNER) == "sensor-1"
     config = client._dc.vmFolder.CreateVM_Task.call_args.kwargs["config"]
     devices = [change.device for change in config.deviceChange]
     adapters = [device for device in devices if isinstance(device, vim.vm.device.VirtualEthernetCard)]
     assert [device.key for device in adapters] == [4000, 4001]
-    assert all(device.addressType == "generated" and not device.macAddress for device in adapters)
+    assert all(device.addressType == "manual" for device in adapters)
+    assert [device.macAddress for device in adapters] == ["00:50:56:00:00:00", "00:50:56:3f:ff:ff"]
+    assert all(call.args == (1 << 22,) for call in random.call_args_list)
     assert not any(isinstance(device, vim.vm.device.VirtualCdrom) for device in devices)
     assert len(config.bootOptions.bootOrder) == 1
     assert isinstance(config.bootOptions.bootOrder[0], vim.vm.BootOptions.BootableDiskDevice)
@@ -531,6 +538,87 @@ def test_sensor_vm_creates_two_generated_adapters_before_media_and_reserves_cpu_
     assert config.cpuAllocation.reservation == 4 * 2700
     assert config.memoryAllocation.reservation == 16 * 1024
     assert config.memoryReservationLockedToMax is True
+
+
+@pytest.mark.parametrize("monitor_network", ["VM Network", "Capture"])
+def test_sensor_assigns_distinct_macs_by_adapter_role_even_on_same_portgroup(client, monkeypatch, monitor_network):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    client._host.network.append(vim.Network("network-2", NetworkStub("Capture")))
+    monkeypatch.setattr(vmware.secrets, "randbelow", MagicMock(side_effect=[3, 4]))
+    client._dc.vmFolder.CreateVM_Task.return_value = task(NS(_moId="sensor-1"))
+    client.create_vm(dict(sensor_spec(), monitor_network=monitor_network), None, OWNER)
+    config = client._dc.vmFolder.CreateVM_Task.call_args.kwargs["config"]
+    adapters = [change.device for change in config.deviceChange if isinstance(change.device, vim.vm.device.VirtualEthernetCard)]
+    assert [(device.key, device.macAddress, device.backing.deviceName) for device in adapters] == [
+        (4000, "00:50:56:00:00:03", "VM Network"),
+        (4001, "00:50:56:00:00:04", monitor_network),
+    ]
+
+
+@pytest.mark.parametrize("power_state", ["poweredOn", "poweredOff", "suspended"])
+def test_sensor_mac_allocation_skips_registered_and_previously_selected_addresses(client, monkeypatch, power_state):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    existing = owned_vm()
+    existing.runtime.powerState = power_state
+    existing.config.hardware.device += [
+        vim.vm.device.VirtualE1000(key=4000, macAddress="00:50:56:00:00:AB"),
+        vim.vm.device.VirtualVmxnet3(key=4001, addressType="generated"),
+    ]
+    client._test_vms.append(existing)
+    random = MagicMock(side_effect=[0xab, 1, 1, 2])
+    monkeypatch.setattr(vmware.secrets, "randbelow", random)
+    client._dc.vmFolder.CreateVM_Task.return_value = task(NS(_moId="sensor-1"))
+    client.create_vm(sensor_spec(), None, OWNER)
+    config = client._dc.vmFolder.CreateVM_Task.call_args.kwargs["config"]
+    adapters = [change.device for change in config.deviceChange if isinstance(change.device, vim.vm.device.VirtualEthernetCard)]
+    assert [device.macAddress for device in adapters] == ["00:50:56:00:00:01", "00:50:56:00:00:02"]
+    assert random.call_count == 4
+
+
+def test_sensor_mac_allocation_fails_after_bounded_repeated_collisions_before_creation(client, monkeypatch):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    random = MagicMock(return_value=1)
+    monkeypatch.setattr(vmware.secrets, "randbelow", random)
+    with pytest.raises(VMwareError, match="Could not allocate two unused sensor MAC addresses"):
+        client.create_vm(sensor_spec(), None, OWNER)
+    assert random.call_count == client.SENSOR_MAC_ALLOCATION_ATTEMPTS
+    client._dc.vmFolder.CreateVM_Task.assert_not_called()
+    client._content.fileManager.MakeDirectory.assert_not_called()
+
+
+@pytest.mark.parametrize("problem", ["missing-config", "missing-hardware", "missing-devices", "denied", "invalid-mac"])
+def test_sensor_mac_allocation_requires_readable_inventory_before_creation(client, problem):
+    client._host.hardware.cpuInfo.numCpuCores = 8
+    client._host.hardware.cpuInfo.hz = 2_700_000_000
+    existing = owned_vm()
+    if problem == "missing-config":
+        existing.config = None
+    elif problem == "missing-hardware":
+        existing.config.hardware = None
+    elif problem == "missing-devices":
+        existing.config.hardware.device = None
+    elif problem == "denied":
+        class InaccessibleVM:
+            name = "other-vm"
+
+            @property
+            def config(self):
+                raise vim.fault.NoPermission(msg="Cannot access secret-password test-session-cookie")
+
+        existing = InaccessibleVM()
+    else:
+        existing.config.hardware.device.append(vim.vm.device.VirtualVmxnet3(key=4000, macAddress="invalid-sensitive-data"))
+    client._test_vms.append(existing)
+    with pytest.raises(VMwareError, match="inspect|invalid registered VM MAC address") as error:
+        client.create_vm(sensor_spec(), None, OWNER)
+    assert "secret-password" not in str(error.value)
+    assert "test-session-cookie" not in str(error.value)
+    assert "invalid-sensitive-data" not in str(error.value)
+    client._dc.vmFolder.CreateVM_Task.assert_not_called()
+    client._content.fileManager.MakeDirectory.assert_not_called()
 
 
 @pytest.mark.parametrize("change", [{"cpu": 2}, {"ram_gb": 8}, {"disk_gb": 540}, {"monitor_network": "missing"}, {"cpu": 16}])
@@ -585,7 +673,7 @@ def test_sensor_network_macs_use_original_device_keys_not_inventory_order(client
     assert client.network_macs(vm._moId, OWNER) == {"management_mac": "00:50:56:aa:bb:01", "monitor_mac": "00:50:56:aa:bb:02"}
 
 
-@pytest.mark.parametrize("failure", ["other-owner", "missing", "extra", "invalid", "multicast", "zero", "duplicate", "wrong-key"])
+@pytest.mark.parametrize("failure", ["other-owner", "missing", "extra", "invalid", "multicast", "zero", "duplicate", "wrong-key", "powered-on", "wrong-hardware"])
 def test_sensor_macs_reject_changed_ownership_or_hardware(client, failure):
     vm = sensor_vm()
     if failure == "other-owner":
@@ -598,9 +686,50 @@ def test_sensor_macs_reject_changed_ownership_or_hardware(client, failure):
         vm.config.hardware.device[-1].macAddress = {"invalid": "bad", "multicast": "01:50:56:aa:bb:02", "zero": "00:00:00:00:00:00", "duplicate": "00:50:56:aa:bb:01"}[failure]
     if failure == "wrong-key":
         vm.config.hardware.device[-1].key = 4002
+    if failure == "powered-on":
+        vm.runtime.powerState = "poweredOn"
+    if failure == "wrong-hardware":
+        vm.config.hardware.device[-1] = vim.vm.device.VirtualE1000(key=4001, macAddress="00:50:56:aa:bb:02")
     client._test_vms.append(vm)
     with pytest.raises(VMwareError):
         client.network_macs(vm._moId, OWNER)
+
+
+@pytest.mark.parametrize("key, role", [(4000, "management"), (4001, "monitoring")])
+@pytest.mark.parametrize("mac, description", [(None, "no"), ("", "no"), ("invalid-sensitive-data", "an invalid")])
+def test_sensor_mac_readback_errors_identify_adapter_without_echoing_invalid_value(client, key, role, mac, description):
+    vm = sensor_vm()
+    adapter = next(device for device in vm.config.hardware.device if device.key == key)
+    adapter.macAddress = mac
+    client._test_vms.append(vm)
+    with pytest.raises(VMwareError) as error:
+        client.network_macs(vm._moId, OWNER)
+    assert f"ESXi returned {description} MAC address for the sensor {role} adapter (device key {key})" in str(error.value)
+    assert "invalid-sensitive-data" not in str(error.value)
+    vm.PowerOnVM_Task.assert_not_called()
+    vm.ReconfigVM_Task.assert_not_called()
+
+
+@pytest.mark.parametrize("role,key", [("management", 4000), ("monitoring", 4001)])
+def test_sensor_mac_readback_rejects_new_conflict_with_another_registered_vm(client, role, key):
+    sensor = sensor_vm()
+    existing = owned_vm()
+    existing._moId = "other-vm"
+    sensor_mac = next(device.macAddress for device in sensor.config.hardware.device if device.key == key)
+    existing.config.hardware.device.append(vim.vm.device.VirtualVmxnet3(key=4000, macAddress=sensor_mac.upper()))
+    client._test_vms.extend([existing, sensor])
+    with pytest.raises(VMwareError, match=f"sensor {role} adapter MAC address is already assigned"):
+        client.network_macs(sensor._moId, OWNER)
+    sensor.PowerOnVM_Task.assert_not_called()
+    sensor.ReconfigVM_Task.assert_not_called()
+
+
+def test_sensor_mac_readback_requires_other_vm_inventory_to_remain_readable(client):
+    sensor = sensor_vm()
+    client._test_vms.extend([sensor, NS(_moId="other-vm", config=None)])
+    with pytest.raises(VMwareError, match="inspect all registered VM network adapters"):
+        client.network_macs(sensor._moId, OWNER)
+    sensor.PowerOnVM_Task.assert_not_called()
 
 
 def test_attach_iso_adds_only_owned_media_to_powered_off_sensor(client):
@@ -654,6 +783,13 @@ def test_creation_with_media_keeps_existing_disk_then_cd_boot_order(client, role
 
     def create(config, **kwargs):
         devices = [change.device for change in config.deviceChange]
+        adapters = [device for device in devices if isinstance(device, vim.vm.device.VirtualEthernetCard)]
+        if role == "corelight_sensor":
+            assert len(adapters) == 2
+            assert all(device.addressType == "manual" and device.macAddress for device in adapters)
+        else:
+            assert len(adapters) == 1
+            assert adapters[0].addressType == "generated" and adapters[0].macAddress is None
         validate_boot_devices(config.bootOptions, devices)
         assert len(config.bootOptions.bootOrder) == 2
         assert isinstance(config.bootOptions.bootOrder[0], vim.vm.BootOptions.BootableDiskDevice)
@@ -664,9 +800,10 @@ def test_creation_with_media_keeps_existing_disk_then_cd_boot_order(client, role
     assert client.create_vm(specification, f"[datastore1] {ISO}", OWNER) == "created-with-media"
 
 
-def test_sensor_creates_disk_only_then_attaches_media_and_valid_boot_order_before_power_on(client):
+def test_sensor_creates_disk_only_then_attaches_media_and_valid_boot_order_before_power_on(client, monkeypatch):
     client._host.hardware.cpuInfo.numCpuCores = 8
     client._host.hardware.cpuInfo.hz = 2_700_000_000
+    monkeypatch.setattr(vmware.secrets, "randbelow", MagicMock(side_effect=[1, 2]))
     events = []
     vm = owned_vm()
 
@@ -676,8 +813,14 @@ def test_sensor_creates_disk_only_then_attaches_media_and_valid_boot_order_befor
         assert len(config.bootOptions.bootOrder) == 1
         assert not any(isinstance(device, vim.vm.device.VirtualCdrom) for device in devices)
         vm.config = NS(annotation=config.annotation, files=config.files, hardware=NS(device=devices), bootOptions=config.bootOptions)
-        for index, device in enumerate(device for device in devices if isinstance(device, vim.vm.device.VirtualEthernetCard)):
-            device.macAddress = f"00:50:56:aa:bb:{index + 1:02x}"
+        for device in devices:
+            if isinstance(device, vim.vm.device.VirtualEthernetCard):
+                # Standalone ESXi leaves generated MACs unset until first
+                # power-on. Honor explicitly configured manual MACs only.
+                if device.addressType == "generated":
+                    device.macAddress = None
+                else:
+                    assert device.addressType == "manual" and device.macAddress
         # Managed-device keys are read from the created VM on the later call.
         # A fixed key in attach_iso would configure an absent boot device here.
         disk = next(device for device in devices if isinstance(device, vim.vm.device.VirtualDisk))
@@ -717,7 +860,7 @@ def test_sensor_creates_disk_only_then_attaches_media_and_valid_boot_order_befor
     vm.ReconfigVM_Task.side_effect = reconfigure
     vm.PowerOnVM_Task.side_effect = power_on
     vm_id = client.create_vm(sensor_spec(), None, OWNER)
-    assert client.network_macs(vm_id, OWNER) == {"management_mac": "00:50:56:aa:bb:01", "monitor_mac": "00:50:56:aa:bb:02"}
+    assert client.network_macs(vm_id, OWNER) == {"management_mac": "00:50:56:00:00:01", "monitor_mac": "00:50:56:00:00:02"}
     vm.PowerOnVM_Task.assert_not_called()
     client.attach_iso(vm_id, f"[datastore1] {ISO}", OWNER)
     vm.PowerOnVM_Task.assert_not_called()

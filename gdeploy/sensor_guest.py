@@ -85,7 +85,7 @@ def run(command, label, *, input=None, timeout=600, private=False, binary=False,
 
 def _mac(value):
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}", value) or int(value[:2], 16) & 1 or value.lower() == "00:00:00:00:00:00":
-        raise SensorInstallError("Software Sensor requires valid ESXi-generated management and monitoring MAC addresses.")
+        raise SensorInstallError("Software Sensor requires valid management and monitoring MAC addresses.")
     return value.lower()
 
 

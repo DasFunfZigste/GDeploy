@@ -340,7 +340,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from Deployments** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.15.3/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.15.4/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ## Optional manual credentials
 
@@ -397,10 +397,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.15.3** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.15.4** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.15.3-deploy.tar.gz`
-- `gdeploy-0.15.3-linux-amd64.image.tar.gz`
+- `gdeploy-0.15.4-deploy.tar.gz`
+- `gdeploy-0.15.4-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -412,12 +412,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.15.3-deploy.tar.gz
-sudo docker load --input gdeploy-0.15.3-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.15.4-deploy.tar.gz
+sudo docker load --input gdeploy-0.15.4-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.15.3` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.15.4` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
@@ -452,6 +452,7 @@ Common startup issues:
 | Splunk package upload or verification fails | Check the package is at most 4 GiB, free space is sufficient, the publisher checksum matches, and the archive is Splunk Enterprise for Linux x86_64. Enter only the 128-character SHA-512 or 64-character SHA-256, without the filename from the checksum file. Use v0.8.1 or later for Splunk's `.sha512` value. Review the displayed archive error; a `.tgz` extension alone does not establish compatibility. The previous selection is retained. |
 | A saved Splunk package cannot be deleted | Clear its saved selection or choose another package. Queued, running or cleaning jobs retain deletion protection for their own package snapshots. Only unused app uploads can be deleted; mounted server files remain outside this control. |
 | Sensor preflight requests a pairing token | New deployments require a unique token from an existing Fleet Manager's new sensor record. In **Delete & redeploy**, a replacement token is optional only when sensor installation never started: leave it blank to reuse the original encrypted configuration. Later or unknown attempts require a fresh token before cleanup. |
+| Sensor creation fails with `ESXi did not return valid generated sensor network addresses` | This older error concerns virtual NIC **MAC addresses**, not IP availability. Standalone ESXi may not generate both addresses before first boot. Update to **v0.15.4 or later** and use **Delete & redeploy**; new sensor VMs receive explicit MACs before ISO preparation. Leave the pairing token blank if the recovery dialog confirms installation never started. The new logs identify both adapter MACs and any specific readback failure. |
 | Sensor cannot pair, is unlicensed or sees no traffic | Expand logs and inspect `sudo corelightctl sensor status`. Confirm the sensor license, Fleet community/SSL name, pairing endpoint, upstream TCP 1443 access and actual traffic delivery to the monitoring group. Never post secret configuration files. See the [sensor guide](CORELIGHT_SENSOR.md). |
 | FleetManager configuration does not appear before review | Update to v0.9.1 or later, refresh the browser and select the FleetManager role. After **Configure VMs**, its configuration step should appear even when defaults are already saved. Deployments without FleetManager keep the three-step flow. |
 | FleetManager configuration is invalid or later preflight reports it changed | Return to **FleetManager configuration**, supply or retain the community string and valid product identity PEM, plus the repository token and version choice, then choose **Save & continue**. Run preflight again from **Review & deploy**. Setup remains available for default settings and package management. |
@@ -475,6 +476,8 @@ Common startup issues:
 Version **0.12.0** adds Stop deployment and a saved, host-specific default port group. The new settings table is additive; preserve the complete data volume and encryption key. Finish or resolve active work before updating. Resolve pending stop requests before rollback to a release that does not understand them; older releases ignore the default port group. Updating does not resume failed/interrupted jobs or change networking on existing VMs.
 
 Version **0.11.1** adds repository version choices, starts fresh deployment forms with no selected roles, offers an unchecked option to deploy after successful preflight, and improves copying logs over HTTP. Existing saved exact versions and queued snapshots retain their choices; no data migration is required. Keep the existing data volume and encryption key. Updating does not resume failed jobs or change existing VMs.
+
+Version **0.15.4** assigns explicit MACs when creating new sensor VMs, with no database migration. Existing VMs and recorded MACs remain unchanged. Keep the data volume and encryption key. Use normal recovery for failed jobs; rolling back restores the older dependency on pre-boot generated addresses. MAC checks cover the target ESXi host's registered VMs rather than all LAN devices. Maintain external DHCP reservations for each replacement VM's management MAC.
 
 Version **0.15.3** adds sensor installation-state and recovery-reservation tables automatically. Back up the complete data volume with its original encryption key. Existing failures can reuse their token only when the sensor's saved state demonstrates that installation never started. Finish or resolve active work before rollback because older workers do not maintain these boundaries or reservations. Updating does not resume failed jobs or alter existing VMs.
 

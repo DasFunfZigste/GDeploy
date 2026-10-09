@@ -11,6 +11,7 @@ import asyncio
 import ipaddress
 import os
 import re
+import secrets
 import shutil
 import ssl
 import time
@@ -38,6 +39,7 @@ class VMwareError(RuntimeError):
 _NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _PATH_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _DATASTORE_PATH = re.compile(r"\[([^\[\]\r\n]+)\] (.+)\Z")
+_MAC = re.compile(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\Z")
 
 
 def _guarded(action: str) -> Callable:
@@ -138,6 +140,7 @@ class ESXiClient:
     DOWNLOAD_TOTAL_TIMEOUT = 3600
     DOWNLOAD_CHUNK_BYTES = 1024**2
     MEDIA_FREE_SPACE_RESERVE = 64 * 1024**2
+    SENSOR_MAC_ALLOCATION_ATTEMPTS = 128
 
     def __init__(
         self, host: str, username: str, password: str, verify_tls: bool = True, *, trusted_certificate: str | None = None
@@ -654,10 +657,12 @@ class ESXiClient:
             if spec["cpu"] < 4 or spec["ram_gb"] < 16 or spec["disk_gb"] < 550:
                 raise VMwareError("Software Sensor requires at least 4 CPUs, 16 GiB memory and a 550 GiB disk.")
             cpu_mhz = hz // 1000000
-        if any(vm.name == name for vm in self._objects(vim.VirtualMachine)):
+        registered_vms = self._objects(vim.VirtualMachine)
+        if any(vm.name == name for vm in registered_vms):
             raise VMwareError(
                 "A VM with this name already exists on ESXi. Choose another name or clean up the prior deployment."
             )
+        sensor_macs = self._allocate_sensor_macs(registered_vms) if sensor else []
         directory = f"gdeploy/{owner_id}/{name}"
         self._make_directory(datastore, directory)
 
@@ -683,7 +688,9 @@ class ESXiClient:
             boot_order.append(vim.vm.BootOptions.BootableCdromDevice())
         for index, network in enumerate(networks):
             devices.append(vim.vm.device.VirtualVmxnet3(
-                key=4000 + index, addressType="generated",
+                key=4000 + index,
+                addressType="manual" if sensor else "generated",
+                macAddress=sensor_macs[index] if sensor else None,
                 backing=vim.vm.device.VirtualEthernetCard.NetworkBackingInfo(deviceName=network.name, network=network),
                 connectable=vim.vm.device.VirtualDevice.ConnectInfo(startConnected=True, connected=True, allowGuestControl=False),
             ))
@@ -714,7 +721,7 @@ class ESXiClient:
                 bootRetryDelay=10000,
                 efiSecureBootEnabled=False,
                 # Only reference devices in this request. Sensor media is
-                # attached later, after ESXi has assigned both NIC MACs.
+                # attached later, after both configured NIC MACs are verified.
                 # Disk-first boot avoids reinstalling after Ubuntu reboots.
                 bootOrder=boot_order,
             ),
@@ -732,6 +739,56 @@ class ESXiClient:
                 "ESXi completed VM creation without returning its identifier. Recover the VM using its deployment ownership tag."
             )
         return str(vm._moId)
+
+    def _registered_macs(self, registered_vms: list[Any], *, exclude_id: str | None = None) -> set[str]:
+        """Inspect powered-off VMs too; their assigned MACs are still reserved."""
+        addresses = set()
+        try:
+            for vm in registered_vms:
+                if exclude_id is not None and vm._moId == exclude_id:
+                    continue
+                config = vm.config
+                hardware = getattr(config, "hardware", None)
+                devices = getattr(hardware, "device", None)
+                if devices is None:
+                    raise VMwareError(
+                        "Could not inspect all registered VM network adapters on ESXi; check VM inventory permissions and availability before assigning sensor MAC addresses."
+                    )
+                for device in devices:
+                    if not isinstance(device, vim.vm.device.VirtualEthernetCard):
+                        continue
+                    mac = device.macAddress
+                    # Standalone ESXi may leave a generated MAC unset until the
+                    # first boot. Only an already assigned address is reserved.
+                    if mac is None or mac == "":
+                        continue
+                    if not isinstance(mac, str) or not _MAC.fullmatch(mac):
+                        raise VMwareError(
+                            "ESXi returned an invalid registered VM MAC address; cannot safely assign sensor MAC addresses."
+                        )
+                    addresses.add(mac.lower())
+        except VMwareError:
+            raise
+        except Exception as exc:
+            raise VMwareError(f"Could not inspect registered VM MAC addresses: {self._safe_error(exc)}") from None
+        return addresses
+
+    def _allocate_sensor_macs(self, registered_vms: list[Any]) -> list[str]:
+        # VMware reserves 00:50:56:00:00:00–00:50:56:3f:ff:ff for manual
+        # assignments. Explicit sensor MACs allow NIC-specific autoinstall
+        # configuration before standalone ESXi's first VM power-on.
+        occupied = self._registered_macs(registered_vms)
+        selected = []
+        for _ in range(self.SENSOR_MAC_ALLOCATION_ATTEMPTS):
+            suffix = secrets.randbelow(1 << 22)
+            mac = f"00:50:56:{suffix >> 16:02x}:{(suffix >> 8) & 0xff:02x}:{suffix & 0xff:02x}"
+            if mac in occupied:
+                continue
+            selected.append(mac)
+            occupied.add(mac)
+            if len(selected) == 2:
+                return selected
+        raise VMwareError("Could not allocate two unused sensor MAC addresses from VMware's manual address range; retry the deployment.")
 
     def _find_vm(self, vm_id: str) -> Any | None:
         if not isinstance(vm_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", vm_id):
@@ -752,20 +809,33 @@ class ESXiClient:
         self._assert_owned(vm, owner_id)
         return vm
 
-    @_guarded("Read sensor network addresses")
+    @_guarded("Read sensor adapter MAC addresses")
     def network_macs(self, vm_id: str, owner_id: str) -> dict:
         vm = self._owned_vm(vm_id, owner_id)
+        if vm.runtime.powerState != "poweredOff":
+            raise VMwareError("The sensor VM must remain powered off while verifying adapter MAC addresses and preparing installation media.")
         adapters = [device for device in vm.config.hardware.device if isinstance(device, vim.vm.device.VirtualEthernetCard)]
         if len(adapters) != 2 or {device.key for device in adapters} != {4000, 4001}:
             raise VMwareError("Software Sensor requires its original management and monitoring network adapters.")
         result = {}
         for device in adapters:
+            role = "management" if device.key == 4000 else "monitoring"
+            adapter = f"sensor {role} adapter (device key {device.key})"
+            if not isinstance(device, vim.vm.device.VirtualVmxnet3):
+                raise VMwareError(f"The {adapter} must use VMXNET3 hardware.")
             mac = getattr(device, "macAddress", None)
-            if not isinstance(device, vim.vm.device.VirtualVmxnet3) or not isinstance(mac, str) or not re.fullmatch(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}", mac) or int(mac[:2], 16) & 1 or mac.lower() == "00:00:00:00:00:00":
-                raise VMwareError("ESXi did not return valid generated sensor network addresses.")
+            if mac is None or mac == "":
+                raise VMwareError(f"ESXi returned no MAC address for the {adapter}; both adapter MAC addresses are required before installation media can be prepared.")
+            if not isinstance(mac, str) or not _MAC.fullmatch(mac) or int(mac[:2], 16) & 1 or mac.lower() == "00:00:00:00:00:00":
+                raise VMwareError(f"ESXi returned an invalid MAC address for the {adapter}; a nonzero unicast MAC address is required.")
             result["management_mac" if device.key == 4000 else "monitor_mac"] = mac.lower()
         if result["management_mac"] == result["monitor_mac"]:
-            raise VMwareError("Sensor management and monitoring network addresses must be distinct.")
+            raise VMwareError("Sensor management and monitoring adapter MAC addresses must be distinct.")
+        occupied = self._registered_macs(self._objects(vim.VirtualMachine), exclude_id=vm_id)
+        for field, mac in result.items():
+            if mac in occupied:
+                role = "management" if field == "management_mac" else "monitoring"
+                raise VMwareError(f"The sensor {role} adapter MAC address is already assigned to another registered VM on this ESXi host; redeploy to allocate a different address.")
         return result
 
     @_guarded("Attach installation media")

@@ -441,8 +441,10 @@ def test_splunk_package_validation_rejects_tar_traversal_and_link_writes(tmp_pat
 
 
 @pytest.mark.parametrize("mode", ["dhcp", "static"])
-def test_sensor_autoinstall_uses_minimal_source_and_two_mac_matched_interfaces(spec, mode):
-    spec.update(role="corelight_sensor", management_mac="00:50:56:aa:bb:01", monitor_mac="00:50:56:aa:bb:02", ip_mode=mode, dhcp_reserved=True)
+@pytest.mark.parametrize("mac_prefix", ["00:50:56:20:bb", "00:50:56:aa:bb"])
+def test_sensor_autoinstall_uses_minimal_source_and_two_mac_matched_interfaces(spec, mode, mac_prefix):
+    # New explicit MACs and valid ESXi-generated MACs from older jobs both work.
+    spec.update(role="corelight_sensor", management_mac=f"{mac_prefix}:01", monitor_mac=f"{mac_prefix}:02", ip_mode=mode, dhcp_reserved=True)
     if mode == "static":
         spec.update(address="192.168.50.2/24", gateway="192.168.50.1", dns=["192.168.50.1"])
     install = guest._autoinstall_data(spec, "gdeploy", "password", "ssh-rsa AAAA")["autoinstall"]
