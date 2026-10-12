@@ -236,7 +236,10 @@ def disable_competing_firewalls():
     # firewall automatically permits SSH; API access is configured below.
     if shutil.which("ufw"):
         run(["ufw", "disable"], "Could not disable UFW before Software Sensor manages the dedicated guest firewall", timeout=60)
-    listing = run(["systemctl", "list-unit-files", "--no-legend", "--no-pager", "ufw.service", "firewalld.service"], "Could not discover competing Software Sensor firewall services", timeout=30)
+    # systemd 255 exits 1 when explicit unit-name filters match nothing. List
+    # services first and select the two firewalls below, so their absence is
+    # harmless while actual systemctl failures still stop provisioning.
+    listing = run(["systemctl", "list-unit-files", "--type=service", "--no-legend", "--no-pager"], "Could not discover competing Software Sensor firewall services", timeout=30)
     installed = {parts[0]: parts[1] for line in listing.splitlines() if len(parts := line.split()) >= 2}
     for unit in ("ufw.service", "firewalld.service"):
         if unit not in installed:

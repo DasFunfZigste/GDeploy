@@ -231,11 +231,94 @@ def test_dedicated_guest_disables_competing_firewall_without_using_fleet_ufw_rul
 
 def test_missing_firewalls_need_no_mutation(monkeypatch):
     monkeypatch.setattr(sensor.shutil, "which", lambda name: None)
-    runner = Mock(return_value="")
-    monkeypatch.setattr(sensor, "run", runner)
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        assert command[:2] == ["systemctl", "list-unit-files"]
+        # Match the observed Ubuntu 24.04 / systemd 255 behavior: explicit
+        # missing names return exit 1, whereas listing all services succeeds.
+        if any(unit in command for unit in ("ufw.service", "firewalld.service")):
+            return NS(returncode=1, stdout=b"", stderr=b"")
+        return NS(returncode=0, stdout=b"ssh.service enabled enabled\nufw-helper.service static -\n", stderr=b"")
+
+    monkeypatch.setattr(sensor.subprocess, "run", run)
     sensor.disable_competing_firewalls()
+    assert len(commands) == 1
+
+
+@pytest.mark.skipif(not sensor.shutil.which("systemctl"), reason="requires Linux systemctl")
+def test_missing_firewalls_with_real_systemctl(monkeypatch, tmp_path):
+    units = tmp_path / "etc/systemd/system"
+    units.mkdir(parents=True)
+    (units / "ssh.service").write_text("[Service]\nExecStart=/bin/true\n")
+    real_run = subprocess.run
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        assert command[:2] == ["systemctl", "list-unit-files"]
+        # Only inspect unit files in the fixture; never contact or modify the
+        # test host's systemd manager or firewall.
+        return real_run([command[0], f"--root={tmp_path}", *command[1:]], **kwargs)
+
+    monkeypatch.setattr(sensor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(sensor.subprocess, "run", run)
+    sensor.disable_competing_firewalls()
+    assert len(commands) == 1
+
+
+@pytest.mark.parametrize("unit,state,action", [
+    ("ufw.service", "enabled", ["disable", "--now"]),
+    ("firewalld.service", "disabled", ["disable", "--now"]),
+    ("firewalld.service", "masked", ["stop"]),
+])
+def test_only_installed_firewall_is_stopped_and_verified(monkeypatch, unit, state, action):
+    monkeypatch.setattr(sensor.shutil, "which", lambda name: None)
+    runner = Mock(side_effect=[
+        NS(returncode=0, stdout=f"ssh.service enabled enabled\n{unit} {state} enabled\n".encode(), stderr=b""),
+        NS(returncode=0, stdout=b"", stderr=b""),
+        NS(returncode=0, stdout=b"inactive\n", stderr=b""),
+    ])
+    monkeypatch.setattr(sensor.subprocess, "run", runner)
+    sensor.disable_competing_firewalls()
+    assert [call.args[0] for call in runner.call_args_list][1:] == [
+        ["systemctl", *action, unit],
+        ["systemctl", "show", unit, "-p", "ActiveState", "--value"],
+    ]
+
+
+@pytest.mark.parametrize("code,stderr", [(1, b""), (1, b"Permission denied"), (4, b"Failed to connect to bus")])
+def test_firewall_discovery_errors_remain_fatal(monkeypatch, capsys, code, stderr):
+    monkeypatch.setattr(sensor.shutil, "which", lambda name: None)
+    runner = Mock(return_value=NS(returncode=code, stdout=b"", stderr=stderr))
+    monkeypatch.setattr(sensor.subprocess, "run", runner)
+    with pytest.raises(sensor.SensorInstallError, match=rf"Could not discover competing Software Sensor firewall services \(exit {code}\)"):
+        sensor.disable_competing_firewalls()
     assert runner.call_count == 1
-    assert runner.call_args.args[0][1] == "list-unit-files"
+    assert stderr.decode() in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(), subprocess.TimeoutExpired("systemctl", 30)])
+def test_firewall_discovery_unavailable_or_timed_out_remains_fatal(monkeypatch, error):
+    monkeypatch.setattr(sensor.shutil, "which", lambda name: None)
+    runner = Mock(side_effect=error)
+    monkeypatch.setattr(sensor.subprocess, "run", runner)
+    with pytest.raises(sensor.SensorInstallError, match="Could not discover competing Software Sensor firewall services; the command was unavailable or timed out"):
+        sensor.disable_competing_firewalls()
+    assert runner.call_count == 1
+
+
+def test_firewall_still_active_after_stop_remains_fatal(monkeypatch):
+    monkeypatch.setattr(sensor.shutil, "which", lambda name: None)
+    runner = Mock(side_effect=[
+        NS(returncode=0, stdout=b"firewalld.service enabled enabled\n", stderr=b""),
+        NS(returncode=0, stdout=b"", stderr=b""),
+        NS(returncode=0, stdout=b"active\n", stderr=b""),
+    ])
+    monkeypatch.setattr(sensor.subprocess, "run", runner)
+    with pytest.raises(sensor.SensorInstallError, match="A competing firewall is still active"):
+        sensor.disable_competing_firewalls()
 
 
 HEALTHY = "Services:\n connection-manager : Ok\n sensor-api : Ok\n sensor-core : Ok\n sensor-operator : Ok\n"

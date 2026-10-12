@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-10-12
+
+### Fixed
+
+- Fix Software Sensor installation stopping with `Could not discover competing Software Sensor firewall services (exit 1)` on minimal Ubuntu 24.04 guests without UFW or firewalld. systemd 255 returns exit 1 when neither explicitly requested unit exists; GDeploy now lists service units and checks the two firewall names in that successful result.
+- Preserve failures for real service-discovery errors, unavailable commands, timeouts and firewalls that remain active. Installed competing firewalls are still stopped before Corelight prepares the dedicated guest.
+- Add subprocess regressions for absent, installed and masked firewalls, discovery failures and active-state verification, plus a Linux check using real `systemctl` against isolated unit files.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the complete data volume and original encryption key. No database migration is required.
+- Updating does not resume failed jobs or reconfigure existing VMs. This discovery failure occurs after the Corelight packages install but before sensor preparation, configuration or Fleet pairing. To replace the failed VM, use **Delete & redeploy** with a fresh pairing token: GDeploy has already recorded the sensor installation as started and conservatively requires a replacement token. Recovery permanently replaces that job's VMs/disks; Fleet sensor records remain administrator-managed.
+- Automated checks do not establish a full licensed sensor deployment on ESXi or successful Fleet pairing; those remain lab acceptance steps.
+
 ## [0.15.4] - 2026-10-09
 
 ### Fixed
