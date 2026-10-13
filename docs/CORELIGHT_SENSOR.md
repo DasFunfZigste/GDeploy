@@ -22,7 +22,7 @@ The default is **4 vCPUs, 16 GiB RAM and a 600 GiB disk**. GDeploy accepts at le
 
 The guest processor must expose **x86-64-v3 or newer** capabilities. An ESXi host's CPU model alone does not prove those features reach the VM, especially with compatibility masks. GDeploy checks guest CPU capabilities before installing the sensor. Machine-learning/anomaly features require at least **8 cores and 32 GB RAM**, and greater traffic volumes may need more resources. Vendor throughput examples are sizing guidance, not a performance guarantee for your host.
 
-Use the supported Ubuntu 24.04 live-server ISO in **Setup → OS installation media**. The sensor role selects the minimal Ubuntu installation. Other selected application roles keep their existing OS installation behavior.
+In **Setup → OS installation media**, select an Ubuntu 24.04 amd64 live-server ISO for the Ubuntu profile, or the standard AlmaLinux 10 x86_64 full DVD for the Alma profile. The sensor role selects the minimal installation on Ubuntu; Alma uses the Kickstart installer described in the [Alma guide](ALMALINUX.md). Other selected application roles use the same saved OS profile with their own application installation steps.
 
 ## Configure and deploy
 
