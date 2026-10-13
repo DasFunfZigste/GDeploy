@@ -56,7 +56,7 @@ The rebuild preserves the existing data volume, account, settings and history. K
 - Data-filesystem capacity and saved ISO usage in Setup, with protected deletion of unused uploaded or ESXi-imported copies.
 - Failed-deployment **delete & redeploy**, with typed confirmation and strict resource ownership checks.
 - Web-app authentication, required replacement of default sign-in credentials, expiring sessions, CSRF protection and sign-in throttling.
-- An expandable **Preview** section below **Deployments**, listing **Alma Linux** and **Proxmox** as planned future work. These are reminders; they are not deployment options yet.
+- An expandable **Preview** section below **Deployments**, listing **Alma Linux**, **Proxmox** and **VM Manager** as planned future work. See the [roadmap](docs/ROADMAP.md) for the planned VM inventory, performance overview and embedded SSH terminal.
 
 Saved deployment profiles are outside this initial scope.
 
@@ -66,7 +66,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The current iteration is **v0.15.5**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.15.5` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
+The current iteration is **v0.15.6**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.15.6` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 

@@ -17,7 +17,7 @@ Record your exact ESXi build, Ubuntu ISO checksum, Splunk version, Elastic versi
 
 ## Readable passwords and planned items
 
-New deployments created with v0.12.1 or later use readable generated OS, Elastic and Splunk passwords. Verify SSH/sudo and application sign-in with their recorded credentials; previously queued/deployed passwords must remain valid. FleetManager still supplies its own temporary password and requires a first-sign-in change. The collapsed **Preview** navigation section lists Alma Linux and Proxmox as future work only, without adding deployment options.
+New deployments created with v0.12.1 or later use readable generated OS, Elastic and Splunk passwords. Verify SSH/sudo and application sign-in with their recorded credentials; previously queued/deployed passwords must remain valid. FleetManager still supplies its own temporary password and requires a first-sign-in change. The collapsed **Preview** navigation section lists Alma Linux, Proxmox and VM Manager as future work only. Expanding it reveals Planned badges and adds no active routes or deployment options. Check keyboard operation and narrow-screen layout.
 
 ## Stop deployment and default port group
 

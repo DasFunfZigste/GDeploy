@@ -4,6 +4,17 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.15.6] - 2026-10-13
+
+### Added
+
+- Add **VM Manager** with a **Planned** badge under the expandable **Preview** navigation section, alongside Alma Linux and Proxmox.
+- Record its planned scope in the bundled roadmap: hypervisor VM inventory, host/VM performance, IP addresses and NICs, and an embedded SSH terminal using saved GDeploy guest credentials or administrator-supplied credentials. This iteration adds the reminder and documentation only; VM management and terminal access remain future work.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser and expand **Preview**. Preserve the complete data volume and original encryption key. No database migration or guest reconfiguration is required.
+
 ## [0.15.5] - 2026-10-12
 
 ### Fixed
