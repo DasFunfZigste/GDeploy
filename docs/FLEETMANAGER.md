@@ -1,16 +1,18 @@
 # Deploy Corelight FleetManager
 
-GDeploy creates a dedicated Ubuntu Server 24.04 LTS amd64 VM for **Corelight Fleet Manager**, labeled **FleetManager** in the UI. Select it in **New deployment** to use this flow: **Choose software → Configure VMs → FleetManager configuration → Review & deploy**. The FleetManager step appears before preflight and reuses saved defaults; complete and save it before continuing to review.
+GDeploy creates a dedicated Ubuntu Server 24.04 LTS amd64 or **AlmaLinux 10 x86_64** VM for **Corelight Fleet Manager**, labeled **FleetManager** in the UI. Choose the OS in **Setup → OS installation media**, then select FleetManager in **New deployment**: **Choose software → Configure VMs → FleetManager configuration → Review & deploy**. The FleetManager step appears before preflight and reuses saved defaults; complete and save it before continuing to review.
 
 **Setup → Software packages → FleetManager** remains available for saving defaults and cleaning up legacy uploaded packages outside a deployment, including at `http://SERVER_LAN_IP:8000/#settings/packages/fleetmanager`. Deployments without FleetManager retain the three-step wizard without the FleetManager configuration step.
 
 This walkthrough follows the **Corelight Fleet Manager User Guide, release 29.2.2, updated October 2, 2026**, especially the requirements and Linux installation instructions on PDF pages 7–15. Use the version of Fleet Manager supported by your Corelight entitlement and Ubuntu release. GDeploy's automated checks do not establish that a particular licensed package works in your environment; complete the [lab acceptance checklist](LAB_VALIDATION.md#fleetmanager-installation) with your actual ESXi host and Corelight license.
 
+**AlmaLinux 10 is experimental for FleetManager.** This guide documents Alma/RHEL 8 and 9, not 10. The requested Alma 10 path uses Corelight's documented `fleet-stable/rpm_any/rpm_any/x86_64` repository with signed repository-metadata verification and dnf. Dependencies, the supplied license and service health must pass; there is no assumed EL10 certification. Use the standard Alma 10 full DVD and an x86-64-v3 guest CPU. See the [Alma setup and test checklist](ALMALINUX.md).
+
 ## Prepare the VM and network
 
 The deployment wizard defaults to **2 vCPUs, 8 GiB RAM and an 80 GiB disk**. GDeploy requires at least **2 vCPUs, 8 GiB RAM and a 60 GiB disk**; allow more for sensor count, retention, backups and offline sensor updates. Corelight's small-fleet guidance covers 1–10 sensors at 2 vCPUs/8 GB, with larger fleets needing additional resources.
 
-GDeploy uses the full VM disk for the Ubuntu installation. `/var` and `/tmp` normally share the root filesystem; they are not separate reserved partitions. Before installing Fleet Manager, the guest check requires at least **30 GiB available at `/var`** and **20 GiB available at `/tmp`**. An ESXi disk allocation alone does not prove those amounts are free inside Ubuntu.
+GDeploy allocates the guest root across the available disk, with bounded boot/swap partitions on Alma. `/var` and `/tmp` normally share the root filesystem; they are not separate reserved partitions. Before installing Fleet Manager, the guest check requires at least **30 GiB available at `/var`** and **20 GiB available at `/tmp`**. An ESXi disk allocation alone does not prove those amounts are free inside the guest.
 
 | Connection | Required access |
 | --- | --- |
@@ -19,9 +21,9 @@ GDeploy uses the full VM disk for the Ubuntu installation. `/var` and `/tmp` nor
 | GDeploy container for version choices | DNS and outbound HTTPS to `pkgrepos.corelight.cloud` and the download destination returned by the repository, which can be CloudFront |
 | Administrator browser to Fleet Manager | HTTPS 443 |
 | Corelight sensor management interfaces to Fleet Manager | TCP 1443, using the shared community string and product identity |
-| Fleet Manager guest | DNS, Ubuntu package mirrors, and HTTPS to `pkgrepos.corelight.cloud` plus the signing-key download destination returned by the repository (which can be CloudFront) |
+| Fleet Manager guest | DNS, Ubuntu or Alma package mirrors, and HTTPS to `pkgrepos.corelight.cloud`, the public Corelight signing-key endpoint and repository download destinations (which can be CloudFront) |
 
-GDeploy installs UFW if needed and adds persistent **443/tcp** and **1443/tcp** allow rules on the FleetManager guest. It preserves UFW enablement, policies, SSH rules and other existing rules. Choose a static address or DHCP reservation. Upstream firewalls must also allow the required traffic. Sensor enrollment, external data feeds, monitoring and backups remain administrator tasks.
+On Ubuntu, GDeploy installs UFW if needed and adds persistent **443/tcp** and **1443/tcp** allow rules, preserving UFW enablement, policies and existing rules. Alma uses firewalld with SSH preserved and both ports opened in the management interface's zone. Choose a static address or DHCP reservation. Upstream firewalls must also allow the traffic. Sensor enrollment, external data feeds, monitoring and backups remain administrator tasks.
 
 ## Gather the required credentials
 
@@ -39,15 +41,15 @@ Setup stores the community string, repository token and PEM encrypted in the exi
 1. Open **New deployment**, select **FleetManager** in **Choose software**, then continue to **Configure VMs**. A fresh deployment starts with no software roles selected.
 2. Set its distinct VM name, CPU, RAM, disk, datastore, port group and DHCP/static settings. Other selected applications keep their own VMs and resources. Continue to **FleetManager configuration**.
 3. Enter the community string and Corelight repository token, and choose the product identity `.pem` file. Existing saved values are reused; leave a secret field blank and omit a replacement PEM to retain them.
-4. Select **Load versions** to fetch the available versions using the token you entered, or the saved token when the field is blank. You can do this before filling in the community string/license or saving the configuration. In the **Version to install** dropdown, choose **Latest available** for the repository candidate at installation time, or select an exact package version from the list. The list includes complete package revisions and epochs, newest first; no version number needs to be typed. Use **Refresh versions** to check again. The same controls appear in Setup defaults.
+4. Select **Load versions** using the entered or saved token, even before supplying the community/license. In **Version to install**, choose **Latest available** or an exact listed version. Ubuntu lists Debian versions; Alma lists complete RPM `epoch:version-release.arch` choices. Each OS's selection is stored separately, so switching installers never reuses a Debian version as an RPM request. Use **Refresh versions** to check again. The same controls appear in Setup defaults.
 5. Select **Save & continue** to validate and save the configuration, then open **Review & deploy**. Review shows the version choice. These settings also become the defaults for future FleetManager deployments.
 6. In **Review & deploy**, select **Run preflight**, review its results, then select **Deploy**. To combine those actions, first check **Start deployment automatically when preflight passes**, then select **Run preflight & deploy**. This optional setting starts unchecked and queues a job only when all checks pass. Saving configuration alone does not run preflight or queue a job. If a later check reports changed or missing configuration, return to the FleetManager step, correct it and run preflight again.
 
 Loading versions reads repository metadata from the GDeploy container; it does not save the draft token or change Setup. Saved online settings trigger a lookup when the panel opens. If lookup fails, the UI shows the error and retains your current selection, including an exact version saved by an earlier release. A saved version missing from a refreshed list remains visible with a warning. Retry loading, choose another listed version, or explicitly select **Latest available**; the app never silently replaces an exact selection.
 
-The new VM installs Ubuntu, obtains the Corelight stable repository signing key over verified HTTPS, configures the authenticated apt repository and installs `corelight-fleet`. For an exact version, it checks availability, installs `corelight-fleet=VERSION` and verifies the installed version. An unavailable version stops installation with a logged error; GDeploy does not substitute another release. The dropdown reports versions available when metadata was fetched. Preflight checks configuration and version syntax; the guest's signed apt checks remain authoritative for availability, dependencies and package installation. Ubuntu and repository access are required from the guest. Saving online settings clears any legacy offline package selections; it does not delete their uploaded files.
+The new VM installs the selected OS, configures Corelight's authenticated repository and installs `corelight-fleet`. Ubuntu uses apt; Alma uses dnf/RPM. For an exact version, the guest checks availability, installs that version and verifies the installed package's complete version. An unavailable version stops with a logged error; GDeploy does not substitute another release. Dropdown results describe availability at lookup time. Preflight checks configuration and syntax; the guest's repository-integrity, dependency and service checks remain authoritative. Saving online settings clears legacy offline package selections without deleting their uploaded files.
 
-Each queued deployment keeps its saved version choice. **Latest available** is resolved to the repository candidate at installation time, so separate deployments may receive different releases. Choosing an exact version controls the initial install without creating an apt hold or preventing later administrator-managed upgrades. Choosing **Latest available** and saving returns future deployments to the latest candidate.
+Each queued deployment keeps its installer profile and the corresponding saved version choice. **Latest available** resolves at installation time, so different deployments may receive different releases. An exact FleetManager version controls the initial install without holding packages or preventing later administrator-managed upgrades. Changing Setup affects future jobs.
 
 Repository metadata and signing-key endpoints can redirect to a download service such as CloudFront. GDeploy follows a bounded chain of HTTPS redirects and verifies TLS at every destination. It sends the repository token only while requests remain on the original origin; after the first origin change, the token is never reattached during that download. Signed download query strings are used for the request but are not logged. HTTP destinations, embedded URL credentials, invalid destinations and excessive redirects are rejected. Downloaded signing-key bytes must pass `gpg --dearmor` before repository trust files are written. The version list does not replace the guest's signed apt verification.
 
@@ -55,7 +57,7 @@ If the original signing-key request returns **HTTP 401**, confirm repository ent
 
 Updating GDeploy fixes the redirect handling for future installation attempts; it does not resume an already failed job or repair an existing VM. **Delete & redeploy** replaces the VM and its disks; use it only when replacement is intended.
 
-The repository remains configured for ordinary package administration:
+On Ubuntu, the repository remains configured for ordinary package administration:
 
 - `/etc/apt/sources.list.d/corelight_fleet-stable.list`
 - `/etc/apt/keyrings/corelight_fleet-stable-archive-keyring.gpg`
@@ -69,6 +71,8 @@ sudo apt-get -o Dpkg::Options::=--force-confold install --only-upgrade corelight
 sudo systemctl is-active corelight-fleetd
 ```
 
+On Alma, the root-readable repository is `/etc/yum.repos.d/corelight_fleet-stable.repo`, with trusted keys under `/etc/pki/rpm-gpg`. Verify the installed choice with `rpm -q --qf '%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' corelight-fleet`. A deliberate later upgrade uses `sudo dnf upgrade corelight-fleet`, after the same vendor backup and compatibility review. Do not print or share the repository file; it contains the customer token.
+
 Review any new vendor configuration requirements after an upgrade. Keep `/etc/corelight-fleetd.conf`, its community string, `/etc/corelight-fleetd.pem` and the Fleet Manager data/backup files. Updating the GDeploy Docker container is separate from upgrading software already installed on a guest.
 
 ## Updating from an offline configuration
@@ -81,9 +85,9 @@ Setup provides cleanup for retained uploads. Only unused app-managed files can b
 
 ## Installation result and first sign-in
 
-GDeploy writes the shared community string into `/etc/corelight-fleetd.conf` and stores the product identity as `/etc/corelight-fleetd.pem`, owned by `corelight-fleetd` with mode **0400**. It configures the UFW allow rules for TCP 443 and 1443, then enables and starts the `corelight-fleetd` service. Completion requires an active service, a working HTTPS endpoint presenting the supplied certificate, and the local sensor port 1443 listening. This does not test a real sensor connection or prove upstream firewall access.
+GDeploy writes the shared community string into `/etc/corelight-fleetd.conf` and stores the product identity as `/etc/corelight-fleetd.pem`, owned by `corelight-fleetd` with mode **0400**. It configures the guest firewall for TCP 443 and 1443, then enables and starts `corelight-fleetd`. Completion requires an active service, a working HTTPS endpoint presenting the supplied certificate, and the local sensor port 1443 listening. This does not test a real sensor connection or prove upstream access.
 
-Open the deployment's **Credentials** panel. The Fleet Manager URL is **`https://VM_IP`**; sign in as **`admin`** with the temporary password created by Fleet Manager and shown there. The panel also reveals the community string captured for that deployment. **Change the administrator password at first sign-in.** Save the new password yourself: GDeploy's original deployment credential record does not track subsequent changes inside Fleet Manager. The separate Ubuntu SSH account remains `gdeploy` with sudo access.
+Open the deployment's **Credentials** panel. The Fleet Manager URL is **`https://VM_IP`**; sign in as **`admin`** with the temporary password shown there. The panel also reveals that deployment's community string. **Change the administrator password at first sign-in.** Save the new password yourself; GDeploy does not track subsequent changes inside Fleet Manager. The separate Linux SSH account remains `gdeploy` with sudo access.
 
 The supplied product identity certificate may not match the VM's IP or the browser's public trust store. Configure an appropriate web certificate through Corelight's supported procedure for normal browser use. GDeploy's local readiness check verifies the exact supplied identity certificate; it does not install browser trust.
 
@@ -91,12 +95,21 @@ Sensor enrollment is a separate administrator step in Fleet Manager. Configure e
 
 ## Existing VM firewall rules
 
-Updating the GDeploy container applies the firewall change to future FleetManager installations. To apply it to an already deployed FleetManager VM, run these commands inside that VM:
+Updating GDeploy applies firewall setup to future installations. For an existing **Ubuntu** FleetManager VM, run:
 
 ```sh
 sudo ufw allow 443/tcp
 sudo ufw allow 1443/tcp
 sudo ufw status verbose
+```
+
+For an Alma VM, find the zone bound to its management interface using `sudo firewall-cmd --get-active-zones`, then replace `MANAGEMENT_ZONE` below with that zone:
+
+```sh
+sudo firewall-cmd --zone=MANAGEMENT_ZONE --permanent --add-port=443/tcp
+sudo firewall-cmd --zone=MANAGEMENT_ZONE --permanent --add-port=1443/tcp
+sudo firewall-cmd --reload
+sudo firewall-cmd --zone=MANAGEMENT_ZONE --list-all
 ```
 
 These commands preserve existing rules and do not enable a currently inactive firewall. Confirm GUI access from an administrator workstation and sensor connectivity from the sensor network; local service health cannot prove the upstream network path.
@@ -109,4 +122,4 @@ These commands preserve existing rules and do not enable a currently inactive fi
 - GDeploy's settings are for new deployments. Changing a token, community string or license in Setup does not rotate the values already installed on a guest or upgrade that guest.
 - For failures, expand **View logs** and inspect the failed stage. **Copy logs** supports HTTP LAN access through a browser copy fallback. If copying is still blocked, copy the selected **Full deployment log** with Ctrl+C (⌘C on Mac), then select **Done copying**. A valid PEM syntax/pair does not guarantee a valid Corelight license. Repository access or package dependency failures must be fixed at their source. **Delete & redeploy** permanently replaces the job's VMs and disks; hiding a record preserves the VM but does not complete failed work.
 
-Live deployment with a customer Corelight license, actual vendor packages, sensor enrollment and ESXi has not been performed as part of this release. Automated API, browser and installer tests cover implementation behavior; the lab checklist records the remaining integration validation.
+Alma 10 live deployment with a customer license, actual RPM packages and ESXi remains lab acceptance work. Automated API, browser and installer tests cover implementation behavior; record actual installed versions, GUI access and sensor enrollment using the lab checklist.

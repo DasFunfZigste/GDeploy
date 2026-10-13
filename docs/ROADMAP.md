@@ -16,10 +16,8 @@ Planned scope:
 
 The first connection method is SSH. Full hypervisor consoles and VM lifecycle controls can be considered separately when this feature is designed.
 
-## Alma Linux
-
-Add Alma Linux as a future operating-system deployment option.
-
 ## Proxmox
 
 Add Proxmox as a future hypervisor integration.
+
+AlmaLinux 10 is available in **Setup → OS installation media** starting with v0.16.0. It is no longer a planned sidebar item. See [the Alma guide](ALMALINUX.md) for installer requirements and experimental Corelight compatibility.

@@ -4,6 +4,7 @@ import hmac
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -256,13 +257,15 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     def settings(request: Request, current=Depends(authenticated)):
         saved = request.app.state.db.settings() or {}
         fleetmanager = request.app.state.fleetmanager.catalog(include_packages=False)
+        media = request.app.state.media.catalog()
         return {
             "host": saved.get("host", ""),
             "username": saved.get("username", ""),
             "verify_tls": True,
             "configured": bool(saved),
             "certificate_trust": request.app.state.certificates.saved(saved["host"]) if saved else None,
-            "iso_configured": request.app.state.media.catalog()["ready"],
+            "iso_configured": media["ready"],
+            "os_profile": media["profile"],
             "ssh_key_count": len(request.app.state.db.ssh_public_keys()),
             "splunk_configured": request.app.state.packages.catalog()["ready"],
             "fleetmanager_configured": fleetmanager["ready"],
@@ -318,7 +321,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.post("/api/settings/fleetmanager/versions")
     def fleetmanager_versions(payload: FleetManagerVersionLookup, request: Request, current=Depends(authenticated)):
-        return request.app.state.fleetmanager.repository_versions(payload.repository_token)
+        return request.app.state.fleetmanager.repository_versions(payload.repository_token, payload.os_profile)
 
     @app.post("/api/settings/fleetmanager/packages/upload")
     async def upload_fleetmanager_package(
@@ -386,11 +389,11 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.put("/api/settings/media")
     def select_media(payload: MediaSelection, request: Request, current=Depends(authenticated)):
-        return request.app.state.media.select(payload.media_id, payload.sha256)
+        return request.app.state.media.select(payload.media_id, payload.sha256, payload.profile)
 
     @app.post("/api/settings/media/upload")
-    async def upload_media(request: Request, filename: str, sha256: str, current=Depends(authenticated)):
-        return await request.app.state.media.upload(request, filename, sha256)
+    async def upload_media(request: Request, filename: str, sha256: str, profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] = "ubuntu-autoinstall", current=Depends(authenticated)):
+        return await request.app.state.media.upload(request, filename, sha256, profile)
 
     @app.get("/api/settings/media/esxi")
     def browse_esxi_media(
@@ -421,7 +424,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         try:
             with request.app.state.service.client(saved) as esxi:
                 return request.app.state.media.import_esxi(
-                    esxi, saved["host"], payload.datastore, payload.path, payload.sha256
+                    esxi, saved["host"], payload.datastore, payload.path, payload.sha256, payload.profile
                 )
         except VMwareError as exc:
             raise MediaError(str(exc)) from None

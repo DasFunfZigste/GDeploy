@@ -97,7 +97,7 @@ def test_fleetmanager_version_picker_loads_repository_options_without_saving_cre
     assert "el('option', {value: ''}, 'Latest available')" in script
     assert "versions.map(version => el('option', {value: version}, version))" in script
     loader = script.split("async function loadVersions()", 1)[1].split("function renderCatalog(", 1)[0]
-    assert "api(`${endpoint}/versions`, {method: 'POST', body: {repository_token: draftToken}})" in loader
+    assert "api(`${endpoint}/versions`, {method: 'POST', body: {repository_token: draftToken, os_profile: versionProfile}})" in loader
     assert "form.reportValidity()" not in loader
     assert "community.value" not in loader and "license.files" not in loader
     assert "method: 'PUT'" not in loader
@@ -108,9 +108,9 @@ def test_fleetmanager_version_picker_loads_repository_options_without_saving_cre
 def test_fleetmanager_ui_saves_and_restores_repository_version_without_offline_inputs(client):
     script = client.get("/static/app.js").text
     panel = script.split("function createFleetManagerPanel(", 1)[1].split("function createSSHAccessPanel(", 1)[0]
-    assert "renderVersions(next.online_version || '')" in panel
+    assert "renderVersions(next[versionField()] || '')" in panel
     assert "onlineVersion.disabled = locked" in panel
-    assert "const payload = {mode: 'online', online_version: onlineVersion.value.trim()}" in panel
+    assert "const payload = {mode: 'online', [versionField()]: onlineVersion.value.trim()}" in panel
     assert "fleetmanager-mode" not in panel
     assert "fleetmanager-package-files" not in panel
     assert "fleetmanager-dependencies" not in panel
@@ -156,7 +156,7 @@ def test_fleetmanager_version_is_shown_in_setup_and_preflight_review(client):
     review = script.split("function renderReview(content)", 1)[1].split("const validHostname", 1)[0]
     assert "fleetManagerVersionSummary(fleet)" in review
     assert review.index("id: 'fleetmanager-review'") < review.index("'Preflight checks'")
-    assert "Version: ${catalog.online_version} (exact)." in script
+    assert "Version: ${version} (exact)." in script
     assert "Version: latest available in the repository." in script
     assert "from the selected .deb package" not in script
 

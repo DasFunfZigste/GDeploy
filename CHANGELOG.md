@@ -4,6 +4,27 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-13
+
+### Added
+
+- Add **AlmaLinux 10** as an OS installer in **Setup → OS installation media**, available for OS only, Splunk, Elasticsearch, Kibana, FleetManager and Corelight Software Sensor. Keep browser uploads, mounted server ISOs and ESXi datastore copies. Require the standard x86_64 full DVD, verify its publisher checksum and internal BaseOS/AppStream installation metadata, and retain the chosen installer in each queued deployment.
+- Automate Alma installation with Kickstart, a locked root account, the generated `gdeploy` account with sudo, configured SSH public keys and VMware Tools. Verify a protected installer completion marker, the installed OS/disk and hostname, sudo, SSH and VMware Tools rather than cloud-init. Software Sensor keeps distinct management/monitoring NICs, with no IP configuration on the monitoring NIC.
+- Add native Alma application installers: signed Elastic RPM packages with matching Elasticsearch/Kibana builds and TLS integration; verified Splunk archives with native dependencies; guest firewall configuration preserving SSH access and enforcing SELinux.
+- Add **experimental** AlmaLinux 10 FleetManager and Software Sensor paths with compatibility warnings before preflight, in review, and in deployment logs. Corelight 29.2 documents Alma/RHEL 8/9, not 10. FleetManager uses its documented `rpm_any` repository; Software Sensor intentionally uses the documented **EL 9** and `rpm_any` repositories. License, token, network, preparation, pairing and service-health checks remain required.
+- Load FleetManager **RPM versions** in the version dropdown when Alma is selected. Preserve separate exact Debian and RPM choices, saved secrets and license files. Both operating systems keep Latest available as an option.
+- Remove Alma Linux from **Preview / Planned**. Keep Proxmox and VM Manager as planned items and add an Alma installation and lab-testing guide.
+
+### Fixed
+
+- Verify matching OS media before delete/redeploy can delete VMs or reserve sensor pairing tokens, and retain that verified selection while cleanup runs. Restore matching media in Setup or start a new deployment to switch operating systems.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Select **AlmaLinux 10** and a standard x86_64 DVD ISO in Setup before starting a new deployment. The guest CPU must expose **x86-64-v3** features; boot, minimal, netinstall and x86_64_v2 images are not accepted. ESXi 8.0 U3 uses its RHEL 9 guest-family identifier for Alma 10 VMs.
+- Preserve the complete data volume and original encryption key. Existing media selections and queued Ubuntu jobs retain Ubuntu behavior. Finish active work before upgrading or rolling back; earlier workers cannot install Alma profiles. Updating GDeploy does not change existing guest operating systems, install applications into old VMs, or resume failed jobs.
+- Automated validation covers generated Kickstart, profile persistence and queue isolation, OS readiness, application dispatch, RPM repository metadata, browser workflows and a synthetic BIOS/UEFI ISO remastering regression in Linux CI. Actual DVD boots, licensed Corelight packages, Fleet pairing, SELinux compatibility and application sign-in on standalone ESXi remain lab acceptance steps. Experimental Corelight installation may fail if EL 9 package dependencies or services are incompatible with Alma 10.
+
 ## [0.15.6] - 2026-10-13
 
 ### Added

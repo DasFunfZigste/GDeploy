@@ -1,10 +1,12 @@
 import uuid
+from dataclasses import replace
 
 import pytest
 
 from gdeploy.db import Database
 from gdeploy.models import DeploymentSpec, VMSpec
 from gdeploy.service import DeploymentError, DeploymentService, safe_error
+from test_media_deployments import iso_file
 
 
 def test_topology_and_network_validation(spec):
@@ -36,6 +38,7 @@ def test_recovery_keeps_secrets_and_does_not_repeat_running_jobs(config, spec):
 
 @pytest.mark.parametrize("hidden", [False, True])
 def test_cleanup_failure_never_queues_replacement(config, spec, monkeypatch, hidden):
+    config = replace(config, ubuntu_sha256=iso_file(config.ubuntu_iso, b"Ubuntu test installer"))
     db = Database(config.data_dir, config.secret_key)
     id_ = str(uuid.uuid4())
     db.create(id_, spec, {"esxi": {"host": "esxi", "username": "root", "password": "secret"}})
@@ -140,6 +143,7 @@ def test_retained_address_is_rejected_even_with_new_name(config, spec, monkeypat
 def test_job_ownership_persistence_success_and_cleanup(config, spec, monkeypatch):
     import gdeploy.service as module
 
+    config = replace(config, ubuntu_sha256=iso_file(config.ubuntu_iso, b"Ubuntu test installer"))
     db = Database(config.data_dir, config.secret_key)
     created = []
     calls = []

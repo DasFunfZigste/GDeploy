@@ -1,6 +1,6 @@
 # Install GDeploy on Ubuntu 24.04
 
-This guide accompanies **GDeploy 0.15.6**. Use an Ubuntu Server **24.04 LTS, amd64/x86_64** host and a user that can run `sudo`. The commands install and update the current default branch of the public repository. GDeploy provisions VMs on standalone ESXi 8.0 Update 3.
+This guide accompanies **GDeploy 0.16.0**. Use an Ubuntu Server **24.04 LTS, amd64/x86_64** host and a user that can run `sudo`. The commands install and update the current default branch of the public repository. GDeploy provisions VMs on standalone ESXi 8.0 Update 3.
 
 ## Install Docker and Git
 
@@ -29,11 +29,11 @@ Browse to **`http://YOUR_SERVER_IP:8000`**, replacing `YOUR_SERVER_IP` with the 
 
 On a fresh installation, sign in with **username `admin` and password `admin`**. Change these credentials when prompted, then sign in again with your new account.
 
-Open **Setup** to configure the ESXi connection and OS installation media. The supported guest installer is Ubuntu Server 24.04 LTS amd64 live-server. Then choose **New deployment**.
+Open **Setup** to configure ESXi and OS installation media. Choose **Ubuntu Server 24.04** with an amd64 live-server ISO, or **AlmaLinux 10** with the standard x86_64 full DVD ISO. Alma needs x86-64-v3 CPU features; its Corelight roles are experimental. Then choose **New deployment**. See the [Alma setup and testing guide](https://github.com/DasFunfZigste/GDeploy/blob/v0.16.0/docs/ALMALINUX.md) for details.
 
 ## Update GDeploy
 
-Run these commands from the **same clone** when you want to test the updated app:
+Finish or resolve active deployments, then run these commands from the **same clone**:
 
 ```sh
 cd ~/GDeploy
@@ -43,4 +43,4 @@ sudo docker compose up -d --build --wait
 
 This rebuilds the image and replaces the container while preserving the existing data volume, account, settings and deployment history. Keep your existing `.env` and `media/` directory. Refresh the browser afterward.
 
-For logs, media/software setup, networking or backups, use the [operations reference](https://github.com/DasFunfZigste/GDeploy/blob/v0.15.6/docs/OPERATIONS.md). Release versions and changelogs are on [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases).
+For logs, media/software setup, networking or backups, use the [operations reference](https://github.com/DasFunfZigste/GDeploy/blob/v0.16.0/docs/OPERATIONS.md). Release versions and changelogs are on [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases).

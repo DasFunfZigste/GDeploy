@@ -12,12 +12,13 @@ from pathlib import Path, PurePosixPath
 
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
+from .os_profiles import ALMA10, PROFILES, UBUNTU
 
 
 MAX_UPLOAD_BYTES = 16 * 1024**3
 FREE_SPACE_RESERVE = 64 * 1024**2
 CHUNK_BYTES = 1024**2
-PROFILE = "ubuntu-autoinstall"
+PROFILE = UBUNTU
 CHECKSUM = re.compile(r"[0-9a-f]{64}\Z")
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class MediaManager:
     def _server_id(path):
         return "server_" + hashlib.sha256(str(path).encode()).hexdigest()
 
-    def _snapshot(self, path, *, name=None, source="server", sha256="", media_id=None):
+    def _snapshot(self, path, *, name=None, source="server", sha256="", media_id=None, profile=PROFILE):
         info = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or path.is_symlink():
             raise MediaError("The selected OS ISO must be a regular file, not a symbolic link.")
@@ -97,7 +98,7 @@ class MediaManager:
             "path": str(path),
             "name": name or path.name,
             "sha256": sha256,
-            "profile": PROFILE,
+            "profile": profile,
             "size_bytes": info.st_size,
             "mtime_ns": info.st_mtime_ns,
             "source": source,
@@ -105,7 +106,7 @@ class MediaManager:
 
     def _path(self, snapshot):
         """Validate paths again when queued jobs use their saved media snapshot."""
-        if not isinstance(snapshot, dict) or snapshot.get("profile") != PROFILE:
+        if not isinstance(snapshot, dict) or snapshot.get("profile") not in PROFILES:
             raise MediaError("Select a supported OS ISO in Setup before deploying.")
         path = Path(snapshot.get("path", ""))
         source = snapshot.get("source")
@@ -143,7 +144,26 @@ class MediaManager:
         path = self._path(snapshot)
         expected = _checksum(snapshot.get("sha256"))
         self._verify_iso(path, expected)
+        self._verify_profile(path, snapshot["profile"])
         return path
+
+    def _verify_profile(self, path, profile):
+        if profile not in PROFILES:
+            raise MediaError("Choose Ubuntu Server 24.04 or AlmaLinux 10 as the OS installer.")
+        if profile == ALMA10:
+            from .alma_guest import validate_install_iso
+            from .guest import GuestError
+
+            try:
+                before = path.stat(follow_symlinks=False)
+                validate_install_iso(path, workspace_root=self.config.data_dir / "artifacts")
+                after = path.stat(follow_symlinks=False)
+                if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+                ):
+                    raise MediaError("The OS ISO changed while its installer profile was being verified.")
+            except GuestError as exc:
+                raise MediaError(str(exc)) from None
 
     def _verify_iso(self, path, expected):
         try:
@@ -178,7 +198,7 @@ class MediaManager:
         """Return environment-configured media for deployments queued before UI selection existed."""
         path = self.server_dir / self.config.ubuntu_iso.name
         try:
-            return self._snapshot(path, sha256=self.config.ubuntu_sha256)
+            return self._snapshot(path, sha256=self.config.ubuntu_sha256, profile=self.config.os_profile)
         except (OSError, MediaError):
             return None
 
@@ -211,7 +231,8 @@ class MediaManager:
             try:
                 path = self._path(snapshot)
                 current = self._snapshot(
-                    path, name=snapshot["name"], source=snapshot["source"], media_id=snapshot["id"], sha256=snapshot["sha256"]
+                    path, name=snapshot["name"], source=snapshot["source"], media_id=snapshot["id"], sha256=snapshot["sha256"],
+                    profile=snapshot["profile"],
                 )
                 if "origin" in snapshot:
                     current["origin"] = snapshot["origin"]
@@ -229,14 +250,17 @@ class MediaManager:
             chosen = bool(selected and item["id"] == selected["id"])
             checksum = selected.get("sha256", "") if chosen else item["sha256"]
             entry = {
-                key: item[key] for key in ("id", "name", "size_bytes", "source")
+                key: item[key] for key in ("id", "name", "size_bytes", "source", "profile")
             } | {"sha256": checksum, "selected": chosen}
+            if chosen:
+                entry["profile"] = selected["profile"]
             if "origin" in item:
                 entry["origin"] = item["origin"]
             items.append(entry)
         return {
             "items": items, "selected": selected, "ready": ready,
-            "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": PROFILE,
+            "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": selected.get("profile", PROFILE) if selected else PROFILE,
+            "profiles": [{"id": key, **value} for key, value in PROFILES.items()],
             "has_saved_selection": saved is not None,
         }
 
@@ -343,19 +367,25 @@ class MediaManager:
             raise MediaError("That managed OS ISO no longer exists. Refresh the storage list.", 404)
         return self.storage()
 
-    def select(self, media_id, sha256):
+    def select(self, media_id, sha256, profile=None):
         checksum = _checksum(sha256)
         candidate = next((item for item in self._files() if item["id"] == media_id), None)
         if candidate is None:
             raise MediaError("That OS ISO is no longer available. Refresh the media list and select it again.", 404)
         candidate["sha256"] = checksum
+        previous = self.selected()
+        candidate["profile"] = profile or (
+            previous["profile"] if previous and previous["id"] == media_id else candidate["profile"]
+        )
         self.validate_snapshot(candidate)
         self.db.set_media_settings(candidate)
         return self.catalog()
 
-    def import_esxi(self, client, host, datastore, remote_path, sha256):
+    def import_esxi(self, client, host, datastore, remote_path, sha256, profile=PROFILE):
         """Copy a shared datastore ISO locally; never mutate the source on ESXi."""
         checksum = _checksum(sha256)
+        if profile not in PROFILES:
+            raise MediaError("Choose a supported OS installer profile.")
         folder = str(PurePosixPath(remote_path).parent)
         listing = client.browse_iso_media(datastore, "" if folder == "." else folder)
         candidate = next((item for item in listing["files"] if item["path"] == remote_path), None)
@@ -376,12 +406,13 @@ class MediaManager:
             client.download_iso(datastore, remote_path, partial, max_bytes=MAX_UPLOAD_BYTES, expected_size=size)
             owns_partial = True
             self._verify_iso(partial, checksum)
+            self._verify_profile(partial, profile)
             # An exclusive link avoids replacing any existing managed source.
             os.link(partial, final, follow_symlinks=False)
             owns_final = True
             partial.unlink()
             owns_partial = False
-            snapshot = self._snapshot(final, name=name, source="esxi", sha256=checksum, media_id="esxi_" + token)
+            snapshot = self._snapshot(final, name=name, source="esxi", sha256=checksum, media_id="esxi_" + token, profile=profile)
             snapshot["origin"] = {"host": host, "datastore": datastore, "path": remote_path}
             self.db.set_media_settings(snapshot, uploaded=True)
             committed = True
@@ -405,9 +436,11 @@ class MediaManager:
         if shutil.disk_usage(self.upload_dir).free < (length or 0) + FREE_SPACE_RESERVE:
             raise MediaError("Not enough disk space for this OS ISO. Free space in the GDeploy data volume.", 507)
 
-    async def upload(self, request, filename, sha256):
+    async def upload(self, request, filename, sha256, profile=PROFILE):
         filename = _filename(filename)
         checksum = _checksum(sha256)
+        if profile not in PROFILES:
+            raise MediaError("Choose a supported OS installer profile.")
         raw_length = request.headers.get("content-length")
         try:
             length = int(raw_length) if raw_length is not None else None
@@ -454,7 +487,8 @@ class MediaManager:
                     raise MediaError("The upload was incomplete. Try uploading the OS ISO again.")
                 await run_in_threadpool(finish, handle)
             partial.rename(final)
-            snapshot = self._snapshot(final, name=filename, source="upload", sha256=checksum, media_id="upload_" + token)
+            await run_in_threadpool(self._verify_profile, final, profile)
+            snapshot = self._snapshot(final, name=filename, source="upload", sha256=checksum, media_id="upload_" + token, profile=profile)
             self.db.set_media_settings(snapshot, uploaded=True)
             committed = True
             return self.catalog()

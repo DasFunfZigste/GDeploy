@@ -499,7 +499,7 @@ def assert_replacement_token(ui, previous, token):
     assert new_id != previous["id"]
     replacement = ui.db.get(new_id, private=True)
     assert replacement["parent_id"] == previous["id"]
-    assert replacement["spec"] == previous["spec"]
+    assert replacement["spec"] == {**previous["spec"], "os_profile": previous["spec"].get("os_profile", "ubuntu-autoinstall")}
     assert replacement["secrets"]["corelight_sensor"]["pairing_token"] == token
     assert ui.db.get(previous["id"])["status"] == "reverted"
     public = ui.page.request.get(ui.base + "/api/deployments/" + new_id).text()

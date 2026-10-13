@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bootstrap import Credentials, hash_password, resolve_credentials, validate_credentials, verify_password
+from .os_profiles import PROFILES, UBUNTU
 
 __all__ = ["Config", "hash_password", "verify_password"]
 
@@ -22,9 +23,12 @@ class Config:
     splunk_sha256: str = ""
     session_hours: int = 8
     os_timeout: int = 3600
+    os_profile: str = UBUNTU
 
     def __post_init__(self):
         validate_credentials(Credentials(self.secret_key, self.admin_password_hash, self.admin_username))
+        if self.os_profile not in PROFILES:
+            raise ValueError("GDEPLOY_OS_PROFILE must be ubuntu-autoinstall or alma10-kickstart.")
 
     @classmethod
     def from_env(cls):
@@ -43,6 +47,7 @@ class Config:
             cookie_secure=os.getenv("GDEPLOY_COOKIE_SECURE", "true").lower() == "true",
             ubuntu_iso=Path(os.getenv("GDEPLOY_OS_ISO") or os.getenv("GDEPLOY_UBUNTU_ISO", "/media/ubuntu.iso")),
             ubuntu_sha256=(os.getenv("GDEPLOY_OS_SHA256") or os.getenv("GDEPLOY_UBUNTU_SHA256", "")).strip().lower(),
+            os_profile=os.getenv("GDEPLOY_OS_PROFILE", UBUNTU),
             splunk_package=Path(os.getenv("GDEPLOY_SPLUNK_PACKAGE", "/media/splunk.tgz")),
             splunk_sha256=os.getenv("GDEPLOY_SPLUNK_SHA256", "").lower(),
             os_timeout=int(os.getenv("GDEPLOY_OS_TIMEOUT", "3600")),

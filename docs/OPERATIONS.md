@@ -1,6 +1,6 @@
 # GDeploy operations and reference
 
-Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers optional network settings, account recovery, installation media, software configuration, storage, backups and advanced launch methods for **GDeploy 0.11.1**. Commands for source installations assume the same clone at `~/GDeploy` and use `sudo docker`; users already authorized to run Docker directly may omit `sudo`.
+Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers network settings, accounts, media, software, storage, backups and advanced launch methods for **GDeploy 0.16.0**. Commands assume the same clone at `~/GDeploy` and use `sudo docker`; users authorized to run Docker directly may omit `sudo`. New guests can use Ubuntu 24.04 or AlmaLinux 10; see the [Alma setup and testing guide](ALMALINUX.md).
 
 - [Network binding](#optional-restrict-the-bind-address-or-change-the-port) and [HTTPS/SSH access](#https-and-optional-ssh-access)
 - [Account setup](#complete-the-first-sign-in) and [startup recovery](#fix-an-existing-source-checkout-that-cannot-start)
@@ -82,7 +82,7 @@ LAN access works with the default binding. For HTTPS access, put the app behind 
 
 On the Ubuntu server, working in `~/GDeploy`:
 
-1. Obtain the supported **Ubuntu Server 24.04 LTS amd64 live-server ISO** from [Ubuntu's official release directory](https://releases.ubuntu.com/24.04/), or use your existing copy on an ESXi datastore. Verify the publisher checksum using Ubuntu's [verification instructions](https://ubuntu.com/tutorials/how-to-verify-ubuntu). Keep the verified SHA-256 value for Setup.
+1. Obtain **Ubuntu Server 24.04 LTS amd64 live-server** media from [Ubuntu's official release directory](https://releases.ubuntu.com/24.04/), or **AlmaLinux 10 standard x86_64 full DVD** from [AlmaLinux](https://almalinux.org/get-almalinux/), or use an existing ESXi copy. Verify the publisher checksum using [Ubuntu's instructions](https://ubuntu.com/tutorials/how-to-verify-ubuntu) or [Alma's installation guide](https://wiki.almalinux.org/documentation/installation-guide.html). Keep its verified SHA-256 for Setup. Alma requires x86-64-v3 CPU features and excludes boot/minimal/netinstall/live and x86_64_v2 media.
 2. Choose an existing ESXi ISO through Setup's datastore browser, upload it from your computer after sign-in, or copy it into the GDeploy server's **`media/`** directory for the server picker. An `.iso` filename such as `os.iso` is suitable; no specific name is required for the picker.
 3. To deploy Splunk, obtain your licensed **Splunk Enterprise Linux x86_64 `.tgz`** from [Splunk](https://www.splunk.com/en_us/download/splunk-enterprise.html) and its publisher SHA-512 checksum. Splunk publishes that value at the package's official download URL with `.sha512` appended; see [Configure the Splunk package](#configure-the-splunk-package) for the steps. An existing verified publisher SHA-256 is also supported. Upload the package through **Setup → Software packages** after sign-in, or copy it to **`media/`** for the server picker. Keep its vendor filename if desired; renaming it to `splunk.tgz` is unnecessary. GDeploy does not download the package for you or provide a license.
 4. To deploy **Corelight FleetManager**, obtain its product identity `.pem` from Corelight and choose a strong shared community string. Installation uses the online repository and requires the customer repository token from [Corelight Cloud](https://my.corelight.cloud/) under **Downloads → Fleet Manager**. Keep the private PEM out of the server media directory and select it through the dedicated license field. See [Configure FleetManager](#configure-fleetmanager) below.
@@ -131,7 +131,7 @@ The settings API requires `verify_tls=true`. Connections also verify TLS when ol
 
 Open **Setup** in the main navigation, then select the **OS installation media** tab at the top. If an ESXi host is configured and no ISO is ready, Setup opens this tab automatically. You can also go directly to `http://SERVER_LAN_IP:8000/#settings/media`, replacing the server address and port as needed.
 
-Choose the source that matches where your ISO is stored:
+First choose **OS installer** to match your ISO: **Ubuntu Server 24.04 LTS · autoinstall** or **AlmaLinux 10 · Kickstart**. Every VM in a new deployment uses that saved installer. Then choose the source:
 
 | Source | What to do | Where GDeploy uses it |
 | --- | --- | --- |
@@ -145,18 +145,19 @@ For **ESXi datastore**, first save the host credentials and establish certificat
 
 ESXi imports and browser uploads accept ISOs up to **16 GiB**. The GDeploy data volume needs enough free space for the complete copy, plus temporary remastering space when deploying. GDeploy prepares a separate unattended-install ISO from the local copy. The original ESXi ISO is never modified or deleted, and a completed copy remains reusable after restarting GDeploy. Its origin host, datastore and path are retained with the media details.
 
-The current unattended installer supports **Ubuntu Server 24.04 LTS amd64 live-server** media. A matching checksum verifies the file's integrity; it does not make an unsupported installer compatible. Uploaded/imported copies persist under `/data/media`, so back them up with the complete data volume. Server-mounted ISOs remain in your `media/` directory. Changing the selection needs no container restart.
+Ubuntu uses **24.04 LTS amd64 live-server** media. Alma uses the standard **10 x86_64 full DVD**, with its internal release, architecture, kernel/initrd, stage2 and local BaseOS/AppStream repositories checked before saving and again in preflight. A checksum alone does not make an incompatible installer supported. Alma's Corelight roles are experimental because the supplied vendor guide covers Alma/RHEL 8 and 9. Uploaded/imported copies persist in `/data/media`; back them up with the complete volume. Server ISOs remain in `media/`. No container restart is needed.
 
-Queued and running deployments retain the local ISO path and checksum selected when they were created. Keep those local files present and unchanged until the jobs finish; a later Setup selection applies to future jobs. After an ESXi import completes, changing or removing the original datastore ISO does not change the saved local copy. **Delete & redeploy** creates a new job with the current media selection.
+Queued and running deployments retain the local ISO path, checksum and **installer profile** captured when created. Existing Ubuntu jobs keep Ubuntu even after Setup switches to Alma; queued Alma jobs likewise keep Alma. Keep their files present and unchanged until completion. Later selections affect future jobs. A stale wizard must be reopened and checked again. An ESXi source change does not change an already imported copy. **Delete & redeploy** uses the current media selection.
 
 Existing environment-configured media remains available when there is no saved Setup selection. Preferred names are `GDEPLOY_OS_ISO` and `GDEPLOY_OS_SHA256`; legacy `GDEPLOY_UBUNTU_ISO` and `GDEPLOY_UBUNTU_SHA256` continue to work. For example, a manual configuration can use:
 
 ```dotenv
 GDEPLOY_OS_ISO=/media/os.iso
 GDEPLOY_OS_SHA256=YOUR_PUBLISHER_VERIFIED_SHA256
+GDEPLOY_OS_PROFILE=ubuntu-autoinstall
 ```
 
-Use a real 64-character SHA-256 value and recreate the container to apply environment changes. A saved Setup choice takes precedence over environment media settings. The compatible default path remains `/media/ubuntu.iso` when no ISO path is configured.
+Use a real 64-character SHA-256 and recreate the container for environment changes. For Alma, set `GDEPLOY_OS_PROFILE=alma10-kickstart` and supply its full DVD path/checksum. Setup overrides this fallback. The compatible default profile/path remain `ubuntu-autoinstall` and `/media/ubuntu.iso`; legacy `GDEPLOY_UBUNTU_*` values still work.
 
 ### Manage storage and saved ISOs
 
@@ -190,7 +191,7 @@ Open **Setup → Software packages**, or `http://SERVER_LAN_IP:8000/#settings/pa
 
 1. Choose **Upload a package** to select the licensed Linux x86_64 `.tgz` on your computer, or **GDeploy server** to select an existing `.tgz` from the read-only server media directory. Vendor filenames are supported.
 2. Paste the publisher's checksum into **Publisher checksum (SHA-512 or SHA-256)**. Use Splunk's **SHA-512** value (128 hexadecimal characters) or an existing verified **SHA-256** value (64 hexadecimal characters). GDeploy recognizes the algorithm from the length.
-3. Select **Upload & use package** or **Use selected package**. GDeploy verifies the bytes and checks the archive's paths and expected Splunk Enterprise x86_64 binaries before saving. A rejected checksum or archive keeps the previous selection. The package must be compatible with the supported Ubuntu guest; archive validation does not replace testing that particular Splunk version.
+3. Select **Upload & use package** or **Use selected package**. GDeploy verifies bytes and expected Splunk Enterprise x86_64 binaries before saving. A rejected checksum or archive keeps the prior selection. Choose a Splunk version compatible with the selected Ubuntu or Alma guest; archive validation does not establish that licensed version's OS compatibility.
 
 To get Splunk's publisher checksum, copy the exact direct download URL for your chosen `.tgz` from Splunk's official download page. Open that URL in a browser with **`.sha512` appended**: a URL ending in `.tgz` becomes `.tgz.sha512`. Copy only the **128 hexadecimal characters** from the checksum file into GDeploy, without the filename or the rest of the line. These are [Splunk's documented checksum instructions](https://help.splunk.com/en/splunk-enterprise/administer/install-and-upgrade/10.4/secure-your-splunk-enterprise-installation/install-splunk-enterprise-securely). You do not need to calculate a checksum yourself: GDeploy hashes the uploaded or selected package and compares it with the publisher's value. A hash calculated from an unverified download alone would not verify its source.
 
@@ -222,11 +223,11 @@ FleetManager uses the online Corelight repository. It receives a separate VM wit
 3. Select **Load versions** using the entered or saved token, then choose **Latest available** or an exact version from **Version to install**. Use **Refresh versions** to update the list. Loading choices does not save the token or other draft changes; failed lookups retain the current selection.
 4. Select **Save & continue**. In **Review & deploy**, run preflight, review its results, then deploy. To combine those actions, first check **Start deployment automatically when preflight passes** and select **Run preflight & deploy**. Saving configuration alone never starts deployment.
 
-The GDeploy container needs outbound HTTPS to `pkgrepos.corelight.cloud` and its download destinations, which can include CloudFront, for version lookup. The VM separately needs Ubuntu mirrors and Corelight repository access. GDeploy configures signed apt, installs the requested `corelight-fleet` version and retains the repository for later administration. The guest rechecks availability, dependencies and integrity; an unavailable exact version fails without substitution. Version selection creates no apt hold and does not upgrade existing VMs.
+The container needs HTTPS to `pkgrepos.corelight.cloud` and its download destinations for lookup; the guest separately needs OS/Corelight repositories. Ubuntu lists/installs Debian versions through apt. Alma lists/installs RPM choices through the documented `fleet-stable/rpm_any` repository; its Alma 10 path is experimental. The two exact version choices are stored separately. Availability, dependencies and integrity are rechecked in the guest; an unavailable exact version fails without substitution. Selection adds no hold or automatic guest upgrade.
 
 The PEM license is limited to **64 KiB** and must contain a currently valid product identity certificate and matching unencrypted private key. If a chain is included, the matching leaf certificate must come first. GDeploy validates the structure and pair; Fleet Manager validates the Corelight entitlement. Secrets are encrypted, and ordinary responses expose only saved flags and license metadata.
 
-On the new VM, GDeploy writes `/etc/corelight-fleetd.conf` and `/etc/corelight-fleetd.pem`, adds UFW allow rules for **443/tcp** and **1443/tcp**, starts `corelight-fleetd`, and checks the HTTPS and sensor listeners. Existing UFW enablement, policies, SSH access rules and other rules are preserved. Upstream network firewalls still need to permit GUI/sensor traffic. Open **Credentials** for the temporary **`admin`** password, saved community string and `https://VM_IP`; **change the administrator password at first sign-in**.
+GDeploy writes `/etc/corelight-fleetd.conf` and `/etc/corelight-fleetd.pem`, opens **443/tcp** and **1443/tcp** through Ubuntu UFW or Alma firewalld, starts `corelight-fleetd` and checks both listeners. SSH access is retained. Upstream firewalls still need to permit GUI/sensor traffic. Open **Credentials** for the temporary **`admin`** password, saved community string and `https://VM_IP`; **change the administrator password at first sign-in**.
 
 Offline installation and new `.deb` uploads have been removed. Older offline defaults retain their community string and license; save a repository token and online version choice before deploying. Previously queued offline jobs stop validation with guidance rather than switching installation sources. Existing VMs, credentials and history are preserved. Setup retains cleanup for legacy uploads under `/data/fleetmanager-packages`; selected and active-reference files remain protected, and server-mounted files are managed on the host.
 
@@ -234,7 +235,7 @@ Back up the complete data volume and encryption key. See the [FleetManager walkt
 
 ### Configure Corelight Software Sensor
 
-Select **Corelight Software Sensor** for a dedicated minimal Ubuntu 24.04 VM with two VMXNET3 adapters. Defaults are **4 vCPUs, 16 GiB RAM and a 600 GiB disk**. Use SSD-backed storage and dedicated host capacity. The management NIC needs a static or reserved DHCP address. Select a monitoring port group for the second NIC, which receives no IP, DHCP or default route. Configure the traffic mirror/tap outside GDeploy.
+Select **Corelight Software Sensor** for a dedicated Ubuntu 24.04 or experimental Alma 10 VM with two VMXNET3 adapters. Alma deliberately uses the documented **EL9** and **rpm_any** sensor repositories. Defaults are **4 vCPUs, 16 GiB RAM and a 600 GiB disk**; use SSD storage and dedicated host capacity. Management needs static or reserved DHCP IPv4. Monitoring receives no IP, DHCP, IPv6 RA or default route. Configure traffic mirroring/tapping separately. See [Alma role tests](ALMALINUX.md#test-each-role).
 
 After **Configure VMs**, complete **Sensor configuration** with the Software Sensor repository token, Fleet community string, required **sensor license key**, pairing URL, server SSL name and permitted sensor API network. Obtain a fresh pairing token from **Fleet Manager → Sensors → + New Sensor → corelightctl**, and enter it for this deployment. Common encrypted defaults are in **Setup → Software packages → Corelight Software Sensor**; pairing tokens are never shared defaults. A FleetManager `.pem` is not the sensor license key.
 
@@ -270,9 +271,9 @@ The OS username is **`gdeploy`** with a different generated password per VM. The
 
 New OS, Elasticsearch/Kibana and Splunk passwords use 40 cryptographically random characters, excluding common lookalikes such as I/i/L/l/1 and O/o/0, plus ambiguous punctuation. This applies when a new or replacement deployment is queued; existing VM passwords and queued snapshots stay unchanged. User-entered passwords are not restricted by this generator. FleetManager generates its own temporary administrator password, which must be changed at first sign-in.
 
-The navigation's expandable **Preview** section lists **Alma Linux**, **Proxmox** and **VM Manager** as planned future work. VM Manager is planned to show hypervisor VM inventory, performance, IP addresses and NICs, with an embedded SSH terminal using GDeploy's saved guest credentials or credentials supplied by the administrator. See the [roadmap](ROADMAP.md) for scope; these entries remain reminders rather than active features.
+The navigation's expandable **Preview** section lists **Proxmox** and **VM Manager** as planned future work. VM Manager is planned to show hypervisor VM inventory, performance, IP addresses and NICs, with an embedded SSH terminal using GDeploy's saved guest credentials or credentials supplied by the administrator. See the [roadmap](ROADMAP.md) for scope; these entries remain reminders rather than active features.
 
-The Docker host needs access to ESXi HTTPS **443** and guest SSH **22**. Ordinary installations need working DNS and Ubuntu mirror access; Elastic roles also require the official Elastic package repository. FleetManager additionally needs `pkgrepos.corelight.cloud` and its HTTPS download destinations (which can be CloudFront): allow them from the GDeploy container for the version list and from the guest for installation. Kibana needs access to Elasticsearch HTTPS **9200**; your browser needs access to Kibana **5601**, Splunk Web **8000** or FleetManager **443**. Corelight sensor management interfaces need FleetManager **1443**. GDeploy adds FleetManager guest UFW rules for TCP 443/1443; upstream firewalls and switches remain your responsibility. Prefer static IPs or DHCP reservations for application VMs because Kibana's configuration and Elasticsearch's certificate use Elasticsearch's assigned address.
+The Docker host needs ESXi HTTPS **443** and guest SSH **22**. Application installation needs DNS and OS mirrors; Elastic also needs its official repository. Corelight needs `pkgrepos.corelight.cloud`, its HTTPS download destinations and the public signing-key endpoint. Allow FleetManager version lookup from the container separately from guest installation. Kibana needs Elasticsearch HTTPS **9200**; browsers need Kibana **5601**, Splunk Web **8000** or FleetManager **443**. Sensors need FleetManager **1443**. GDeploy opens guest ports through Ubuntu UFW or Alma firewalld; the dedicated sensor uses its CNI firewall. Upstream firewalls/switches remain your responsibility. Prefer static IPs or reservations because Elastic certificates/configuration use assigned addresses.
 
 The ESXi account and license must permit vSphere API provisioning, datastore uploads and creation/deletion of the deployment's resources. Existing datastore media additionally needs browse and download permission. Inventory access alone does not prove those permissions. Certificate verification uses your approved certificate for that exact endpoint, or normal CA and hostname verification when no certificate is approved.
 
@@ -340,7 +341,22 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from Deployments** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.15.6/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.16.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+
+### Check AlmaLinux readiness after a deployment error
+
+Alma readiness uses its root-owned Kickstart completion marker, an installed Alma 10 disk root, the expected hostname, sudo and running `sshd`/`vmtoolsd`. Ubuntu cloud-init status is not used for Alma. Expand deployment logs first, then check inside the guest:
+
+```sh
+cat /etc/os-release
+hostname
+findmnt -n -o SOURCE,FSTYPE /
+sudo systemctl --no-pager status sshd vmtoolsd
+sudo stat -c '%U %a %n' /var/lib/gdeploy/os-install-complete.json
+sudo cat /var/lib/gdeploy/os-install-complete.json
+```
+
+The marker must belong to root, have mode 0600 and identify the matching Alma installation/hostname. Do not create a marker manually to bypass a failed installer; inspect `/root/gdeploy-kickstart-post.log` and the VM console locally. The post-install log can contain public-key/account settings and should not be pasted without review. A 600 GiB sensor disk needs a growing root with enough actual free space; see the [Alma acceptance checklist](ALMALINUX.md#test-each-role).
 
 ## Optional manual credentials
 
@@ -397,10 +413,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.15.6** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.16.0** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.15.6-deploy.tar.gz`
-- `gdeploy-0.15.6-linux-amd64.image.tar.gz`
+- `gdeploy-0.16.0-deploy.tar.gz`
+- `gdeploy-0.16.0-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -412,12 +428,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.15.6-deploy.tar.gz
-sudo docker load --input gdeploy-0.15.6-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.16.0-deploy.tar.gz
+sudo docker load --input gdeploy-0.16.0-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.15.6` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.16.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
@@ -460,7 +476,7 @@ Common startup issues:
 | FleetManager versions cannot load or refresh | Check the entered or saved repository token and its entitlement, then use **Load versions** or **Refresh versions**. The GDeploy container needs outbound HTTPS to Corelight and its download destination; guest connectivity alone is insufficient. Your current version selection is retained. Loading choices does not save a draft token; save configuration before deployment. |
 | A saved FleetManager version is absent from the refreshed list | The exact selection remains visible with a warning. Choose another listed version or **Latest available**, or retry the lookup. A retained exact selection must still be available when the VM installs it; GDeploy never silently substitutes a different version. |
 | Older FleetManager settings request online configuration | Offline installation is no longer supported. Enter a repository token and save online settings, keeping blank secret fields to retain the community string and license. Existing offline jobs are not converted or resumed. |
-| FleetManager works locally but GUI/sensors cannot connect | Check guest UFW rules for **443/tcp** and **1443/tcp**, plus upstream firewall routing. For VMs deployed before v0.14.0, apply the [existing-VM firewall commands](FLEETMANAGER.md#existing-vm-firewall-rules). |
+| FleetManager works locally but GUI/sensors cannot connect | Check Ubuntu UFW or Alma firewalld rules for **443/tcp** and **1443/tcp**, plus upstream firewall routing. For VMs deployed before v0.14.0, apply the [existing-VM firewall commands](FLEETMANAGER.md#existing-vm-firewall-rules). |
 | FleetManager signing-key download reports a redirect | Update to v0.10.1 or later. The signing-key download supports verified HTTPS redirects, including CloudFront, without forwarding the repository token to a different origin. The guest must reach the destination returned by the repository. A redirect alone does not prove successful authentication or valid key bytes. |
 | FleetManager signing-key request reports HTTP 401 | Save the current token from Corelight Customer Portal → Downloads → Fleet Manager before creating another job. Confirm repository entitlement. A blank token field retains the saved value, and existing jobs retain their queued token. An app update does not resume failed jobs. Share sanitized deployment logs and HTTP status, never the token, PEM or signed download URL. |
 | FleetManager license or service validation fails | Use the customer product identity PEM, with matching leaf certificate/private key and valid dates. Confirm the Corelight entitlement, free guest space under `/var` and `/tmp`, and the `corelight-fleetd` service. Syntax validation alone does not prove the vendor license. |
@@ -473,6 +489,8 @@ Common startup issues:
 | A finished deployment is missing from history | Open **Deployments → Previous deployments** and check the search/status filters. Select **Restore** to return the record to the main list. Hiding retains the VM, credentials and logs. |
 | Copy logs is blocked by the browser | Use the selected **Full deployment log** shown after the automatic copy attempts fail. Press Ctrl+C (⌘C on Mac) or the browser's Copy command, then **Done copying**. The snapshot includes the deployment header and recorded events, even on HTTP LAN access. |
 | Remote browser cannot connect | Check `docker compose port gdeploy 8000` and the server address/port in your URL. Existing `.env` overrides remain in effect; a `127.0.0.1` override accepts only local connections. Edit that value to `0.0.0.0` or a LAN address and recreate the container, or use the optional SSH tunnel. |
+
+Version **0.16.0** adds the Alma installer profile and separate FleetManager RPM version selection without replacing existing encrypted settings, jobs or credentials. Back up the complete data volume with its original encryption key and retain all referenced media. Older/queued Ubuntu work keeps Ubuntu behavior. Finish or resolve active jobs before updating or rolling back; releases before v0.16.0 cannot provision Alma jobs or interpret Alma/RPM settings. Select supported Ubuntu media before rollback and retain the matching backup. App rollback cannot reverse guest changes or undo use of a pairing token. Corelight on Alma 10 remains experimental; see [the Alma guide](ALMALINUX.md).
 
 Version **0.12.0** adds Stop deployment and a saved, host-specific default port group. The new settings table is additive; preserve the complete data volume and encryption key. Finish or resolve active work before updating. Resolve pending stop requests before rollback to a release that does not understand them; older releases ignore the default port group. Updating does not resume failed/interrupted jobs or change networking on existing VMs.
 

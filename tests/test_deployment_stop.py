@@ -452,6 +452,9 @@ def test_stopped_record_allows_explicit_delete_redeploy(worker, monkeypatch):
 
     monkeypatch.setattr(service, "client", lambda settings: Cleanup())
     monkeypatch.setattr(service, "enqueue", lambda *args, **kwargs: {"id": "replacement"})
+    # This state-transition test stubs preparation and replacement creation.
+    monkeypatch.setattr(service.media, "selected", lambda: {"profile": "ubuntu-autoinstall"})
+    monkeypatch.setattr(service.media, "validate_snapshot", lambda snapshot: service.config.ubuntu_iso)
     assert service.redeploy(identifier, "Lab") == {"id": "replacement"}
     assert calls == [identifier] and db.deployment_status(identifier) == "reverted"
 

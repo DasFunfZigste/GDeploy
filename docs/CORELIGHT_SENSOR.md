@@ -1,18 +1,20 @@
 # Deploy Corelight Software Sensor
 
-Select **Corelight Software Sensor** in **New deployment** to create a dedicated Ubuntu Server **24.04 LTS amd64** VM, install the sensor from Corelight's online repository and pair it with an existing Fleet Manager. GDeploy requires a sensor license key before preflight. This release supports Ubuntu 24.04; Debian, other Linux distributions and offline sensor installation are not deployment options.
+Select **Corelight Software Sensor** in **New deployment** to create a dedicated Ubuntu Server **24.04 LTS amd64** or **AlmaLinux 10 x86_64** VM, install from Corelight's online repository and pair it with an existing Fleet Manager. Choose the OS in **Setup → OS installation media**. A sensor license key is required before preflight. Debian and offline installation remain outside this release.
 
 The implementation follows **Corelight Sensor Installation 29.2.1**, PDF pages **120–130** (printed pages 118–128), and the hardware requirements on PDF pages **192–194**. The vendor guide is a reference, not a bundled license or installer. Use packages and licenses covered by your Corelight entitlement.
+
+**AlmaLinux 10 is experimental:** the supplied guide supports Alma/RHEL 8 and 9, not 10. GDeploy deliberately uses the documented **`sensor-stable/el/9/x86_64`** and **`sensor-stable/rpm_any/rpm_any/x86_64`** repositories on the requested Alma 10 lab path. It verifies signed repository metadata, dependencies, resources, licensing, service health and Fleet pairing without assuming an EL10 package exists. The standard full DVD and x86-64-v3 CPU are required. See the [Alma guide](ALMALINUX.md) before testing.
 
 ## Prepare Fleet Manager and your networks
 
 1. Have a working Fleet Manager instance reachable from the new sensor's management network. Keep Fleet Manager at a version that supports the sensor release. Creating a FleetManager VM in the same GDeploy job does not create the sensor's pairing record for you; the pairing information must be available before preflight.
 2. In Fleet Manager, open **Sensors → + New Sensor**, enter a unique sensor name and save. Copy the values from **New Tethered Sensor Setup → corelightctl**: pairing token, URL and server SSL name. The token is unique and is not shown again. Keep it private.
-3. Prepare a **management port group** with a static IPv4 address or a DHCP reservation, DNS and outbound access to Ubuntu/Corelight repositories. GDeploy must reach the guest over SSH TCP **22**. The sensor must reach Fleet Manager at its supplied pairing URL, normally HTTPS TCP **1443**.
+3. Prepare a **management port group** with static or reserved DHCP IPv4, DNS and access to Ubuntu or Alma plus Corelight repositories. GDeploy must reach SSH TCP **22**. The sensor must reach Fleet Manager at its supplied pairing URL, normally HTTPS TCP **1443**.
 4. Prepare a **monitoring port group** that receives the traffic you want to inspect through your tap, SPAN or virtual mirroring configuration. GDeploy connects the second VMXNET3 adapter to this port group with **no IP address, DHCP, IPv6 router advertisements or default route**. It does not change ESXi port-group security, switch mirroring or physical tap configuration. Configure promiscuous-mode handling where your monitoring design requires it.
 5. Allow administrators to reach the sensor API over HTTPS TCP **443**. The sensor's Kubernetes CNI manages guest firewall rules; it must not compete with UFW or firewalld. GDeploy prepares this dedicated sensor guest accordingly and retains the vendor's default SSH access. Upstream network firewalls are managed separately.
 
-The repository token for **Software Sensor** comes from **Corelight Customer Portal → Downloads → Software Sensor**. It is separate from the FleetManager repository token. Both the guest's Ubuntu mirrors and `pkgrepos.corelight.cloud` (including HTTPS download destinations returned by it) must be reachable.
+The **Software Sensor** repository token comes from **Corelight Customer Portal → Downloads → Software Sensor**, separately from the FleetManager token. The guest's OS repositories and `pkgrepos.corelight.cloud`, its download destinations and Corelight's public package-signing-key endpoint must be reachable.
 
 ## VM resources
 
@@ -39,7 +41,7 @@ GDeploy prevents a pairing token already assigned to an unrelated job from being
 
 GDeploy creates two VMXNET3 adapters with distinct MAC addresses selected from VMware's supported manual range (`00:50:56:00:00:00`–`00:50:56:3f:ff:ff`). It excludes addresses already present in the target ESXi host's VM inventory and verifies the created adapters through ESXi before preparing the sensor ISO. This makes both addresses available while the VM is still powered off, including on standalone ESXi hosts that defer automatically generated addresses until first boot. Other deployment roles retain automatic MAC assignment.
 
-These are the virtual adapters' **MAC addresses**, separate from your selected static or DHCP **IP configuration**. Ubuntu's installer matches each adapter by MAC so that management receives the intended IP configuration and monitoring remains without an IP address. This check does not probe the LAN for an unused IP. The deployment logs identify the management and monitoring MACs; use the management MAC for any external DHCP reservation. Each replacement is a new VM and may have new MACs. Inventory checks cover the target host, not every device on a shared LAN.
+These are the virtual adapters' **MAC addresses**, separate from your static or DHCP **IP configuration**. Both installers match adapters by MAC: management receives the intended address and monitoring remains without an IP. Ubuntu uses Netplan; Alma persists NetworkManager profiles and interface names `gdeploymgmt`/`gdeploymon`. This check does not scan the LAN for an unused IP. Logs identify both MACs; use management's MAC for an external DHCP reservation. Replacements may have new MACs. Inventory checks cover the target host.
 
 The VM stays powered off until the MAC-specific ISO is built and attached. GDeploy does not boot an unconfigured sensor just to generate MAC addresses. If ESXi returns missing or invalid adapter data, the error identifies the adapter and reason; a VM-creation or MAC-read failure remains before sensor installation, so the optional-token recovery rules apply. The VM and installation media are recorded for the normal Stop, Hide and Delete & redeploy controls.
 
@@ -47,7 +49,7 @@ The API supports [explicit adapter MAC addresses](https://developer.broadcom.com
 
 The initial VM has disk-only boot configured. Once the ISO is ready, GDeploy adds the installation drive and its boot entry together before powering on. The disk stays first: it falls through to the ISO while empty and boots the installed OS after reboot. If an older release fails at VM creation with `configSpec.bootOptions.bootOrder`, update to **v0.15.2 or later** and use the failed job's recovery flow. This error occurs before Ubuntu or the sensor installer starts.
 
-After Ubuntu and SSH are ready, the guest installer validates resources and networking, configures the signed **sensor-stable** apt repository and installs **corelightctl** and **corelight-sensor**, with their dependencies. It uses the latest repository packages; the installed versions are recorded. Repository authentication is stored in a root-only apt file and remains available for deliberate future administration.
+After the OS and SSH are ready, the installer validates resources/networking and installs **corelightctl** and **corelight-sensor** with dependencies from **sensor-stable**. Ubuntu uses apt; Alma uses dnf with the explicit EL9 and architecture-independent repositories above. The latest available package versions are recorded. Repository authentication stays root-readable in apt configuration or `/etc/yum.repos.d/corelight_sensor-stable.repo`. Never share those files.
 
 GDeploy then disables any installed UFW/firewalld service so the sensor can manage its dedicated guest firewall. Neither firewall needs to be installed. Service-discovery errors and a firewall that remains active still stop provisioning.
 
@@ -57,7 +59,7 @@ Completion requires healthy sensor services, including **sensor-core** and **con
 
 ## After deployment and recovery
 
-- Open the deployment's **Credentials** for the Ubuntu `gdeploy` SSH account and sensor access details. Confirm the sensor appears in Fleet Manager, apply the appropriate Fleet policy and configure export destinations/rules using Corelight's procedures.
+- Open **Credentials** for the Linux `gdeploy` SSH account and sensor access details. Confirm appearance in Fleet Manager, then apply policy and export destinations/rules using Corelight's procedures.
 - Verify traffic arrives on the monitoring interface and reaches the intended analysis/export pipeline. A second NIC connected to a normal port group does not create a traffic mirror by itself.
 - Expand **Deployment logs** for installation and readiness failures. Useful guest commands are `sudo corelightctl sensor status`, `ip -br address` and `ip route`. Do not share `corelightctl.yaml`, repository auth files, license keys, pairing tokens or community strings in support logs.
 - For `Could not discover competing Software Sensor firewall services (exit 1)` on a guest with neither UFW nor firewalld installed, update to **v0.15.5 or later**. Older releases misinterpret systemd 255's empty filtered listing as a discovery failure. The Corelight packages may already be installed, but sensor preparation, configuration and Fleet pairing have not run. Updating does not resume that VM; **Delete & redeploy** requires a fresh pairing token because GDeploy already recorded installation as started.
@@ -67,4 +69,4 @@ Completion requires healthy sensor services, including **sensor-core** and **con
 - If cleanup fails after you supplied a fresh replacement token, retrying with that same token retains the settings validated for that cleanup attempt. A different fresh token uses current Setup settings. Invalid replacement inputs do not discard the pending reservation.
 - Updating GDeploy does not upgrade or reconfigure existing sensors. Follow Corelight's supported backup and upgrade procedure for the sensor software, and keep the complete GDeploy data volume/encryption key and guest backups.
 
-Automated tests cover the configuration flow, secret handling, VM/NIC construction and installer behavior. A full licensed deployment on your ESXi host, actual Fleet pairing and real mirrored traffic require the [lab acceptance checks](LAB_VALIDATION.md#corelight-software-sensor).
+Automated tests cover configuration, secret handling, VM/NIC construction and installer behavior. Alma 10 RPM compatibility, full ESXi boot, Fleet pairing and real mirrored traffic require the [lab acceptance checks](LAB_VALIDATION.md#corelight-software-sensor) and the [Alma test checklist](ALMALINUX.md#test-each-role). Keep the successful Ubuntu path available while validating Alma.

@@ -703,7 +703,9 @@ class ESXiClient:
         config = vim.vm.ConfigSpec(
             name=name,
             annotation=f"GDeploy:{owner_id}",
-            guestId="ubuntu64Guest",
+            # ESXi 8.0 U3 predates an Alma/RHEL 10 guest identifier. Use its
+            # RHEL-family 9 profile with Linux EFI/VMXNET3 for the Alma 10 lab path.
+            guestId="rhel9_64Guest" if spec.get("os_profile") == "alma10-kickstart" else "ubuntu64Guest",
             version="vmx-21",
             firmware="efi",
             numCPUs=spec["cpu"],

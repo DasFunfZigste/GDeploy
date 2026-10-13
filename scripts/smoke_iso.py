@@ -13,10 +13,78 @@ from pathlib import Path
 import yaml
 
 from gdeploy.guest import build_seed_iso, generate_ssh_key
+from gdeploy.alma_guest import BOOT_CONFIGS, DVD_FILES, validate_install_iso
 
 
 def xorriso(*arguments):
     subprocess.run(["xorriso", *map(str, arguments)], check=True, capture_output=True, timeout=120)
+
+
+def alma_smoke(root, automation_key, extra_keys):
+    tree = root / "alma-tree"
+    tree.mkdir()
+    (tree / ".treeinfo").write_text("""[general]
+family = AlmaLinux
+arch = x86_64
+version = 10.0
+[release]
+name = AlmaLinux
+version = 10.0
+[tree]
+arch = x86_64
+[images-x86_64]
+kernel = images/pxeboot/vmlinuz
+initrd = images/pxeboot/initrd.img
+[stage2]
+mainimage = images/install.img
+[variant-BaseOS]
+repository = BaseOS
+[variant-AppStream]
+repository = AppStream
+""")
+    boot = "set timeout=60\nmenuentry 'Installer' {\n linux /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=GDEPLOY_ALMA rd.live.check\n initrd /images/pxeboot/initrd.img\n}\n"
+    for path in DVD_FILES:
+        local = tree / path.lstrip("/")
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text(boot if path in BOOT_CONFIGS else "synthetic DVD repository or installer data")
+        local.chmod(0o444)
+    (tree / "boot/grub2/eltorito.img").write_bytes(b"\0" * 8192)
+    (tree / "images/efiboot.img").write_bytes(b"\0" * (256 * 1024))
+    with (tree / "BaseOS/fixture-payload").open("wb") as payload:
+        payload.truncate(260 * 1024**2)
+    source = root / "alma-source.iso"
+    xorriso("-as", "mkisofs", "-r", "-J", "-V", "GDEPLOY_ALMA", "-o", source,
+            "-b", "boot/grub2/eltorito.img", "-no-emul-boot", "-boot-load-size", "4",
+            "-eltorito-alt-boot", "-e", "images/efiboot.img", "-no-emul-boot", tree)
+    with source.open("rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    assert validate_install_iso(source, workspace_root=root / "alma-validation")["profile"] == "alma10-kickstart"
+    events = []
+    output = root / "artifacts" / "alma-customized.iso"
+    build_seed_iso(source, output, {"name": "alma-sensor", "role": "corelight_sensor", "os_profile": "alma10-kickstart",
+        "ip_mode": "dhcp", "dhcp_reserved": True, "management_mac": "00:50:56:01:02:03", "monitor_mac": "00:50:56:01:02:04"},
+        "gdeploy", "alma-smoke-private-password", automation_key, authorized_ssh_keys=extra_keys,
+        log=lambda text, level: events.append(text))
+    assert output.stat().st_size > 256 * 1024**2
+    assert output.stat().st_mode & 0o777 == 0o600
+    with source.open("rb") as handle:
+        assert hashlib.file_digest(handle, "sha256").hexdigest() == digest
+    for number, path in enumerate(BOOT_CONFIGS):
+        patched = root / f"alma-patched-{number}"
+        xorriso("-osirrox", "on", "-indev", output, "-extract", path, patched)
+        assert "inst.ks=cdrom:/gdeploy.ks" in patched.read_text()
+        assert "ifname=gdeploymon:00:50:56:01:02:04" in patched.read_text()
+        assert "rd.live.check" not in patched.read_text()
+    settings = root / "alma-kickstart"
+    xorriso("-osirrox", "on", "-indev", output, "-extract", "/gdeploy.ks", settings)
+    kickstart = settings.read_text()
+    assert "rootpw --lock" in kickstart and "--grow" in kickstart
+    assert "method=disabled" in kickstart and "os-install-complete.json" in kickstart
+    assert "alma-smoke-private-password" not in kickstart + "\n".join(events)
+    for key in [automation_key, *extra_keys]:
+        assert key in kickstart and key.split()[1] not in "\n".join(events)
+    report = subprocess.run(["xorriso", "-indev", str(output), "-report_el_torito", "plain"], check=True, capture_output=True, text=True)
+    assert "BIOS" in report.stdout + report.stderr and "UEFI" in report.stdout + report.stderr
 
 
 def main():
@@ -80,7 +148,8 @@ def main():
         assert "smoke-password-only" not in "\n".join(events)
         assert settings["identity"]["password"] not in "\n".join(events)
         assert all(key.split()[1] not in "\n".join(events) for key in installed_keys)
-    print("Real xorriso: non-root remastering, read-only source metadata, >256 MiB output, administrator SSH keys, and redacted diagnostics passed.")
+        alma_smoke(root, automation_key, extra_keys)
+    print("Ubuntu and Alma real xorriso: non-root remastering, read-only source metadata, >256 MiB output, administrator SSH keys, and redacted diagnostics passed.")
 
 
 if __name__ == "__main__":

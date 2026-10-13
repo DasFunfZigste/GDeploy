@@ -34,6 +34,7 @@ DEPLOYMENT_FILES = (
     ("docs/LAB_VALIDATION.md", "docs/LAB_VALIDATION.md"),
     ("docs/FLEETMANAGER.md", "docs/FLEETMANAGER.md"),
     ("docs/CORELIGHT_SENSOR.md", "docs/CORELIGHT_SENSOR.md"),
+    ("docs/ALMALINUX.md", "docs/ALMALINUX.md"),
     ("docs/ARCHITECTURE.md", "docs/ARCHITECTURE.md"),
     ("docs/ROADMAP.md", "docs/ROADMAP.md"),
     ("docs/overview.png", "docs/overview.png"),

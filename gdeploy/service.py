@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .certificate_trust import certificate_endpoint
 from .corelight_sensor import CorelightSensorError, CorelightSensorManager
+from .os_profiles import ALMA10, UBUNTU, CORELIGHT_ROLES, CORELIGHT_ALMA_WARNING, profile_name
 from .db import SensorPairingError
 from .guest import GuestConnectionError, GuestSession, build_seed_iso, generate_ssh_key
 from .fleetmanager import FleetManager, FleetManagerError
@@ -119,10 +120,12 @@ class DeploymentService:
         self._wake_event.wait(duration)
         self._check_stop(deployment_id)
 
-    def _guest_session(self, deployment_id, ip, credential):
+    def _guest_session(self, deployment_id, ip, credential, vm=None):
         guest = GuestSession(
             ip, credential["username"], credential["private_key"], credential["password"], credential.get("host_key"),
         )
+        guest.os_profile = (vm or {}).get("os_profile", UBUNTU)
+        guest.expected_hostname = (vm or {}).get("name")
         if callable(getattr(guest, "set_cancellation_hooks", None)):
             guest.set_cancellation_hooks(
                 lambda: self._check_stop(deployment_id), lambda seconds: self._wait(deployment_id, seconds),
@@ -158,15 +161,24 @@ class DeploymentService:
             checks.append({"name": name, "ok": bool(ok), "message": message})
 
         os_media = self.media.selected() if os_media is None else os_media
+        profile = os_media.get("profile", UBUNTU) if isinstance(os_media, dict) else UBUNTU
         iso_size = None
         try:
             if not os_media:
                 raise MediaError("Select and verify an OS ISO in Setup first.")
             source = self.media.validate_snapshot(os_media)
             iso_size = source.stat().st_size
-            check("OS ISO", True, f"{os_media['name']} is available and its SHA-256 matches.")
+            check("OS ISO", True, f"{os_media['name']} is available and its SHA-256 matches. Installer: {profile_name(profile)}.")
         except (MediaError, OSError) as exc:
             check("OS ISO", False, str(exc))
+        if spec.get("os_profile") and spec["os_profile"] != profile:
+            check("OS selection", False, "The saved OS installer changed since this deployment was configured. Reopen the wizard and run preflight again.")
+        if profile == ALMA10:
+            check("AlmaLinux 10 installation", True,
+                  "Full x86_64 DVD installation with Kickstart. The host must expose x86-64-v3 CPU features to the VM; boot/minimal/netinstall ISOs are not supported. SELinux remains enforcing.")
+            if any(vm["role"] in CORELIGHT_ROLES for vm in spec["vms"]):
+                check("Corelight AlmaLinux 10 compatibility", True, CORELIGHT_ALMA_WARNING)
+                checks[-1]["warning"] = True
         if any(vm["role"] == "splunk" for vm in spec["vms"]):
             package = self.packages.selected() if splunk_package is None else splunk_package
             try:
@@ -181,12 +193,12 @@ class DeploymentService:
             fleet = self.fleetmanager.selected() if fleetmanager is None else fleetmanager
             try:
                 self.fleetmanager.validate_snapshot(fleet or {})
-                version = fleet.get("online_version", "")
+                version = fleet.get("online_version_rpm" if profile == ALMA10 else "online_version", "")
                 message = (
                     "Online repository token, community string and license are configured. "
                     f"Requested corelight-fleet version: {version or 'latest available'}. "
                     "Version availability will be checked from the VM during installation. "
-                    "The VM must reach Ubuntu and Corelight repositories during installation."
+                    f"The VM must reach {profile_name(profile)} and Corelight repositories during installation."
                 )
                 check("FleetManager configuration", True, message)
             except (FleetManagerError, OSError) as exc:
@@ -198,7 +210,7 @@ class DeploymentService:
                 self.corelight_sensor.require_unused_token(sensor["pairing_token"], deployment_id=exclude_id, replacement_parent_id=exclude_id)
                 check("Corelight Software Sensor configuration", True,
                       "Repository access, required license, Fleet community string and an eligible pairing token are configured. "
-                      "Use Ubuntu 24.04 Server minimal installation media and SSD storage. The VM must reach Ubuntu/Corelight repositories and Fleet Manager; package availability and sensor health are checked during installation.")
+                      f"Use {profile_name(profile)} installation media and SSD storage. The VM must reach OS/Corelight repositories and Fleet Manager; package availability and sensor health are checked during installation.")
             except CorelightSensorError as exc:
                 check("Corelight Software Sensor configuration", False, str(exc))
                 checks[-1]["action"] = {"label": "Configure Corelight Software Sensor", "href": "#settings/packages/corelight-sensor"}
@@ -324,9 +336,9 @@ class DeploymentService:
             )
         return {"ok": all(item["ok"] for item in checks), "checks": checks}
 
-    def enqueue(self, spec, settings=None, parent_id=None, corelight_sensor=None, *, sensor_replacement=None):
+    def enqueue(self, spec, settings=None, parent_id=None, corelight_sensor=None, *, sensor_replacement=None, os_media=None):
         settings = settings or self.db.settings()
-        os_media = self.media.selected()
+        os_media = self.media.selected() if os_media is None else os_media
         splunk_package = self.packages.selected() if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
         fleetmanager = self.fleetmanager.selected() if any(vm["role"] == "fleetmanager" for vm in spec["vms"]) else None
         sensor = None
@@ -412,7 +424,7 @@ class DeploymentService:
             expected = str(ipaddress.IPv4Interface(vm["address"]).ip) if vm.get("address") else None
             if ip and (not expected or ip == expected):
                 try:
-                    with self._guest_session(deployment_id, ip, credential) as guest:
+                    with self._guest_session(deployment_id, ip, credential, vm) as guest:
                         vm["ip"] = ip
                         credential["host_key"] = guest.host_key
                         # Persist the first authenticated SSH host key before running anything.
@@ -500,6 +512,7 @@ class DeploymentService:
             with self.client(secret_data["esxi"]) as esxi:
                 for vm in vms:
                     self._check_stop(deployment_id)
+                    vm["os_profile"] = os_media.get("profile", UBUNTU) if os_media else UBUNTU
                     credential = secret_data["vm_credentials"][vm["name"]]
                     self.stage(deployment_id, "preparing", f"Preparing unattended OS installation for {vm['name']}")
                     if vm["role"] == "corelight_sensor":
@@ -591,7 +604,7 @@ class DeploymentService:
                     vm["status"] = "installing_software"
                     self.db.update(deployment_id, vms=vms)
                     self._check_stop(deployment_id)
-                    with self._guest_session(deployment_id, vm["ip"], credential) as guest:
+                    with self._guest_session(deployment_id, vm["ip"], credential, vm) as guest:
                         if vm["role"] == "corelight_sensor":
                             # Keep this outside mutable VM/secret snapshots: a
                             # crash, finish(), or cleanup must never erase it.
@@ -652,6 +665,23 @@ class DeploymentService:
         if deployment["status"] not in {"failed", "stopped", "interrupted", "cleanup_failed"}:
             raise DeploymentError("Only failed, stopped or interrupted deployments can be deleted and redeployed.")
         replacement_spec = dict(deployment["spec"])
+        original_media = deployment["secrets"].get("os_media") or {}
+        original_profile = replacement_spec.get("os_profile") or original_media.get("profile") or UBUNTU
+        # Reject a changed or unavailable installer before token reservations or
+        # destructive cleanup. Keep this validated selection even if Setup is
+        # changed while ESXi deletes the original resources.
+        try:
+            selected_media = self.media.selected()
+            if not selected_media or selected_media.get("profile", UBUNTU) != original_profile:
+                raise MediaError("No matching installer is selected.")
+            replacement_media = dict(selected_media)
+            self.media.validate_snapshot(replacement_media)
+        except (MediaError, OSError) as exc:
+            raise DeploymentError(
+                f"Cannot delete and redeploy: restore verified {profile_name(original_profile)} OS media in Setup "
+                "or create a new deployment to switch operating systems. " + str(exc)
+            ) from None
+        replacement_spec["os_profile"] = original_profile
         sensor, sensor_replacement = None, None
         if has_sensor:
             # Validate and reserve the exact token/context before any deletion.
@@ -698,6 +728,7 @@ class DeploymentService:
             self.db.update(deployment_id, resources=[])
             replacement = self.enqueue(
                 replacement_spec, deployment["secrets"]["esxi"], parent_id=deployment_id,
+                os_media=replacement_media,
                 **({"corelight_sensor": sensor, "sensor_replacement": sensor_replacement} if sensor else {}),
             )
             if not sensor_replacement:

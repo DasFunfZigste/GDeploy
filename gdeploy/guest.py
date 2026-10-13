@@ -1,4 +1,4 @@
-"""Ubuntu autoinstall media and SSH application provisioning.
+"""OS installation media and SSH application provisioning.
 
 Secret material is transferred using SFTP, never command arguments. The first
 successful SSH connection uses trust on first use; callers persist ``host_key``
@@ -32,6 +32,7 @@ import yaml
 from passlib.hash import sha512_crypt
 
 from .ssh_keys import SSHKeyError, normalize_ssh_public_keys
+from .os_profiles import ALMA10, PROFILES, UBUNTU, profile_name
 
 
 class GuestError(RuntimeError):
@@ -283,7 +284,14 @@ def build_seed_iso(
     source_iso: Path, output_iso: Path, spec: dict, username: str, password: str, ssh_public_key: str,
     *, authorized_ssh_keys: list[str] | None = None, log: Callable[[str, str], None] | None = None,
 ) -> None:
-    """Replay the original ISO's boot metadata while adding a NoCloud seed."""
+    """Use the deployment's frozen OS profile and preserve original boot metadata."""
+    profile = spec.get("os_profile", UBUNTU)
+    if profile == ALMA10:
+        from .alma_guest import build_install_iso
+        return build_install_iso(source_iso, output_iso, spec, username, password, ssh_public_key,
+                                 authorized_ssh_keys=authorized_ssh_keys, log=log)
+    if profile != UBUNTU:
+        raise GuestError("Unknown OS installer profile; select supported media in Setup.")
     source_iso, output_iso = Path(source_iso), Path(output_iso)
     if not source_iso.is_file() or source_iso.resolve() == output_iso.resolve():
         raise GuestError("A separate readable Ubuntu 24.04 live-server ISO is required.")
@@ -716,7 +724,12 @@ class _PinnedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
 
 
 class GuestSession:
-    def __init__(self, ip: str, username: str, private_key: str, password: str, known_host_key: str | None = None):
+    def __init__(self, ip: str, username: str, private_key: str, password: str, known_host_key: str | None = None,
+                 *, os_profile: str = UBUNTU, expected_hostname: str | None = None):
+        if os_profile not in PROFILES:
+            raise GuestError("Unknown guest OS installer profile.")
+        self.os_profile = os_profile
+        self.expected_hostname = expected_hostname
         self.ip = _ipv4(ip)
         self.username = _safe_text(username, "SSH username")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", self.username):
@@ -915,6 +928,36 @@ class GuestSession:
                 if time.monotonic() + 5 >= deadline:
                     raise
                 self._wait(5)
+        if self.os_profile == ALMA10:
+            from .alma_readiness import PROBE, pending_reason
+            previous = None
+            last_pending = "Kickstart completion has not been verified"
+            while time.monotonic() < deadline:
+                self._check_cancelled()
+                probe = self._exec_result("python3 -c " + shlex.quote(PROBE),
+                    timeout=min(60, max(1, int(deadline - time.monotonic()))), sudo=True)
+                self._check_cancelled()
+                if probe.stderr.strip():
+                    emit_stream("AlmaLinux readiness probe stderr", probe.stderr)
+                if probe.exit_code:
+                    raise GuestError(f"AlmaLinux readiness probe failed (exit {probe.exit_code}); check sudo and guest service logs.")
+                try:
+                    evidence = json.loads(probe.stdout)
+                except json.JSONDecodeError:
+                    raise GuestError("AlmaLinux readiness probe returned invalid JSON; check guest Python and sudo.") from None
+                pending = pending_reason(evidence, self.expected_hostname)
+                if time.monotonic() >= deadline:
+                    break
+                if pending is None:
+                    emit("AlmaLinux OS readiness verified: Kickstart completion, installed disk, hostname, sudo, SSH and VMware Tools checks passed.")
+                    return
+                if pending != previous:
+                    emit("Waiting for AlmaLinux OS readiness: " + pending + ".")
+                    previous = pending
+                last_pending = pending
+                self._wait(min(5, max(0, deadline - time.monotonic())))
+            self._check_cancelled()
+            raise GuestError(f"Timed out verifying AlmaLinux OS readiness: {last_pending}. Check the VM console and deployment logs.")
         previous = None
         previous_evidence = None
         last_pending = "cloud-init has not reported completion"
@@ -1082,8 +1125,16 @@ class GuestSession:
         self._check_cancelled()
         self._secrets.update(value for value in secrets.values() if isinstance(value, str))
         payload: dict = {"ip": self.ip, "secrets": secrets}
+        def application_script(role, ubuntu_script):
+            if self.os_profile != ALMA10:
+                return ubuntu_script
+            from .alma_apps import AlmaInstallError, application_script as rpm_script
+            try:
+                return rpm_script(role)
+            except AlmaInstallError as exc:
+                raise GuestError(str(exc)) from None
         if role == "ubuntu":
-            log("Ubuntu installation verified; no application selected.")
+            log(f"{profile_name(self.os_profile)} installation verified; no application selected.")
             return {"services": []}
         if role == "corelight_sensor":
             from .sensor_guest import SensorInstallError, installer_script, secret_values, validate_snapshot
@@ -1096,8 +1147,14 @@ class GuestSession:
             except SensorInstallError as error:
                 raise GuestError(str(error)) from None
             payload["corelight_sensor"] = snapshot
-            log("Installing Corelight Software Sensor on minimal Ubuntu 24.04, configuring its monitoring interface and Fleet pairing, then verifying sensor services.")
-            result = self._run_script(installer_script(), payload, timeout=5400)
+            log(f"Installing Corelight Software Sensor on {profile_name(self.os_profile)}, configuring its monitoring interface and Fleet pairing, then verifying sensor services.")
+            if self.os_profile == ALMA10:
+                from .alma_corelight import sensor_installer_script
+                script = sensor_installer_script()
+                log("Experimental AlmaLinux 10 Software Sensor: using the documented EL 9 and rpm_any repositories; dependency compatibility and service health must pass.")
+            else:
+                script = installer_script()
+            result = self._run_script(script, payload, timeout=5400)
             if not isinstance(result, dict) or result.get("healthy") is not True or not isinstance(result.get("version"), str) or not result["version"]:
                 raise GuestError("Software Sensor did not report a healthy sensor-core and verified installation result.")
             return {"services": [{
@@ -1123,11 +1180,19 @@ class GuestSession:
                 "mode", "community_string", "repository_token", "license_pem", "license_name", "license_sha256",
             )}
             try:
-                payload["fleetmanager"]["online_version"] = requested_online_version(fleetmanager)
+                if self.os_profile == ALMA10:
+                    from .alma_corelight import fleet_installer_script, requested_rpm_version
+                    payload["fleetmanager"]["online_version_rpm"] = requested_rpm_version({"online_version_rpm": fleetmanager.get("online_version_rpm", "")})
+                    script = fleet_installer_script()
+                else:
+                    payload["fleetmanager"]["online_version"] = requested_online_version(fleetmanager)
+                    script = installer_script()
             except FleetInstallError as error:
                 raise GuestError(str(error)) from None
-            log("Installing Fleet Manager from its repository, applying its product identity license, allowing TCP 443/1443 through UFW, and verifying its services.")
-            result = self._run_script(installer_script(), payload)
+            log("Installing Fleet Manager from its repository, applying its product identity license, allowing TCP 443/1443 through the guest firewall, and verifying its services.")
+            if self.os_profile == ALMA10:
+                log("Experimental AlmaLinux 10 Fleet Manager: using the documented rpm_any repository; dependency compatibility and service health must pass.")
+            result = self._run_script(script, payload)
             if (
                 not isinstance(result, dict) or result.get("username") != "admin"
                 or not isinstance(result.get("password"), str) or not result["password"]
@@ -1144,7 +1209,7 @@ class GuestSession:
             _safe_text(secrets["elastic_password"], "Elasticsearch password")
             payload["config"] = _elasticsearch_config(self.ip)
             log("Installing Elasticsearch 9.x with TLS and authenticated health checks.")
-            result = self._run_script(_ELASTICSEARCH_SCRIPT, payload)
+            result = self._run_script(application_script(role, _ELASTICSEARCH_SCRIPT), payload)
             if not all(result.get(key) for key in ("ip", "ca_pem", "service_token", "version")):
                 raise GuestError("Elasticsearch did not return its TLS integration details.")
             self._secrets.add(result["service_token"])
@@ -1167,7 +1232,7 @@ class GuestSession:
             self._secrets.add(elastic["service_token"])
             payload.update({"elastic": elastic, "config": _kibana_config(self.ip, elastic, secrets)})
             log("Installing matching Kibana version and configuring its authenticated TLS connection to Elasticsearch.")
-            self._run_script(_KIBANA_SCRIPT, payload)
+            self._run_script(application_script(role, _KIBANA_SCRIPT), payload)
             return {
                 "services": [
                     {
@@ -1187,7 +1252,7 @@ class GuestSession:
             payload["package_sha256"] = splunk_sha256
             _validate_splunk_archive(Path(splunk_package))
             log("Installing the supplied Splunk package, enabling HTTPS and its systemd service.")
-            self._run_script(_SPLUNK_SCRIPT, payload, Path(splunk_package))
+            self._run_script(application_script(role, _SPLUNK_SCRIPT), payload, Path(splunk_package))
             return {
                 "services": [
                     {

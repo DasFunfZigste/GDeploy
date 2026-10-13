@@ -2759,6 +2759,9 @@ td {
 .preflight-check.fail>svg {
   color:var(--danger)
 }
+.preflight-check.warning>svg {
+  color: var(--warning);
+}
 .preflight-check strong {
   font-size:10px;
   font-weight:500

@@ -1,5 +1,6 @@
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from passlib.hash import sha512_crypt
 from gdeploy import guest
 from gdeploy.db import Database
 from gdeploy.service import DeploymentService, safe_error
+from test_media_deployments import iso_file
 
 
 @pytest.fixture(scope="module")
@@ -157,6 +159,7 @@ class FakeESXi:
 def make_service(config, monkeypatch, ssh_keys):
     import gdeploy.service as module
 
+    config = replace(config, ubuntu_sha256=iso_file(config.ubuntu_iso, b"Ubuntu test installer"))
     db = Database(config.data_dir, config.secret_key)
     service = DeploymentService(db, config, FakeESXi)
     monkeypatch.setattr(service, "preflight", lambda *a, **kw: {"ok": True, "checks": []})

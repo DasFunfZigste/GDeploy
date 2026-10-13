@@ -10,6 +10,7 @@ from .ssh_keys import MAX_SSH_KEY_BYTES, MAX_SSH_KEYS
 from .corelight_sensor import pairing_token
 
 FLEETMANAGER_VERSION_PATTERN = r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~\-]*"
+FLEETMANAGER_RPM_VERSION_PATTERN = r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+_~^]*-[A-Za-z0-9][A-Za-z0-9.+_~^]*\.(?:x86_64|noarch)"
 FLEETMANAGER_ONLINE_ONLY = (
     "Offline FleetManager installation is no longer supported. Open Setup → Software packages → FleetManager "
     "and save online repository access before creating a new deployment. Existing VMs, credentials and history are retained."
@@ -95,6 +96,7 @@ class DeploymentDefaultsSettings(CertificateHost):
 class MediaSelection(StrictModel):
     media_id: str = Field(min_length=1, max_length=1024)
     sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
+    profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] | None = None
 
 
 class SplunkPackageSelection(StrictModel):
@@ -114,6 +116,7 @@ class ESXiMediaSelection(CertificateHost):
     datastore: str = Field(min_length=1, max_length=128)
     path: str = Field(min_length=1, max_length=2048)
     sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
+    profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] = "ubuntu-autoinstall"
 
 
 class FleetManagerSettings(StrictModel):
@@ -122,6 +125,7 @@ class FleetManagerSettings(StrictModel):
     community_string: str = Field(default="", max_length=4096)
     repository_token: str = Field(default="", max_length=4096)
     online_version: str = Field(default="", max_length=128)
+    online_version_rpm: str = Field(default="", max_length=128)
     license_pem: str = Field(default="", max_length=65536)
     license_name: str = Field(default="", max_length=200)
 
@@ -136,12 +140,15 @@ class FleetManagerSettings(StrictModel):
     def validate_online_version(self):
         if self.online_version and not re.fullmatch(FLEETMANAGER_VERSION_PATTERN, self.online_version):
             raise ValueError("Enter an exact Debian package version without spaces or wildcards, or leave it blank for latest.")
+        if self.online_version_rpm and not re.fullmatch(FLEETMANAGER_RPM_VERSION_PATTERN, self.online_version_rpm):
+            raise ValueError("Choose an exact RPM version-release without spaces or wildcards, or leave it blank for latest.")
         return self
 
 
 class FleetManagerVersionLookup(StrictModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False, strict=True)
     repository_token: str = Field(default="", max_length=4096)
+    os_profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] = "ubuntu-autoinstall"
 
     @field_validator("repository_token")
     @classmethod
@@ -230,6 +237,7 @@ class DeploymentSpec(StrictModel):
     vms: list[VMSpec] = Field(min_length=1, max_length=6)
     splunk_license_accepted: bool = False
     sensor_pairing_token: str = Field(default="", max_length=4096, repr=False)
+    os_profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] | None = None
 
     @field_validator("sensor_pairing_token", mode="before")
     @classmethod

@@ -236,6 +236,11 @@ class FleetManager:
                 "Enter an exact Debian package version of at most 128 characters without spaces or wildcards, "
                 "or leave it blank for latest."
             )
+        from .alma_corelight import FleetInstallError, requested_rpm_version
+        try:
+            requested_rpm_version({"online_version_rpm": snapshot.get("online_version_rpm", "")})
+        except FleetInstallError as error:
+            raise FleetManagerError(str(error)) from None
         license_info = validate_license(snapshot.get("license_pem"), snapshot.get("license_name"))
         if snapshot.get("license_sha256") and snapshot["license_sha256"] != license_info["sha256"]:
             raise FleetManagerError("The saved Fleet Manager license checksum is inconsistent. Save the license again.")
@@ -244,8 +249,14 @@ class FleetManager:
     def selected(self):
         return self.db.fleetmanager_settings()
 
-    def repository_versions(self, repository_token=""):
+    def repository_versions(self, repository_token="", os_profile="ubuntu-autoinstall"):
         from .fleet_repository import FleetRepositoryError, available_versions
+        from .os_profiles import ALMA10, PROFILES
+
+        if os_profile not in PROFILES:
+            raise FleetManagerError("Choose a supported OS installer before loading Fleet Manager versions.")
+        if os_profile == ALMA10:
+            from .rpm_repository import available_versions
 
         token = repository_token or (self.selected() or {}).get("repository_token", "")
         if not token:
@@ -303,6 +314,7 @@ class FleetManager:
             "mode": saved["mode"] if saved else "online", "ready": bool(saved and not errors),
             "legacy_offline": bool(saved and saved.get("mode") == "offline"),
             "online_version": saved.get("online_version", "") if saved and saved["mode"] == "online" else "",
+            "online_version_rpm": saved.get("online_version_rpm", "") if saved and saved["mode"] == "online" else "",
             "community_string_configured": bool(saved and saved.get("community_string")),
             "repository_token_configured": bool(saved and saved.get("repository_token")),
             "license": license_info, "package_id": (saved.get("package") or {}).get("id") if saved else None,
@@ -324,6 +336,7 @@ class FleetManager:
             "license_name": previous.get("license_name", "corelight-fleetd.pem"),
         }
         snapshot["online_version"] = value.get("online_version", previous.get("online_version", "") if previous.get("mode") == "online" else "")
+        snapshot["online_version_rpm"] = value.get("online_version_rpm", previous.get("online_version_rpm", "") if previous.get("mode") == "online" else "")
         if value.get("license_pem"):
             snapshot["license_name"] = value.get("license_name") or "corelight-fleetd.pem"
         snapshot["package"] = None
