@@ -266,6 +266,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "certificate_trust": request.app.state.certificates.saved(saved["host"]) if saved else None,
             "iso_configured": media["ready"],
             "os_profile": media["profile"],
+            "os_media_profiles": media["profile_selections"],
             "ssh_key_count": len(request.app.state.db.ssh_public_keys()),
             "splunk_configured": request.app.state.packages.catalog()["ready"],
             "fleetmanager_configured": fleetmanager["ready"],
@@ -372,12 +373,14 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         return {"ok": True}
 
     @app.get("/api/settings/media")
-    def media_settings(request: Request, current=Depends(authenticated)):
-        return request.app.state.media.catalog()
+    def media_settings(request: Request, profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] | None = None,
+                       current=Depends(authenticated)):
+        return request.app.state.media.catalog(profile)
 
     @app.delete("/api/settings/media")
-    def clear_media_selection(request: Request, current=Depends(authenticated)):
-        return request.app.state.media.clear_selection()
+    def clear_media_selection(request: Request, profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] | None = None,
+                              current=Depends(authenticated)):
+        return request.app.state.media.clear_selection(profile)
 
     @app.get("/api/settings/storage")
     def storage_settings(request: Request, current=Depends(authenticated)):

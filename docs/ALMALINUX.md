@@ -1,6 +1,6 @@
 # Deploy and test AlmaLinux 10
 
-GDeploy v0.16.0 adds **AlmaLinux 10 x86_64** installation to every deployment role. The Docker host can remain Ubuntu; this selection controls the new guest VMs. Ubuntu Server 24.04 remains available and stays the default for older settings and jobs.
+GDeploy v0.16.0 adds **AlmaLinux 10 x86_64** installation to every deployment role. The Docker host can remain Ubuntu; this selection controls the new guest VMs. Ubuntu Server 24.04 remains available and stays the default for older settings and jobs. Starting with v0.16.1, every fresh deployment explicitly chooses **Ubuntu or AlmaLinux** in the first wizard step; that choice starts blank and applies to every selected VM role in the job.
 
 | Role | Alma installation path | Verify in your lab |
 | --- | --- | --- |
@@ -18,8 +18,10 @@ GDeploy v0.16.0 adds **AlmaLinux 10 x86_64** installation to every deployment ro
 1. Update your existing clone using `git pull --ff-only` followed by `sudo docker compose up -d --build --wait`, then refresh the browser.
 2. Open **Setup → OS installation media** and choose **AlmaLinux 10 · Kickstart** in **OS installer**.
 3. Upload or select the original **AlmaLinux 10 x86_64 full DVD ISO**, from your computer, GDeploy's server media directory or an ESXi datastore. Enter the publisher's verified **SHA-256** and save.
-4. Open **New deployment** and choose your roles. Every VM in that job uses the saved Alma installer; names, resources, datastore and port groups remain separate per VM.
-5. Complete Splunk/license or Corelight configuration as applicable, then run preflight. FleetManager's version dropdown reads RPM choices for Alma; Ubuntu's Debian version choice is stored separately.
+4. Open **New deployment** and choose your roles. Choose **AlmaLinux 10** in the first wizard step. Every VM in that job uses your explicit Alma choice; names, resources, datastore and port groups remain separate per VM.
+5. Complete Splunk/license or Corelight configuration as applicable, then run preflight. FleetManager's version dropdown reads RPM choices for the job’s Alma selection; Ubuntu's Debian version choice is stored separately.
+
+Setup keeps verified Ubuntu and Alma ISOs separately. Save Ubuntu media under its installer too if you want both choices ready; saving one does not replace the other. A file listed on the server is not automatically approved. **Clear saved selection** clears only the displayed installer’s default and keeps the files and the other OS selection. Changing Setup’s displayed installer does not change an open deployment’s chosen OS.
 
 Obtain the ISO and checksum through [AlmaLinux's download page](https://almalinux.org/get-almalinux/) and verify them using the [official ISO verification instructions](https://wiki.almalinux.org/documentation/installation-guide.html). **Boot, minimal, netinstall, live and `x86_64_v2` ISOs are not supported by this installer.** GDeploy checks the selected file's internal release, architecture, kernel/initrd, installer stage2 and local BaseOS/AppStream repository metadata as well as the publisher checksum. Renaming an incompatible ISO does not make it compatible.
 
@@ -70,8 +72,10 @@ For applications use `rpm -q elasticsearch kibana corelight-fleet corelightctl c
 
 Finish or resolve active jobs before an upgrade or rollback. Back up the **complete data volume with its original encryption key**, uploaded/imported media, separate server media and guest application data. Keep `.env`, bootstrap files and the existing Docker volume. Updating GDeploy neither resumes failed work nor upgrades software already on a VM.
 
-Each queued job retains its ISO, checksum and installer profile. Changing Setup to Alma does not switch an existing Ubuntu job; changing back to Ubuntu does not switch a queued Alma job. A draft configured for a different Setup selection must be reopened and checked again. Credentials, software snapshots, SSH-key snapshots, pairing-token records and resource ownership remain encrypted/preserved as before.
+Each queued job retains its ISO, checksum and installer profile. Changing Setup to Alma does not switch an existing Ubuntu job; changing back to Ubuntu does not switch a queued Alma job. A draft retains its explicit OS through Back, Setup detours and media refreshes. Preflight requires verified media for that chosen OS and never substitutes the other installer. Changing the draft OS requires fresh checks. Credentials, software snapshots, SSH-key snapshots, pairing-token records and resource ownership remain encrypted/preserved as before.
 
-Versions before v0.16.0 cannot provision Alma jobs or interpret the new Alma/RPM settings. Resolve those jobs and select a verified Ubuntu ISO before rolling back; retain the matching complete backup and encryption configuration. Rolling GDeploy back cannot undo guest installations, restore deleted VM disks or unconsume a Fleet pairing token. The existing **Delete & redeploy** flow replaces VMs/disks and still requires a fresh sensor token whenever sensor installation may have started.
+Version v0.16.1 adds an encrypted per-OS media-selection table while retaining the legacy most-recent-selection pointer. Upgrading retains the previously verified selection and existing data; configure the other OS separately. A rollback to v0.16.0 sees only the most recent legacy pointer and cannot use both saved defaults independently. Finish or resolve active jobs first and verify that pointer/media before creating new jobs on the older app.
+
+Versions before v0.16.0 cannot provision Alma jobs or interpret the new Alma/RPM settings. Resolve those jobs and select a verified Ubuntu ISO before rolling back; retain the matching complete backup and encryption configuration. Rolling GDeploy back cannot undo guest installations, restore deleted VM disks or unconsume a Fleet pairing token. The existing **Delete & redeploy** flow first validates the current verified ISO saved for the original job’s OS, freezes that selection before cleanup, and then replaces VMs/disks and still requires a fresh sensor token whenever sensor installation may have started.
 
 Installer references: [AlmaLinux Kickstart guide](https://wiki.almalinux.org/documentation/kickstart-guide.html), [RHEL 10 boot-menu layout](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/customizing_anaconda/customizing-the-boot-menu), and [RHEL 10 Kickstart commands](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/automatically_installing_rhel/kickstart-commands-and-options-reference).

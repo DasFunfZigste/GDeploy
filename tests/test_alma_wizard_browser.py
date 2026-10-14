@@ -1,4 +1,6 @@
 """Real browser flows for Alma media, experimental warnings and RPM choices."""
+import hashlib
+
 import pytest
 
 from gdeploy.os_profiles import ALMA10, UBUNTU
@@ -12,10 +14,24 @@ def ui(wizard_ui):  # noqa: F811
 
 def choose_os(ui, monkeypatch, profile, *, return_to_overview=True):
     monkeypatch.setattr('gdeploy.alma_guest.validate_install_iso', lambda *a, **kw: {'version': '10.1', 'arch': 'x86_64'})
-    ui.page.goto(ui.base + '/#settings/media')
+    source = ui.service.config.ubuntu_iso
+    if profile == ALMA10:
+        source = source.with_name('AlmaLinux-10.1-x86_64-dvd.iso')
+        if not source.exists():
+            source.write_bytes(ui.service.config.ubuntu_iso.read_bytes() + b'AlmaLinux browser fixture')
+    target = ui.base + '/#settings/media'
+    if ui.page.url == target:
+        ui.page.locator('#os-media-panel .surface-header').get_by_role('button', name='Refresh list', exact=True).click()
+    else:
+        ui.page.goto(target)
+    option = ui.page.locator('#os-media-server option').filter(has_text=source.name)
+    expect(option).to_have_count(1)
+    ui.page.get_by_role('radio', name='GDeploy server', exact=True).check()
+    ui.page.locator('#os-media-server').select_option(option.get_attribute('value'))
     picker = ui.page.locator('#os-media-profile')
     expect(picker).to_be_enabled()
     picker.select_option(profile)
+    ui.page.locator('#os-media-sha256').fill(hashlib.sha256(source.read_bytes()).hexdigest())
     ui.page.get_by_role('button', name='Use selected ISO', exact=True).click()
     expect(ui.page.locator('#os-media-panel .alert-success')).to_be_visible()
     assert ui.db.media_settings()['profile'] == profile
@@ -31,7 +47,7 @@ def test_alma_fleet_wizard_uses_rpm_versions_warning_and_frozen_profile(ui, monk
         lookup_requests.append(route.request.post_data_json)
         route.fulfill(json={'versions': ['0:29.2.2-1.x86_64', '0:29.2.1-1.x86_64']})
     ui.page.route('**/api/settings/fleetmanager/versions', versions)
-    ui.open('fleetmanager', name='alma-fleet-lab', splunk=False, address='192.0.2.40/24')
+    ui.open('fleetmanager', name='alma-fleet-lab', splunk=False, address='192.0.2.40/24', profile=ALMA10)
     expect(ui.wizard.get_by_text('Experimental Corelight compatibility', exact=True)).to_be_visible()
     ui.page.locator('#fleetmanager-community').fill('private-alma-community')
     ui.page.locator('#fleetmanager-token').fill('private-alma-token')
@@ -90,7 +106,8 @@ def test_alma_os_only_preview_and_sensor_warning(ui, monkeypatch):
         preview = ui.page.locator('.sidebar-preview')
     assert 'Alma Linux' not in ui.page.locator('aside').inner_text()
     ui.page.get_by_role('button', name='New deployment', exact=True).click()
-    expect(ui.page.locator('#wizard-os-profile')).to_contain_text('AlmaLinux 10')
+    expect(ui.page.locator('#wizard-os-profile')).to_have_value('')
+    ui.page.locator('#wizard-os-profile').select_option(ALMA10)
     ui.page.locator('#deployment-name').fill('alma-sensor-warning')
     ui.page.locator('#role-corelight_sensor').check()
     expect(ui.wizard.get_by_text('Experimental Corelight compatibility', exact=True)).to_be_visible()
@@ -109,12 +126,12 @@ def test_alma_os_only_preview_and_sensor_warning(ui, monkeypatch):
     assert ui.db.get(jobs[0]['id'], private=True)['secrets']['os_media']['profile'] == ALMA10
 
 
-def test_resumed_sensor_draft_updates_os_warning_without_clearing_pairing_values(ui, monkeypatch):
+def test_resumed_sensor_draft_keeps_its_os_when_setup_changes_without_clearing_pairing_values(ui, monkeypatch):
     ui.open('corelight_sensor', name='sensor-switch-os')
     ui.fill()
     ui.suspend()
     choose_os(ui, monkeypatch, ALMA10, return_to_overview=False)
     ui.resume()
     ui.assert_values()
-    expect(ui.wizard.locator('#corelight-sensor-panel .surface-header')).to_contain_text('AlmaLinux 10')
-    expect(ui.wizard.get_by_text('Experimental Corelight compatibility', exact=True)).to_be_visible()
+    expect(ui.wizard.locator('#corelight-sensor-panel .surface-header')).to_contain_text('Ubuntu Server 24.04')
+    expect(ui.wizard.get_by_text('Experimental Corelight compatibility', exact=True)).not_to_be_visible()

@@ -20,4 +20,4 @@ The first connection method is SSH. Full hypervisor consoles and VM lifecycle co
 
 Add Proxmox as a future hypervisor integration.
 
-AlmaLinux 10 is available in **Setup → OS installation media** starting with v0.16.0. It is no longer a planned sidebar item. See [the Alma guide](ALMALINUX.md) for installer requirements and experimental Corelight compatibility.
+AlmaLinux 10 is available starting with v0.16.0. From v0.16.1, choose **Ubuntu or AlmaLinux** explicitly in **New deployment** and keep a separate verified ISO for each under **Setup → OS installation media**. It is no longer a planned sidebar item. See [the Alma guide](ALMALINUX.md) for installer requirements and experimental Corelight compatibility.

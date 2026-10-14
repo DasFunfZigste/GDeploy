@@ -4,6 +4,21 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-14
+
+### Fixed
+
+- Present an explicit **Operating system** choice in every new deployment: **Ubuntu Server 24.04 LTS** or **AlmaLinux 10**. Fresh jobs require a choice before configuring VMs; no OS or software role is preselected. Every selected role uses that job's OS, which remains visible in VM resources and review.
+- Retain separate verified installation media for Ubuntu and Alma in Setup. Choosing one OS no longer replaces the other OS's saved ISO. Preflight and queueing resolve the matching media for the requested OS, independently of the last Setup selection. Missing media links back to Setup while preserving the draft.
+- Keep the selected OS, custom VM names/resources, repository tokens, licenses and sensor pairing inputs when changing wizard steps or visiting Setup. Preserve separate draft FleetManager Debian/RPM version choices and refresh the appropriate version list after an OS change. Corelight's Alma compatibility warnings remain visible.
+- Protect both saved OS media selections from deletion, retain immutable queued media snapshots, and resolve a failed deployment's original OS media before destructive recovery or sensor-token reservation.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. In Setup, save an ISO for each OS you plan to use; choose the OS in the first step of **New deployment**.
+- An additive encrypted media-profile table retains the existing approved selection. Preserve the complete data volume and original encryption key. Existing jobs and VMs are unchanged; environment-configured media remains a fallback for its matching profile. Older applications see only the legacy most-recent selection, so verify their media configuration before rollback.
+- Automated checks cover both OS choices, media persistence and deletion protection, queue/recovery isolation, retained drafts and browser behavior. Full Alma boots and licensed application installations on ESXi remain lab validation; FleetManager and Software Sensor on Alma 10 remain experimental.
+
 ## [0.16.0] - 2026-10-13
 
 ### Added

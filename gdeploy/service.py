@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import ipaddress
 import logging
 import re
@@ -153,6 +154,10 @@ class DeploymentService:
         except Exception as exc:
             raise DeploymentError(safe_error(exc, settings)) from None
 
+    def _deployment_media(self, spec):
+        profile = spec.get("os_profile")
+        return self.media.selected(profile) if profile else self.media.selected()
+
     def preflight(self, spec, settings=None, exclude_id=None, os_media=None, splunk_package=None, fleetmanager=None, corelight_sensor=None):
         settings = settings or self.db.settings()
         checks = []
@@ -160,19 +165,27 @@ class DeploymentService:
         def check(name, ok, message):
             checks.append({"name": name, "ok": bool(ok), "message": message})
 
-        os_media = self.media.selected() if os_media is None else os_media
-        profile = os_media.get("profile", UBUNTU) if isinstance(os_media, dict) else UBUNTU
+        requested_profile = spec.get("os_profile")
+        profile = requested_profile or UBUNTU
         iso_size = None
         try:
+            os_media = self._deployment_media(spec) if os_media is None else os_media
+            if not requested_profile and isinstance(os_media, dict):
+                profile = os_media.get("profile", UBUNTU)
             if not os_media:
-                raise MediaError("Select and verify an OS ISO in Setup first.")
+                raise MediaError(
+                    f"Select and verify an ISO for {profile_name(profile)} in Setup for this deployment."
+                    if requested_profile else "Select and verify an OS ISO in Setup first."
+                )
             source = self.media.validate_snapshot(os_media)
             iso_size = source.stat().st_size
             check("OS ISO", True, f"{os_media['name']} is available and its SHA-256 matches. Installer: {profile_name(profile)}.")
         except (MediaError, OSError) as exc:
             check("OS ISO", False, str(exc))
-        if spec.get("os_profile") and spec["os_profile"] != profile:
-            check("OS selection", False, "The saved OS installer changed since this deployment was configured. Reopen the wizard and run preflight again.")
+            checks[-1]["action"] = {"label": "Configure OS media", "href": "#settings/media"}
+        if requested_profile and isinstance(os_media, dict) and os_media and os_media.get("profile", UBUNTU) != requested_profile:
+            check("OS selection", False,
+                  f"The OS ISO does not match the {profile_name(requested_profile)} installer chosen for this deployment. Configure matching media in Setup and run preflight again.")
         if profile == ALMA10:
             check("AlmaLinux 10 installation", True,
                   "Full x86_64 DVD installation with Kickstart. The host must expose x86-64-v3 CPU features to the VM; boot/minimal/netinstall ISOs are not supported. SELinux remains enforcing.")
@@ -338,7 +351,7 @@ class DeploymentService:
 
     def enqueue(self, spec, settings=None, parent_id=None, corelight_sensor=None, *, sensor_replacement=None, os_media=None):
         settings = settings or self.db.settings()
-        os_media = self.media.selected() if os_media is None else os_media
+        os_media = copy.deepcopy(self._deployment_media(spec) if os_media is None else os_media)
         splunk_package = self.packages.selected() if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
         fleetmanager = self.fleetmanager.selected() if any(vm["role"] == "fleetmanager" for vm in spec["vms"]) else None
         sensor = None
@@ -671,7 +684,7 @@ class DeploymentService:
         # destructive cleanup. Keep this validated selection even if Setup is
         # changed while ESXi deletes the original resources.
         try:
-            selected_media = self.media.selected()
+            selected_media = self.media.selected(original_profile)
             if not selected_media or selected_media.get("profile", UBUNTU) != original_profile:
                 raise MediaError("No matching installer is selected.")
             replacement_media = dict(selected_media)

@@ -27,6 +27,7 @@ from cryptography.x509.oid import NameOID
 from gdeploy.config import Config, hash_password
 from gdeploy.db import Database
 from gdeploy.main import create_app
+from gdeploy.os_profiles import ALMA10, UBUNTU
 from gdeploy.service import DeploymentService
 
 
@@ -131,7 +132,10 @@ def ui(tmp_path, monkeypatch, chromium):
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
-    page.route("**/api/settings/fleetmanager/versions", lambda route: route.fulfill(json={"versions": ["29.2.2-1", "29.2.1-1"]}))
+    def versions(route):
+        native = route.request.post_data_json.get("os_profile") == ALMA10
+        route.fulfill(json={"versions": ["0:29.2.2-1.x86_64", "0:29.2.1-1.x86_64"] if native else ["29.2.2-1", "29.2.1-1"]})
+    page.route("**/api/settings/fleetmanager/versions", versions)
     fixture = WizardUI(page, base, db, license_path)
     fixture.service = app.state.service
     try:
@@ -161,10 +165,13 @@ class WizardUI:
         self.page.get_by_role("button", name="Sign in", exact=False).click()
         expect(self.page.get_by_role("button", name="New deployment", exact=True)).to_be_visible()
 
-    def open(self, role, name="draft-test", *, splunk=True, address="192.0.2.10/24"):
+    def open(self, role, name="draft-test", *, splunk=True, address="192.0.2.10/24", profile=UBUNTU):
         self.role = role
+        self.profile = profile
         self.page.get_by_role("button", name="New deployment", exact=True).click()
         expect(self.wizard.locator(".role-grid input:checked")).to_have_count(0)
+        expect(self.wizard.locator("#wizard-os-profile")).to_have_value("")
+        self.wizard.locator("#wizard-os-profile").select_option(profile)
         self.page.locator("#deployment-name").fill(name)
         self.page.locator("#role-" + role).check()
         if splunk:
@@ -203,8 +210,9 @@ class WizardUI:
             self.wizard.locator("#fleetmanager-license").set_input_files(self.license_path)
             self.wizard.locator("#fleetmanager-load-versions").click()
             expect(self.wizard.locator("#fleetmanager-online-version option")).to_have_count(3)
-            self.wizard.locator("#fleetmanager-online-version").select_option("29.2.1-1")
-            values["fleetmanager-online-version"] = "29.2.1-1"
+            version = "0:29.2.1-1.x86_64" if self.profile == ALMA10 else "29.2.1-1"
+            self.wizard.locator("#fleetmanager-online-version").select_option(version)
+            values["fleetmanager-online-version"] = version
         self.values = values
         self.handles = {key: self.wizard.locator("#" + key).element_handle() for key in values}
         if role == "fleetmanager":

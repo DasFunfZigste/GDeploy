@@ -63,9 +63,9 @@ class MediaManager:
         """Remove abandoned upload files once at startup, before accepting requests."""
         if self.upload_dir.is_symlink() or self.upload_dir.resolve() != self.upload_dir:
             return
-        protected = {Path(item["path"]) for item in self.db.media_files()}
-        selected = self.db.media_settings()
-        if selected:
+        state = self.db.media_storage_state()
+        protected = {Path(item["path"]) for item in state["items"]}
+        for selected in state["saved_selections"]:
             protected.add(Path(selected["path"]))
         try:
             candidates = list(self.upload_dir.iterdir())
@@ -188,11 +188,20 @@ class MediaManager:
         except OSError as exc:
             raise MediaError("The OS ISO is missing or unreadable. Check the media mount or upload it again.") from exc
 
-    def selected(self):
-        saved = self.db.media_settings()
+    @staticmethod
+    def _requested_profile(profile):
+        if profile is not None and profile not in PROFILES:
+            raise MediaError("Choose Ubuntu Server 24.04 or AlmaLinux 10 as the OS installer.")
+        return profile
+
+    def selected(self, profile=None):
+        """Resolve only a matching approved selection; never infer an ISO from its filename."""
+        self._requested_profile(profile)
+        saved = self.db.media_settings(profile)
         if saved:
             return saved
-        return self.legacy()
+        legacy = self.legacy()
+        return legacy if profile is None or legacy and legacy["profile"] == profile else None
 
     def legacy(self):
         """Return environment-configured media for deployments queued before UI selection existed."""
@@ -241,32 +250,58 @@ class MediaManager:
                 continue
         return sorted(candidates, key=lambda item: (item["name"].lower(), item["id"]))
 
-    def catalog(self):
-        saved = self.db.media_settings()
-        selected = saved or self.legacy()
+    def _profile_snapshots(self, saved):
+        legacy = self.legacy()
+        return {profile: saved.get(profile) or (legacy if legacy and legacy["profile"] == profile else None)
+                for profile in PROFILES}
+
+    def profile_selections(self, saved=None):
+        """Readiness metadata for choosing an OS without exposing local filesystem paths."""
+        saved = self.db.media_profile_settings() if saved is None else saved
+        return {
+            profile: {
+                "selected": {key: snapshot[key] for key in ("id", "name", "source", "profile", "size_bytes", "sha256")}
+                if snapshot else None,
+                "ready": bool(snapshot and self._available(snapshot)),
+                "has_saved_selection": profile in saved,
+            }
+            for profile, snapshot in self._profile_snapshots(saved).items()
+        }
+
+    def catalog(self, profile=None):
+        self._requested_profile(profile)
+        saved = self.db.media_settings(profile)
+        selected = self.selected(profile)
         ready = bool(selected and self._available(selected))
+        saved_profiles = self.db.media_profile_settings()
+        profile_snapshots = self._profile_snapshots(saved_profiles)
         items = []
         for item in self._files():
             chosen = bool(selected and item["id"] == selected["id"])
-            checksum = selected.get("sha256", "") if chosen else item["sha256"]
+            matched = selected if chosen else next(
+                (snapshot for snapshot in profile_snapshots.values() if snapshot and snapshot["id"] == item["id"]), None,
+            )
+            checksum = matched.get("sha256", "") if matched else item["sha256"]
             entry = {
                 key: item[key] for key in ("id", "name", "size_bytes", "source", "profile")
             } | {"sha256": checksum, "selected": chosen}
-            if chosen:
-                entry["profile"] = selected["profile"]
+            if matched:
+                entry["profile"] = matched["profile"]
             if "origin" in item:
                 entry["origin"] = item["origin"]
             items.append(entry)
         return {
             "items": items, "selected": selected, "ready": ready,
-            "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": selected.get("profile", PROFILE) if selected else PROFILE,
+            "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": profile or (selected.get("profile", PROFILE) if selected else PROFILE),
             "profiles": [{"id": key, **value} for key, value in PROFILES.items()],
+            "profile_selections": self.profile_selections(saved_profiles),
             "has_saved_selection": saved is not None,
         }
 
-    def clear_selection(self):
-        self.db.clear_media_settings()
-        return self.catalog()
+    def clear_selection(self, profile=None):
+        self._requested_profile(profile)
+        self.db.clear_media_settings(profile)
+        return self.catalog(profile)
 
     @staticmethod
     def _directory_bytes(directory, suffix=None):
@@ -294,7 +329,9 @@ class MediaManager:
         except OSError as exc:
             raise MediaError("Unable to measure the GDeploy data filesystem. Check its mount and permissions.", 507) from exc
         state = self.db.media_storage_state()
-        selected = state["selected"] or self.legacy()
+        selected = state["saved_selections"] + [
+            snapshot for snapshot in self._profile_snapshots(state["profile_selections"]).values() if snapshot
+        ]
         items = []
         for saved in state["items"]:
             reason = self.db.media_delete_reason(saved, selected, state["references"])
@@ -315,9 +352,8 @@ class MediaManager:
             entry = {key: saved[key] for key in ("id", "name", "source")}
             entry.update({
                 "size_bytes": size, "available": available,
-                "selected": bool(selected and (
-                    selected.get("id") == saved["id"] or selected.get("path") == saved["path"]
-                )),
+                "selected": any(snapshot.get("id") == saved["id"] or snapshot.get("path") == saved["path"]
+                                for snapshot in selected),
                 "can_delete": reason is None, "delete_reason": reason,
             })
             if "origin" in saved:
@@ -374,6 +410,9 @@ class MediaManager:
             raise MediaError("That OS ISO is no longer available. Refresh the media list and select it again.", 404)
         candidate["sha256"] = checksum
         previous = self.selected()
+        if not previous or previous["id"] != media_id:
+            previous = next((selection for selection in self.db.media_profile_settings().values()
+                             if selection["id"] == media_id), None)
         candidate["profile"] = profile or (
             previous["profile"] if previous and previous["id"] == media_id else candidate["profile"]
         )

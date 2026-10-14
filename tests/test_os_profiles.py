@@ -277,20 +277,21 @@ def test_queued_alma_profile_and_media_do_not_follow_later_setup_changes(config,
     assert "Stop after immutable OS profile" in db.get(job["id"])["error"]
 
 
-def test_stale_wizard_profile_fails_before_queuing_or_generating_credentials(config, spec, monkeypatch, alma_inspection):
+def test_missing_requested_profile_media_fails_before_queuing_or_generating_credentials(config, spec, monkeypatch, alma_inspection):
     import gdeploy.service as module
 
-    checksum = write_iso(config.ubuntu_iso)
+    alma_iso = config.ubuntu_iso.parent / "alma-dvd.iso"
+    checksum = write_iso(alma_iso)
     db = Database(config.data_dir, config.secret_key)
     service = DeploymentService(db, config, InventoryClient)
-    choose(service.media, config.ubuntu_iso, checksum, ALMA10)
+    choose(service.media, alma_iso, checksum, ALMA10)
     monkeypatch.setattr(module.shutil, "which", lambda command: "/usr/bin/xorriso")
-    monkeypatch.setattr(module, "generate_ssh_key", lambda: pytest.fail("A stale wizard must not generate credentials"))
+    monkeypatch.setattr(module, "generate_ssh_key", lambda: pytest.fail("Missing requested OS media must not generate credentials"))
     spec["os_profile"] = UBUNTU
     checks = service.preflight(spec, {"host": "esxi.lab", "username": "root", "password": "secret"})
     assert not checks["ok"]
-    assert any(check["name"] == "OS selection" and not check["ok"] for check in checks["checks"])
-    with pytest.raises(DeploymentError, match="saved OS installer changed"):
+    assert any(check["name"] == "OS ISO" and not check["ok"] for check in checks["checks"])
+    with pytest.raises(DeploymentError, match="Select and verify an ISO for Ubuntu"):
         service.enqueue(spec, {"host": "esxi.lab", "username": "root", "password": "secret"})
     assert db.list() == []
 

@@ -16,6 +16,7 @@ from cryptography.fernet import Fernet
 
 from .bootstrap import verify_password
 from .corelight_sensor import pairing_reuse_policy
+from .os_profiles import PROFILES, UBUNTU
 from .ssh_keys import normalize_ssh_public_keys
 
 
@@ -57,6 +58,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS esxi_certificates (endpoint TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS ssh_public_keys (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS media_profile_settings (profile TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS splunk_package_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS splunk_package_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -98,6 +100,9 @@ class Database:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(deployments)")}
             if "hidden_at" not in columns:
                 conn.execute("ALTER TABLE deployments ADD COLUMN hidden_at TEXT")
+            # The singleton remains the legacy/current selection. Copy its
+            # already-approved snapshot into additive encrypted per-OS state.
+            self._sync_legacy_media_settings(conn)
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -170,10 +175,49 @@ class Database:
             row = connection.execute("SELECT value FROM esxi_certificates WHERE endpoint=?", (endpoint,)).fetchone()
         return self.unseal(row[0]) if row else None
 
-    def media_settings(self):
+    def media_settings(self, profile=None):
         with self.connect() as connection:
+            if profile is not None:
+                return self._media_profile_settings(connection).get(profile)
             row = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
-        return self.unseal(row[0]) if row else None
+        value = self.unseal(row[0]) if row else None
+        return dict(value, profile=value.get("profile", UBUNTU)) if value else None
+
+    def _media_profile_settings(self, connection):
+        rows = connection.execute("SELECT profile,value FROM media_profile_settings").fetchall()
+        values = {row["profile"]: self.unseal(row["value"]) for row in rows}
+        # Preserve selections from an older application sharing this volume.
+        current = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
+        if current:
+            value = self.unseal(current[0])
+            profile = value.get("profile", UBUNTU)
+            if profile in PROFILES:
+                values[profile] = dict(value, profile=profile)
+        return values
+
+    def media_profile_settings(self):
+        with self.connect() as connection:
+            connection.execute("BEGIN")
+            return self._media_profile_settings(connection)
+
+    def _sync_legacy_media_settings(self, connection):
+        """Preserve a newer approved singleton written by a legacy worker."""
+        current = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
+        if current:
+            value = self.unseal(current[0])
+            profile = value.get("profile", UBUNTU)
+            if profile in PROFILES:
+                connection.execute(
+                    "INSERT OR REPLACE INTO media_profile_settings VALUES(?,?)",
+                    (profile, self.seal(dict(value, profile=profile))),
+                )
+
+    def _saved_media_references(self, connection):
+        # Protect every stored selection even if a legacy worker has changed
+        # the singleton without updating this release's per-profile table.
+        rows = connection.execute("SELECT value FROM media_profile_settings").fetchall()
+        current = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
+        return [self.unseal(row[0]) for row in rows] + ([self.unseal(current[0])] if current else [])
 
     def media_files(self):
         with self.connect() as connection:
@@ -182,25 +226,39 @@ class Database:
 
     def set_media_settings(self, value, *, uploaded=False):
         """Save a verified selection, registering newly copied/uploaded media in the same transaction."""
+        value = dict(value, profile=value.get("profile", UBUNTU))
+        if value["profile"] not in PROFILES:
+            raise MediaStateError("Choose a supported OS installer profile.")
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if uploaded:
                 connection.execute("INSERT INTO media_files VALUES(?,?)", (value["id"], self.seal(value)))
             else:
                 self._require_registered_media(connection, value)
+            self._sync_legacy_media_settings(connection)
             connection.execute("INSERT OR REPLACE INTO media_settings VALUES(1,?)", (self.seal(value),))
+            connection.execute(
+                "INSERT OR REPLACE INTO media_profile_settings VALUES(?,?)", (value["profile"], self.seal(value)),
+            )
             connection.execute(
                 "INSERT INTO audit VALUES(?,?)",
                 (now(), f"OS ISO selected: {value['name']}; SHA-256 {value['sha256']}"),
             )
 
-    def clear_media_settings(self):
-        """Remove only the saved selection; queued jobs keep their media snapshots."""
+    def clear_media_settings(self, profile=None):
+        """Clear one OS default while retaining files, other OS defaults and queued snapshots."""
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            removed = connection.execute("DELETE FROM media_settings WHERE id=1").rowcount
+            selected = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
+            current_profile = self.unseal(selected[0]).get("profile", UBUNTU) if selected else None
+            chosen_profile = profile or current_profile
+            removed = 0
+            if chosen_profile:
+                removed = connection.execute("DELETE FROM media_profile_settings WHERE profile=?", (chosen_profile,)).rowcount
+            if profile is None or current_profile == profile:
+                removed += connection.execute("DELETE FROM media_settings WHERE id=1").rowcount
             if removed:
-                connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Saved OS ISO selection cleared"))
+                connection.execute("INSERT INTO audit VALUES(?,?)", (now(), f"Saved OS ISO selection cleared: {chosen_profile}"))
 
     def _require_registered_media(self, connection, value):
         if not value:
@@ -233,6 +291,8 @@ class Database:
             return {
                 "items": [self.unseal(row[0]) for row in rows],
                 "selected": self.unseal(selected[0]) if selected else None,
+                "profile_selections": self._media_profile_settings(connection),
+                "saved_selections": self._saved_media_references(connection),
                 "references": self._active_media(connection),
             }
 
@@ -243,7 +303,8 @@ class Database:
                 value["id"] == other.get("id") or value["path"] == other.get("path")
             )
 
-        if matches(selected):
+        selections = selected if isinstance(selected, (list, tuple)) else [selected]
+        if any(matches(selection) for selection in selections):
             return "Clear the saved selection or choose another OS ISO before deleting this one."
         if any(matches(reference) for reference in references):
             return "Used by a queued, running, or cleaning deployment (including pending stop requests)."
@@ -257,9 +318,12 @@ class Database:
             if row is None:
                 return False
             value = self.unseal(row[0])
-            selected = connection.execute("SELECT value FROM media_settings WHERE id=1").fetchone()
+            selections = self._media_profile_settings(connection)
+            selected = self._saved_media_references(connection)
+            if fallback_selected and fallback_selected.get("profile", UBUNTU) not in selections:
+                selected.append(fallback_selected)
             reason = self.media_delete_reason(
-                value, self.unseal(selected[0]) if selected else fallback_selected, self._active_media(connection)
+                value, selected, self._active_media(connection)
             )
             if reason:
                 raise MediaStateError(reason)

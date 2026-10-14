@@ -406,7 +406,7 @@ def redeploy_media_job(config, spec, monkeypatch):
 
     original_media = media(UBUNTU, "original.iso")
     current = {"media": original_media}
-    monkeypatch.setattr(service.media, "selected", lambda: current["media"])
+    monkeypatch.setattr(service.media, "selected", lambda profile=None: current["media"])
     monkeypatch.setattr(service, "preflight", lambda *args, **kwargs: {"ok": True, "checks": []})
     return service, db, spec, original_media, current, media, calls, hooks
 

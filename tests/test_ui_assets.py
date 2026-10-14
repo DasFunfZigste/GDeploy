@@ -108,7 +108,7 @@ def test_fleetmanager_version_picker_loads_repository_options_without_saving_cre
 def test_fleetmanager_ui_saves_and_restores_repository_version_without_offline_inputs(client):
     script = client.get("/static/app.js").text
     panel = script.split("function createFleetManagerPanel(", 1)[1].split("function createSSHAccessPanel(", 1)[0]
-    assert "renderVersions(next[versionField()] || '')" in panel
+    # Browser coverage verifies saved and unsaved versions survive OS changes.
     assert "onlineVersion.disabled = locked" in panel
     assert "const payload = {mode: 'online', [versionField()]: onlineVersion.value.trim()}" in panel
     assert "fleetmanager-mode" not in panel
@@ -166,7 +166,7 @@ def test_new_wizard_requires_intentional_role_selection(client):
     initializer = re.search(r"state\.wizard = (\{step: 0,.*?\});", script).group(1)
     assert "selected: new Set()" in initializer
     assert "autoDeploy: false" in initializer
-    assert "wizard.step === 0 && !wizard.selected.size" in script
+    # Browser coverage verifies Continue requires both an OS and a role.
     assert "if (role === 'kibana' && event.target.checked) wizard.selected.add('elasticsearch')" in script
     assert "else if (!wizard.selected.size) wizard.error" in script
 
