@@ -75,7 +75,12 @@ def safe_error(error, secret_data=None):
     text = re.sub(
         r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "[redacted private key]", text, flags=re.S
     )
-    return text[:2000]
+    if len(text) > 2000:
+        # Package output can precede the useful exception at the end. Redact
+        # first, then keep both the operation header and the final diagnostic.
+        marker = "\n[... output omitted ...]\n"
+        return text[:500] + marker + text[-(2000 - 500 - len(marker)):]
+    return text
 
 
 class DeploymentService:

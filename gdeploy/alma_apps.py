@@ -70,7 +70,9 @@ def configure_firewall(ip: str, ports: tuple[int, ...]) -> None:
     current_zone = None
     for line in active_zones.splitlines():
         if line and not line[0].isspace():
-            current_zone = line.strip()
+            # firewalld 2.4 annotates the default zone in this display output.
+            # Strip only that known suffix and still validate the actual name.
+            current_zone = line.strip().removesuffix(" (default)")
         elif line.strip().startswith("interfaces:") and interface in line.partition(":")[2].split():
             zone = current_zone
     if not isinstance(zone, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", zone):

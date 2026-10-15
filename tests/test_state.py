@@ -95,6 +95,40 @@ def test_safe_errors_remove_known_credentials():
     assert text == "[redacted] [redacted] [redacted]"
 
 
+@pytest.mark.parametrize("length", [1999, 2000, 2001, 5000])
+def test_safe_errors_keep_failure_header_and_final_exception_within_limit(length):
+    header = "Guest command failed (exit 1).\n"
+    tail = "\nAlmaInstallError: AlmaLinux firewall discovery returned an invalid management zone."
+    message = header + "x" * (length - len(header) - len(tail)) + tail
+    result = safe_error(message)
+    assert len(result) <= 2000
+    assert result.startswith(header)
+    assert result.endswith(tail)
+    if length <= 2000:
+        assert result == message
+    else:
+        assert "output omitted" in result
+
+
+def test_long_errors_redact_full_secrets_before_truncating_and_persist_safely(config, spec):
+    secret = "private-token-value" * 30
+    private_key = "-----BEGIN PRIVATE KEY-----\n" + "k" * 3000 + "\n-----END PRIVATE KEY-----"
+    message = "Guest command failed (exit 1). " + secret + "\n" + "x" * 4000 + private_key + "\nFailure: " + secret
+    result = safe_error(message, {"repository_token": secret})
+    assert len(result) <= 2000
+    assert result.startswith("Guest command failed (exit 1). [redacted]")
+    assert result.endswith("[redacted private key]\nFailure: [redacted]")
+    assert "private-token" not in result and "kkkk" not in result
+    db = Database(config.data_dir, config.secret_key)
+    id_ = str(uuid.uuid4())
+    db.create(id_, spec, {})
+    db.update(id_, status="failed", error=result)
+    db.event(id_, result, "error")
+    reopened = Database(config.data_dir, config.secret_key)
+    assert reopened.get(id_)["error"] == result
+    assert reopened.events(id_)[-1]["message"] == result
+
+
 def test_workspace_failure_is_recorded_without_killing_worker(config, spec):
     db = Database(config.data_dir, config.secret_key)
     id_ = str(uuid.uuid4())

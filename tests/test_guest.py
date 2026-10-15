@@ -384,6 +384,24 @@ def test_sudo_password_only_in_stdin_and_failure_details_are_redacted(credential
     assert "exit 1" in str(caught.value)
 
 
+def test_verbose_guest_failure_keeps_final_firewall_error_after_service_sanitizing():
+    from gdeploy.service import safe_error
+
+    session = guest.GuestSession("192.168.10.25", "gdeploy", "private", "os-secret")
+    tail = "AlmaInstallError: AlmaLinux firewall discovery returned an invalid management zone."
+    output = "Package install output\n" * 250 + "os-secret\nTraceback (most recent call last):\n" + tail
+    channel = FakeChannel(output.encode(), 1)
+    session.client = Mock()
+    session.client.get_transport.return_value.open_session.return_value = channel
+    with pytest.raises(guest.GuestError) as caught:
+        session._exec("/bin/bash /home/gdeploy/.gdeploy-test/install.sh", sudo=True)
+    message = safe_error(caught.value)
+    assert message.startswith("Guest command failed (exit 1).")
+    assert len(message) <= 2000 and "output omitted" in message
+    assert message.endswith(tail)
+    assert "os-secret" not in message and "[redacted]" in message
+
+
 def test_cloud_init_errors_prevent_application_install(monkeypatch):
     session = guest.GuestSession("192.168.10.25", "gdeploy", "private", "os-secret")
     session.client = Mock()

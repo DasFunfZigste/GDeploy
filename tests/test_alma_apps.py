@@ -116,6 +116,34 @@ def test_firewall_uses_management_zone_and_preserves_ssh_before_ports(firewall_c
     assert all("--zone=trusted" not in args and "--zone=public" not in args for args in commands)
 
 
+@pytest.mark.parametrize("header", ["public", "public (default)"])
+@pytest.mark.parametrize("ports", [(9200,), (5601,), (8000, 8089)])
+def test_firewall_accepts_default_zone_annotation_for_all_application_ports(firewall_commands, header, ports):
+    calls, responses = firewall_commands
+    responses[("firewall-cmd", "--get-active-zones")] = (
+        f"trusted\n  interfaces: ens34\n{header}\n  interfaces: ens33 ens35\n"
+    )
+    alma_apps.configure_firewall("192.0.2.20", ports)
+    commands = [args for args, _ in calls]
+    for permanent in (True, False):
+        prefix = ["firewall-cmd", "--zone=public"] + (["--permanent"] if permanent else [])
+        for port in ports:
+            assert commands.index(prefix + ["--add-service=ssh"]) < commands.index(prefix + [f"--add-port={port}/tcp"])
+    assert ["firewall-cmd", "--zone=public", "--query-service=ssh"] in commands
+    for port in ports:
+        assert ["firewall-cmd", "--zone=public", f"--query-port={port}/tcp"] in commands
+    assert all("--zone=trusted" not in args and "--zone=public (default)" not in args for args in commands)
+
+
+@pytest.mark.parametrize("header", ["public (unknown)", "public --drop", "public (default) extra", "(default)"])
+def test_firewall_rejects_malformed_management_zone_headers(firewall_commands, header):
+    calls, responses = firewall_commands
+    responses[("firewall-cmd", "--get-active-zones")] = f"{header}\n  interfaces: ens33\n"
+    with pytest.raises(alma_apps.AlmaInstallError, match="invalid management zone"):
+        alma_apps.configure_firewall("192.0.2.20", (9200,))
+    assert not any("--add-port=9200/tcp" in args for args, _ in calls)
+
+
 def test_starting_firewall_keeps_default_ssh_open_first(firewall_commands):
     calls, responses = firewall_commands
     responses[("systemctl", "show", "firewalld.service", "-p", "ActiveState", "--value")] = "inactive"

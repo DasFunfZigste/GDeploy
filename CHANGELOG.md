@@ -4,6 +4,20 @@ Each numbered release has a matching Git tag, Docker image, installation bundle 
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-10-15
+
+### Fixed
+
+- Fix AlmaLinux application provisioning rejecting firewalld 2.4's `public (default)` display label as an invalid zone. Use the actual zone name while preserving management-interface selection, SSH access, permanent/runtime port rules and strict validation. This shared path covers Elasticsearch, Kibana and Splunk.
+- Keep both the operation header and the final exception when lengthy guest/package output exceeds the deployment error limit. Redact secrets before shortening the message so the UI and copied logs retain useful diagnostics without exposing credentials.
+- Add regressions for annotated and ordinary firewall zones, all three applications' ports, malformed labels, and verbose guest errors passing through SSH capture, redaction and persistent deployment errors/logs.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Preserve the complete data volume and original encryption key. No database migration is required.
+- Updating does not resume failed jobs or change existing VMs. To test a fresh installation, create a new job with unique VM names, or use **Delete & redeploy** if you intend to replace the failed job's VMs and disks. Previously truncated error messages cannot be reconstructed by this update.
+- Automated regressions reproduce the reported firewalld output. A complete AlmaLinux Elasticsearch/Kibana deployment on the target ESXi host remains a lab validation step; Corelight's experimental Alma 10 status is unchanged.
+
 ## [0.16.1] - 2026-10-14
 
 ### Fixed
