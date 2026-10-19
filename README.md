@@ -1,8 +1,8 @@
 # GDeploy
 
-A dark, Docker-hosted control panel that creates VMs on **standalone VMware ESXi 8.0 Update 3**, installs the operating system from your selected OS ISO, and installs selected applications. Splunk, Elasticsearch, Kibana, Corelight FleetManager and Corelight Software Sensor each receive their own VM. Kibana connects to Elasticsearch using a service account token and verified TLS; Splunk and FleetManager run independently; Software Sensor pairs with an existing Fleet Manager using a fresh sensor record.
+A dark, Docker-hosted control panel that creates VMs on **standalone VMware ESXi 8.0 Update 3 or Proxmox VE 9.2**, installs the operating system from your selected OS ISO, and installs selected applications. Splunk, Elasticsearch, Kibana, Corelight FleetManager and Corelight Software Sensor each receive their own VM. Kibana connects to Elasticsearch using a service account token and verified TLS; Splunk and FleetManager run independently; Software Sensor pairs with an existing Fleet Manager using a fresh sensor record.
 
-**Guest installers:** Ubuntu Server **24.04 LTS amd64 live-server** and **AlmaLinux 10 x86_64 full DVD**. Choose the matching **OS installer** in Setup; every VM in a new deployment uses that selection. Alma requires **x86-64-v3 CPU features** and is available for all listed roles. **FleetManager and Software Sensor on Alma 10 are experimental:** Corelight's 29.2 guides document Alma/RHEL 8 and 9, not 10. Their RPM dependencies, service health and Fleet pairing still have to pass in your lab. See the [AlmaLinux walkthrough and test checklist](docs/ALMALINUX.md). GDeploy supports one administrator, one ESXi host and one VM per selected role per deployment; validate your host, license, media and network before production use.
+**Guest installers:** Ubuntu Server **24.04 LTS amd64 live-server** and **AlmaLinux 10 x86_64 full DVD**. Choose the matching **OS installer** in Setup; every VM in a new deployment uses that selection. Alma requires **x86-64-v3 CPU features** and is available for all listed roles. **FleetManager and Software Sensor on Alma 10 are experimental:** Corelight's 29.2 guides document Alma/RHEL 8 and 9, not 10. Their RPM dependencies, service health and Fleet pairing still have to pass in your lab. See the [AlmaLinux walkthrough and test checklist](docs/ALMALINUX.md). GDeploy supports one administrator, multiple named virtualization hosts and one VM per selected role per deployment; validate your host, license, media and network before production use.
 
 ## Run on Ubuntu 24.04
 
@@ -23,7 +23,7 @@ cd GDeploy
 sudo docker compose up -d --build --wait
 ```
 
-Open **`http://YOUR_SERVER_IP:8000`** using the Ubuntu server's LAN address. On a fresh installation, sign in with **`admin` / `admin`**, change the credentials when prompted, then sign in again and open **Setup**. Configure the ESXi connection and OS installation media before creating a deployment.
+Open **`http://YOUR_SERVER_IP:8000`** using the Ubuntu server's LAN address. On a fresh installation, sign in with **`admin` / `admin`**, change the credentials when prompted, then sign in again and open **Setup**. Add a host in **Setup → Virtualization hosts** and configure OS installation media before creating a deployment.
 
 This builds from the current default branch. No GitHub credential linking, Docker registry login or initial `.env` file is required. LAN access is enabled by default on `0.0.0.0:8000`.
 
@@ -37,16 +37,18 @@ sudo docker compose up -d --build --wait
 
 Finish or resolve active deployments before updating. The rebuild preserves the existing data volume, encryption key, account, settings and history. Keep your `.env` and `media/` directory, then refresh the browser. See the [short installation guide](docs/INSTALL.md) or the [operations reference](docs/OPERATIONS.md) for logs, network settings, backups and recovery.
 
+For Proxmox node, API token, ISO storage, bridges and permissions, follow the [Proxmox setup guide](docs/PROXMOX.md). Select the target host once in the deployment wizard; GDeploy uses its saved hypervisor automatically. Proxmox uses uploaded or server-mounted source ISOs and QEMU Guest Agent.
+
 ## Included
 
 - A guided form that starts with no software selected, then gives every selected VM its own name, vCPUs, RAM, disk, datastore, port group and DHCP/static IPv4 settings. Optionally deploy as soon as preflight passes; manual deployment remains the default.
-- A **Setup** section with **ESXi connection**, **OS installation media**, **Software packages** and **SSH access** tabs. Choose an ISO from an ESXi datastore, upload it through the browser, or select it from the GDeploy server's media directory. Optionally save your SSH public keys for the `gdeploy` user on future VMs.
+- A **Setup** section with **Virtualization hosts**, **OS installation media**, **Software packages** and **SSH access** tabs. Choose an ISO from an ESXi datastore, upload it through the browser, or select it from the GDeploy server's media directory. Optionally save your SSH public keys for the `gdeploy` user on future VMs.
 - Upload or select a licensed Splunk Enterprise `.tgz` in Setup, verify its publisher checksum, and manage unused uploads without editing environment files. Package-related preflight failures link to Setup while retaining the deployment draft.
 - Configure **FleetManager** in its deployment-wizard step after **Configure VMs**, using a Corelight repository token, a shared community string and the product identity PEM license. Select **Latest available** or an exact repository version before preflight. Setup also keeps its defaults. The [FleetManager walkthrough](docs/FLEETMANAGER.md) covers installation and the first sign-in.
 - An optional **OS only** VM alongside the application roles.
 - Media checksum, inventory, name, capacity and network-input checks before provisioning.
-- Save a default port group for the configured ESXi host in Setup. New VM forms use it, and each VM can override it; otherwise choose a port group explicitly.
-- Retrieve, inspect and explicitly trust an ESXi certificate from Setup, with no container restart.
+- Save a default ESXi port group or Proxmox bridge for each host in Setup. New VM forms use it, and each VM can override it; otherwise choose a port group explicitly.
+- Retrieve, inspect and explicitly trust an ESXi or Proxmox certificate from Setup, with no container restart.
 - Deploy **Corelight Software Sensor** on Ubuntu 24.04 or experimental AlmaLinux 10 with separate management/monitoring NICs, a required sensor license key and unique Fleet pairing token. Configure its repository, community and Fleet defaults before preflight. See the [sensor walkthrough](docs/CORELIGHT_SENSOR.md) for resources, traffic mirroring and pairing.
 - Unattended Ubuntu installation with NoCloud autoinstall, or AlmaLinux 10 installation with Anaconda/Kickstart, using a remastered bootable ISO that preserves the original media.
 - Unique generated guest/application credentials, encrypted storage and an explicit **Credentials** view in every deployment.
@@ -56,7 +58,7 @@ Finish or resolve active deployments before updating. The rebuild preserves the 
 - Data-filesystem capacity and saved ISO usage in Setup, with protected deletion of unused uploaded or ESXi-imported copies.
 - Failed-deployment **delete & redeploy**, with typed confirmation and strict resource ownership checks.
 - Web-app authentication, required replacement of default sign-in credentials, expiring sessions, CSRF protection and sign-in throttling.
-- An expandable **Preview** section below **Deployments**, listing **Proxmox** and **VM Manager** as planned future work. AlmaLinux is now available in Setup. See the [roadmap](docs/ROADMAP.md) for the planned VM inventory, performance overview and embedded SSH terminal.
+- An expandable **Preview** section below **Deployments**, listing **VM Manager** as planned future work. Proxmox deployment is now available. AlmaLinux is now available in Setup. See the [roadmap](docs/ROADMAP.md) for the planned VM inventory, performance overview and embedded SSH terminal.
 
 Saved deployment profiles are outside this initial scope.
 
@@ -66,7 +68,7 @@ Saved deployment profiles are outside this initial scope.
 
 Open [GitHub Releases](https://github.com/DasFunfZigste/GDeploy/releases/latest) for the current version, changelog, exact Docker image digest, downloadable deployment bundle and Docker image archive. Each release page includes the complete installation walkthrough.
 
-The current iteration is **v0.16.2**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.16.2` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
+The current iteration is **v0.17.0**, with image reference `ghcr.io/dasfunfzigste/gdeploy:0.17.0` for `linux/amd64`. The repository and release downloads are public. GHCR package visibility is separate; use the source build above or the [optional downloadable image archive](docs/OPERATIONS.md#optional-release-image-archive) without a registry login. Historical release notes and tags remain unchanged.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASING.md](docs/RELEASING.md) for the repeatable release process.
 
@@ -90,7 +92,7 @@ Use the update commands at the top of this README from your existing clone. Opti
 
 ## ESXi and network preparation
 
-- Use a standalone ESXi 8.0 U3 endpoint. vCenter, distributed switches and clusters are outside this release.
+- Use a standalone ESXi 8.0 U3 endpoint or a selected Proxmox VE 9.2 node. vCenter and ESXi distributed switches/clusters are outside this release. Proxmox cluster endpoints require an explicit online node; migration and cluster management are outside deployment scope.
 - The ESXi account needs permission to read inventory, create/configure/power/delete VMs, allocate datastore space and manage the deployment's ISO files. Selecting existing ESXi media also requires `Datastore.Browse` and file download access. ESXi licensing must permit provisioning through the vSphere API. Inventory checks prove authentication and read access; actual deployment operations validate write privileges and license capabilities.
 - The app connects to ESXi over HTTPS **443** for API operations and datastore downloads/uploads. It verifies the certificate using the exact certificate you approved for that endpoint, or normal system/private CA trust when no certificate is approved.
 - The app must reach guests on SSH **22**. Application installation needs DNS and access to the selected OS's package mirrors; Elastic roles also need the official Elastic repository. Alma's initial OS packages come from the full DVD. FleetManager additionally needs `pkgrepos.corelight.cloud` and HTTPS download destinations (which can be CloudFront): the container uses them for version choices and the guest for installation. Ubuntu uses apt; Alma uses dnf/RPM and verified repository metadata.
@@ -103,7 +105,7 @@ Use the update commands at the top of this README from your existing clone. Opti
 
 ### Trust an ESXi certificate in the app
 
-In **Setup → ESXi connection**, retrieve the certificate for the entered host. Review its subject, issuer, validity dates, DNS/IP names and **SHA-256 fingerprint**. Compare that fingerprint with the certificate shown through a trusted ESXi management session before selecting **Trust certificate**; retrieving a certificate alone does not establish the host's identity. Save the connection credentials and test the connection.
+In **Setup → Virtualization hosts**, retrieve the certificate for the entered host. Review its subject, issuer, validity dates, DNS/IP names and **SHA-256 fingerprint**. Compare that fingerprint with the certificate shown through a trusted ESXi management session before selecting **Trust certificate**; retrieving a certificate alone does not establish the host's identity. Save the connection credentials and test the connection.
 
 The approval is stored in the app database for that exact host/IP and survives restarts. API connections and datastore downloads/uploads require the approved certificate and valid dates. A changed or renewed certificate must be retrieved, reviewed and trusted again. Explicit approval also supports an ESXi IP address that is absent from the certificate's DNS/IP names. Removing trust in the same screen restores normal system/private CA verification. No CA file, environment edit or restart is needed for this workflow.
 
@@ -117,7 +119,7 @@ As an optional alternative for a private CA, make a PEM bundle containing the no
 - Each VM receives the OS administrator **`gdeploy`**, a different random password, and a separate automation SSH key. VM names remain hostnames; they are not passwords.
 - New OS, Elasticsearch/Kibana and Splunk login passwords use 40 random characters without common letter/number lookalikes or punctuation. Existing and already queued passwords remain valid; the change does not restrict passwords you enter yourself. FleetManager's temporary administrator password is generated by the vendor.
 - Open a deployment and select **Reveal credentials** to see the exact VM username/password, IP, SSH host key, application URL and application credentials. Reveals are recorded in the deployment events. The browser conceals the panel automatically after one minute and when navigating away. Copying a value leaves it in your operating-system clipboard until replaced.
-- ESXi credentials, guest passwords, SSH private keys and application secrets are encrypted using a persistent key. Automatic installations keep it in `/data/bootstrap.json` inside the data volume; manually configured installations use `.env`. Back up the data volume, including `bootstrap.json`, and any existing environment files; losing the original key prevents decryption. Application administrators can intentionally reveal deployment passwords.
+- Hypervisor credentials, guest passwords, SSH private keys and application secrets are encrypted using a persistent key. Automatic installations keep it in `/data/bootstrap.json` inside the data volume; manually configured installations use `.env`. Back up the data volume, including `bootstrap.json`, and any existing environment files; losing the original key prevents decryption. Application administrators can intentionally reveal deployment passwords.
 - Splunk receives its own `admin` password. Selecting Splunk requires explicit acceptance of its software license. License activation beyond the supplied package's initial behavior is a separate administration step.
 - Sensor repository tokens, license keys, community strings and per-job pairing tokens are encrypted. Pairing tokens are not shared defaults or reusable across unrelated jobs. Sensor **Delete & redeploy** makes a replacement token optional when the sensor installation never started; leave it blank to reuse that job's encrypted configuration. If installation may have started or its state is unknown, a fresh token is required before cleanup. GDeploy does not manage or delete Fleet sensor records.
 - FleetManager receives a vendor-generated temporary **`admin`** password in **Credentials**; change it at first sign-in. Setup secrets and the product identity PEM are encrypted, while responses show saved-state flags and license metadata. Editing Setup does not rotate values or upgrade software on an existing FleetManager VM.

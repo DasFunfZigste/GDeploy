@@ -42,6 +42,8 @@ from .packages import PackageError, SplunkPackageManager
 from .service import DeploymentError, DeploymentService
 from .ssh_keys import SSHKeyError, ssh_public_key_details
 from .vmware import VMwareError
+from .targets import TargetHosts, TargetHostError
+from .models import TargetHostSettings, TargetCertificateHost, TargetCertificateApproval
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "gdeploy_session"
@@ -62,6 +64,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         )
         app.state.service = service_factory(app.state.db, app.state.config)
         app.state.deployment_defaults = DeploymentDefaults(app.state.db, app.state.service)
+        app.state.targets = TargetHosts(app.state.db, app.state.service)
         app.state.certificates = CertificateTrust(app.state.db)
         app.state.media = MediaManager(app.state.db, app.state.config)
         app.state.media.recover_uploads()
@@ -143,6 +146,10 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.exception_handler(DeploymentError)
     async def deployment_error(request, exc):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(TargetHostError)
+    async def target_host_error(request, exc):
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
     @app.exception_handler(CertificateTrustError)
     async def certificate_error(request, exc):
@@ -262,7 +269,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "host": saved.get("host", ""),
             "username": saved.get("username", ""),
             "verify_tls": True,
-            "configured": bool(saved),
+            "configured": bool(saved) or bool(request.app.state.db.target_hosts()),
+            "target_hosts": request.app.state.targets.catalog(),
             "certificate_trust": request.app.state.certificates.saved(saved["host"]) if saved else None,
             "iso_configured": media["ready"],
             "os_profile": media["profile"],
@@ -433,8 +441,37 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             raise MediaError(str(exc)) from None
 
     @app.get("/api/inventory")
-    def inventory(request: Request, current=Depends(authenticated)):
-        return request.app.state.service.inventory()
+    def inventory(request: Request, target_host_id: str | None = None, current=Depends(authenticated)):
+        return request.app.state.service.inventory(target_host_id) if target_host_id else request.app.state.service.inventory()
+
+    @app.get("/api/hosts")
+    def hosts(request: Request, current=Depends(authenticated)):
+        return request.app.state.targets.catalog()
+
+    @app.post("/api/hosts", status_code=201)
+    def add_host(payload: TargetHostSettings, request: Request, current=Depends(authenticated)):
+        return request.app.state.targets.save(payload)
+
+    @app.put("/api/hosts/{host_id}")
+    def edit_host(host_id: str, payload: TargetHostSettings, request: Request, current=Depends(authenticated)):
+        return request.app.state.targets.save(payload, host_id)
+
+    @app.delete("/api/hosts/{host_id}")
+    def remove_host(host_id: str, request: Request, current=Depends(authenticated)):
+        return request.app.state.targets.remove(host_id)
+
+    @app.post("/api/hosts/certificate/inspect")
+    def inspect_host_certificate(payload: TargetCertificateHost, request: Request, current=Depends(authenticated)):
+        return request.app.state.certificates.inspect(payload.host, payload.hypervisor)
+
+    @app.post("/api/hosts/certificate/trust")
+    def trust_host_certificate(payload: TargetCertificateApproval, request: Request, current=Depends(authenticated)):
+        return request.app.state.certificates.trust(payload.host, payload.fingerprint_sha256, payload.hypervisor)
+
+    @app.delete("/api/hosts/certificate/trust")
+    def remove_host_certificate(payload: TargetCertificateHost, request: Request, current=Depends(authenticated)):
+        request.app.state.certificates.remove(payload.host, payload.hypervisor)
+        return {"ok": True}
 
     @app.post("/api/settings/certificate/inspect")
     def inspect_certificate(payload: CertificateHost, request: Request, current=Depends(authenticated)):

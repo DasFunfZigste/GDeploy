@@ -3610,3 +3610,14 @@ td {
 #corelight-sensor-panel .alert p {
   margin-bottom:0
 }
+
+/* Named virtualization host setup. */
+.target-host-list { padding: 0 24px; }
+.target-host-list .vm-card { margin-top: 16px; }
+#target-hosts-panel .settings-form { padding: 24px; }
+#target-hosts-panel .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+#target-hosts-panel .certificate-fingerprint { display: block; overflow-wrap: anywhere; }
+#target-hosts-panel .certificate-details { margin: 12px 0; }
+@media (max-width: 600px) {
+  .target-host-list, #target-hosts-panel .settings-form { padding: 16px; }
+}

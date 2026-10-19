@@ -81,6 +81,61 @@ class SSHKeySettings(StrictModel):
     public_keys: list[Annotated[str, Field(max_length=MAX_SSH_KEY_BYTES)]] = Field(max_length=MAX_SSH_KEYS)
 
 
+class TargetHostSettings(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    name: str = Field(min_length=1, max_length=80)
+    hypervisor: Literal["esxi", "proxmox"]
+    host: str = Field(min_length=1, max_length=300)
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(default="", max_length=1024)
+    auth_type: Literal["password", "token"] = "password"
+    node: str = Field(default="", max_length=128)
+    iso_storage: str = Field(default="", max_length=128)
+    default_network: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        from .certificate_trust import certificate_endpoint
+        from .proxmox import ProxmoxClient
+        for field in ("name", "host", "username", "node", "iso_storage", "default_network"):
+            value = getattr(self, field).strip()
+            if any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise ValueError("Host settings cannot contain control characters.")
+            setattr(self, field, value)
+        if not self.name or not self.username:
+            raise ValueError("Supply a host name and authentication identity.")
+        try:
+            certificate_endpoint(self.host, self.hypervisor)
+            if self.hypervisor == "proxmox":
+                ProxmoxClient(self.host, self.username, self.password or "validation-placeholder", node=self.node,
+                              iso_storage=self.iso_storage, auth_type=self.auth_type)
+                if self.default_network and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", self.default_network):
+                    raise ValueError("Choose a valid Proxmox bridge identifier.")
+            elif self.auth_type != "password" or self.node or self.iso_storage:
+                raise ValueError("ESXi uses password authentication and its VM datastore for installation media.")
+        except RuntimeError as error:
+            raise ValueError(str(error)) from None
+        return self
+
+
+class TargetCertificateHost(StrictModel):
+    host: str = Field(min_length=1, max_length=300)
+    hypervisor: Literal["esxi", "proxmox"] = "esxi"
+
+    @model_validator(mode="after")
+    def validate_endpoint(self):
+        from .certificate_trust import certificate_endpoint
+        try:
+            certificate_endpoint(self.host, self.hypervisor)
+        except RuntimeError as error:
+            raise ValueError(str(error)) from None
+        return self
+
+
+class TargetCertificateApproval(TargetCertificateHost):
+    fingerprint_sha256: str = Field(pattern=r"^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$")
+
+
 class DeploymentDefaultsSettings(CertificateHost):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False, strict=True)
     default_network: str = Field(min_length=1, max_length=128, strict=True)
@@ -238,6 +293,7 @@ class DeploymentSpec(StrictModel):
     splunk_license_accepted: bool = False
     sensor_pairing_token: str = Field(default="", max_length=4096, repr=False)
     os_profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] | None = None
+    target_host_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9-]+$")
 
     @field_validator("sensor_pairing_token", mode="before")
     @classmethod

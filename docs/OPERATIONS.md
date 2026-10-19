@@ -1,6 +1,6 @@
 # GDeploy operations and reference
 
-Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers network settings, accounts, media, software, storage, backups and advanced launch methods for **GDeploy 0.16.2**. Commands assume the same clone at `~/GDeploy` and use `sudo docker`; users authorized to run Docker directly may omit `sudo`. New guests can use Ubuntu 24.04 or AlmaLinux 10; see the [Alma setup and testing guide](ALMALINUX.md).
+Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers network settings, accounts, media, software, storage, backups and advanced launch methods for **GDeploy 0.17.0**. Commands assume the same clone at `~/GDeploy` and use `sudo docker`; users authorized to run Docker directly may omit `sudo`. New guests can use Ubuntu 24.04 or AlmaLinux 10; see the [Alma setup and testing guide](ALMALINUX.md).
 
 - [Network binding](#optional-restrict-the-bind-address-or-change-the-port) and [HTTPS/SSH access](#https-and-optional-ssh-access)
 - [Account setup](#complete-the-first-sign-in) and [startup recovery](#fix-an-existing-source-checkout-that-cannot-start)
@@ -341,7 +341,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from Deployments** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.16.2/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.17.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ### Check AlmaLinux readiness after a deployment error
 
@@ -413,10 +413,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.16.2** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.17.0** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.16.2-deploy.tar.gz`
-- `gdeploy-0.16.2-linux-amd64.image.tar.gz`
+- `gdeploy-0.17.0-deploy.tar.gz`
+- `gdeploy-0.17.0-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -428,12 +428,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.16.2-deploy.tar.gz
-sudo docker load --input gdeploy-0.16.2-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.17.0-deploy.tar.gz
+sudo docker load --input gdeploy-0.17.0-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.16.2` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.17.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
@@ -557,3 +557,7 @@ For an installation using a release image archive, download and verify the new i
 Do not blindly roll back below **0.1.3** after choosing your account: older versions ignore the database administrator record and use the old bootstrap/environment login, which may be `admin`/`admin`. Restore a matching backup and review the login configuration before starting an older version. Automatic bootstrap was introduced in version **0.1.2**; earlier versions also require explicit environment credentials. Rollback is release-dependent: if an upgrade changes stored data incompatibly, changing the image tag alone is insufficient. Restore the matching backup and encryption key according to that release's notes. Restoring GDeploy's database does **not** undo ESXi VM changes or restore guest application data; inspect ESXi state before resuming work.
 
 Do not run `docker compose down -v` or remove `gdeploy-data` unless you intend to erase GDeploy's saved history and credentials. Run one app container with one worker per data volume.
+
+## Proxmox and multiple target hosts
+
+Use **Setup → Virtualization hosts** to add named ESXi and Proxmox hosts, approve endpoint certificates and choose host-specific network defaults. **New deployment → Target virtualization host** selects the provider automatically. Proxmox uses port 8006, API token/password authentication, a selected node, separate ISO storage, bridges and QEMU Guest Agent. Use uploaded or server-mounted source ISOs. See the [Proxmox setup and permission guide](PROXMOX.md) for the full walkthrough, storage/recovery behavior and downgrade requirements. Existing default ESXi configuration and datastore media import remain available. Back up the complete data volume and original encryption key; releases before v0.17.0 cannot process named targets or Proxmox work.

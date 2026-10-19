@@ -63,7 +63,7 @@ print(json.dumps({
 '''
 
 
-def pending_reason(evidence, hostname):
+def pending_reason(evidence, hostname, hypervisor="esxi"):
     # Import lazily: the probe has no dependency on the Ubuntu readiness code.
     from .guest import GuestError
 
@@ -99,7 +99,7 @@ def pending_reason(evidence, hostname):
     services = evidence.get("services")
     if not isinstance(services, dict):
         raise GuestError("AlmaLinux readiness probe did not report service states.")
-    for name in ("sshd.service", "vmtoolsd.service"):
+    for name in ("sshd.service", "qemu-guest-agent.service" if hypervisor == "proxmox" else "vmtoolsd.service"):
         state = services.get(name)
         if not isinstance(state, dict) or state.get("LoadState") != "loaded":
             raise GuestError(f"AlmaLinux readiness could not find {name}.")

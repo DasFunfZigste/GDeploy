@@ -16,8 +16,6 @@ Planned scope:
 
 The first connection method is SSH. Full hypervisor consoles and VM lifecycle controls can be considered separately when this feature is designed.
 
-## Proxmox
-
-Add Proxmox as a future hypervisor integration.
+Proxmox VE 9.2 deployment is available starting with v0.17.0 and is no longer planned. See [Proxmox setup](PROXMOX.md).
 
 AlmaLinux 10 is available starting with v0.16.0. From v0.16.1, choose **Ubuntu or AlmaLinux** explicitly in **New deployment** and keep a separate verified ISO for each under **Setup → OS installation media**. It is no longer a planned sidebar item. See [the Alma guide](ALMALINUX.md) for installer requirements and experimental Corelight compatibility.

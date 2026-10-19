@@ -59,6 +59,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS ssh_public_keys (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_profile_settings (profile TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS target_hosts (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS splunk_package_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS splunk_package_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -138,6 +139,26 @@ class Database:
         with self.connect() as connection:
             row = connection.execute("SELECT value FROM deployment_defaults WHERE id=1").fetchone()
         return self.unseal(row[0]) if row else None
+
+    def target_hosts(self):
+        with self.connect() as connection:
+            rows = connection.execute("SELECT id,value FROM target_hosts ORDER BY id").fetchall()
+        return [{**self.unseal(row["value"]), "id": row["id"]} for row in rows]
+
+    def target_host(self, host_id):
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM target_hosts WHERE id=?", (host_id,)).fetchone()
+        return {**self.unseal(row[0]), "id": host_id} if row else None
+
+    def set_target_host(self, host_id, value):
+        with self.connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO target_hosts(id,value) VALUES(?,?)", (host_id, self.seal(value)))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Virtualization host configuration updated"))
+
+    def remove_target_host(self, host_id):
+        with self.connect() as connection:
+            connection.execute("DELETE FROM target_hosts WHERE id=?", (host_id,))
+            connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Virtualization host configuration removed; deployment snapshots retained"))
 
     def set_deployment_defaults(self, value):
         encrypted = self.seal(value)

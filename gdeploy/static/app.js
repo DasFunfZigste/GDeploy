@@ -596,7 +596,7 @@
     const progressBox = el('div', {class: 'media-progress', hidden: true}, progress, el('div', {}, progressText, cancel));
     const currentItem = () => catalog?.items?.find(item => item.id === serverSelect.value);
     const currentEsxiFile = () => esxiListing?.files.find(file => file.path === esxiFileSelect.value);
-    const currentEsxiHost = () => esxiListing && state.settings?.configured && normalizedHost(esxiListing.host) === normalizedHost(state.settings.host);
+    const currentEsxiHost = () => esxiListing && state.settings?.host && normalizedHost(esxiListing.host) === normalizedHost(state.settings.host);
     function parentFolder() {
       if (esxiListing && esxiListing.datastore === browseTarget.datastore && esxiListing.folder === browseTarget.folder) return esxiListing.parent;
       if (!browseTarget.folder) return null;
@@ -610,14 +610,14 @@
       installer.disabled = locked;
       serverSelect.disabled = locked || mode !== 'server';
       fileInput.disabled = locked || mode !== 'upload'; fileInput.required = mode === 'upload';
-      const browsingDisabled = locked || mode !== 'esxi' || !state.settings?.configured || browseBusy;
-      connectionPrompt.hidden = Boolean(state.settings?.configured); esxiBrowser.hidden = !state.settings?.configured;
+      const browsingDisabled = locked || mode !== 'esxi' || !state.settings?.host || browseBusy;
+      connectionPrompt.hidden = Boolean(state.settings?.host); esxiBrowser.hidden = !state.settings?.host;
       datastoreSelect.disabled = browsingDisabled || datastoreSelect.options.length <= 1;
       esxiFileSelect.disabled = browsingDisabled || !currentEsxiHost();
       browseRefresh.disabled = browsingDisabled;
       up.disabled = browsingDisabled || parentFolder() === null;
       for (const folder of folderList.querySelectorAll('button')) folder.disabled = browsingDisabled;
-      checksum.disabled = locked || (mode === 'esxi' && (!state.settings?.configured || browseBusy));
+      checksum.disabled = locked || (mode === 'esxi' && (!state.settings?.host || browseBusy));
       refresh.disabled = Boolean(busy || externalBusy);
       refresh.hidden = mode === 'esxi';
       storageRefresh.disabled = Boolean(busy || externalBusy || storageBusy);
@@ -713,7 +713,7 @@
     async function browseESXi(datastore = '', folder = '') {
       if (!currentView() || mode !== 'esxi' || busy || externalBusy) return;
       const request = ++browseRequest, requestedHost = normalizedHost(state.settings?.host);
-      if (!state.settings?.configured) { esxiListing = null; browseBusy = false; syncControls(); return; }
+      if (!state.settings?.host) { esxiListing = null; browseBusy = false; syncControls(); return; }
       const previousListing = esxiListing, previousFile = esxiFileSelect.value, previousChecksum = checksum.value;
       browseTarget = {datastore, folder};
       folderPath.textContent = folder || 'Datastore root';
@@ -1377,6 +1377,107 @@
         el('p', {}, 'Replace the private-key path and VM_IP with your values. Find the VM’s IP address in its deployment details.')));
     return {panel, load, getDraft() { return loaded && changed() ? editor.value : undefined; }, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
+  function configuredTargets() {
+    return state.settings?.target_hosts || (state.settings?.host ? [{id: 'legacy-esxi', name: `ESXi · ${state.settings.host}`, host: state.settings.host, hypervisor: 'esxi', default_network: state.settings.deployment_defaults?.default_network || ''}] : []);
+  }
+  function wizardTarget() { return configuredTargets().find(host => host.id === state.wizard?.targetHostId); }
+  function isProxmox() { return wizardTarget()?.hypervisor === 'proxmox'; }
+  function createTargetHostsPanel() {
+    let editing = null, busy = false;
+    const epoch = state.routeEpoch;
+    const list = el('div', {class: 'target-host-list'});
+    const error = el('div', {class: 'alert alert-error', hidden: true, role: 'alert'});
+    const result = el('div', {role: 'status'});
+    const name = el('input', {id: 'target-name', required: true, maxlength: 80, placeholder: 'e.g. Lab Proxmox'});
+    const provider = el('select', {id: 'target-hypervisor'}, el('option', {value: 'proxmox'}, 'Proxmox VE 9.2'), el('option', {value: 'esxi'}, 'VMware ESXi'));
+    const host = el('input', {id: 'target-address', required: true, placeholder: 'pve.example.com:8006', autocomplete: 'off'});
+    const auth = el('select', {id: 'target-auth'}, el('option', {value: 'token'}, 'API token'), el('option', {value: 'password'}, 'Password'));
+    const username = el('input', {id: 'target-username', required: true, autocomplete: 'off', placeholder: 'gdeploy@pve!automation'});
+    const password = el('input', {id: 'target-secret', type: 'password', autocomplete: 'new-password', placeholder: 'Password or API token secret', required: true});
+    const node = el('input', {id: 'target-node', placeholder: 'Auto-detect on a single-node host'});
+    const iso = el('input', {id: 'target-iso-storage', placeholder: 'e.g. local', list: 'target-iso-options'});
+    const network = el('input', {id: 'target-default-network', placeholder: 'Optional default bridge or port group', list: 'target-network-options'});
+    const isoOptions = el('datalist', {id: 'target-iso-options'}), networkOptions = el('datalist', {id: 'target-network-options'});
+    const proxmoxFields = el('div', {class: 'field-grid'}, field('Proxmox node', node), field('ISO storage', iso, 'Storage that accepts ISO content; VM disks are selected separately.'));
+    const cert = el('div', {class: 'certificate-details'});
+    let inspected = null;
+    const current = () => epoch === state.routeEpoch && Boolean(state.session);
+    const payload = () => ({name: name.value.trim(), hypervisor: provider.value, host: host.value.trim(), username: username.value.trim(), password: password.value, auth_type: provider.value === 'esxi' ? 'password' : auth.value, node: provider.value === 'proxmox' ? node.value.trim() : '', iso_storage: provider.value === 'proxmox' ? iso.value.trim() : '', default_network: network.value.trim()});
+    function sync() {
+      const proxmox = provider.value === 'proxmox';
+      proxmoxFields.hidden = !proxmox; auth.disabled = busy || !proxmox; iso.required = proxmox;
+      provider.disabled = busy || Boolean(editing);
+    }
+    async function run(action) {
+      if (busy) return;
+      busy = true; inlineError(error, '');
+      for (const control of panel.querySelectorAll('button,input,select')) control.disabled = true;
+      try { await action(); } catch (failure) { if (current()) inlineError(error, failure.message); }
+      finally { busy = false; if (current()) { for (const control of panel.querySelectorAll('button,input,select')) control.disabled = false; sync(); } }
+    }
+    function reset() {
+      editing = null; form.reset(); password.value = ''; password.required = true; inspected = null; cert.replaceChildren(); result.replaceChildren(); provider.disabled = false; sync();
+    }
+    async function refresh() {
+      const settings = await api('/api/settings');
+      if (!current()) return;
+      state.settings = settings; drawList(); invalidatePreflight();
+    }
+    function edit(item) {
+      editing = item.id;
+      for (const [input, key] of [[name, 'name'], [provider, 'hypervisor'], [host, 'host'], [auth, 'auth_type'], [username, 'username'], [node, 'node'], [iso, 'iso_storage'], [network, 'default_network']]) input.value = item[key] || '';
+      password.value = ''; password.required = false; password.placeholder = 'Leave blank to keep the saved secret'; inspected = null; cert.replaceChildren(); result.replaceChildren(); sync(); name.focus();
+    }
+    async function test(item) {
+      const inventory = await api(`/api/inventory?target_host_id=${encodeURIComponent(item.id)}`);
+      if (!current()) return;
+      edit(item);
+      isoOptions.replaceChildren(...(inventory.iso_storages || []).map(value => el('option', {value: value.name})));
+      networkOptions.replaceChildren(...(inventory.networks || []).map(value => el('option', {value: value.name})));
+      if (!node.value && inventory.node) node.value = inventory.node;
+      result.replaceChildren(el('p', {class: 'alert alert-success'}, `Connection tested: ${inventory.host.name} · ${inventory.host.cpu_threads} CPUs · ${Math.floor(inventory.host.memory_gb)} GiB RAM. Choose defaults below, then save.`));
+    }
+    function drawList() {
+      list.replaceChildren();
+      for (const item of configuredTargets()) {
+        const actions = el('div', {class: 'form-actions'}, button('Edit', 'button-small', () => edit(item)), button('Test connection', 'button-small', () => run(() => test(item))));
+        if (item.id !== 'legacy-esxi') actions.append(button('Remove host', 'button-small button-danger', () => {
+          if (busy || !window.confirm(`Remove ${item.name} from Setup? Existing deployment records and VMs are kept.`)) return;
+          run(async () => { await api(`/api/hosts/${encodeURIComponent(item.id)}`, {method: 'DELETE'}); if (editing === item.id) reset(); await refresh(); });
+        }));
+        list.append(el('article', {class: 'vm-card'}, el('h3', {}, item.name), el('p', {class: 'muted'}, `${item.hypervisor === 'proxmox' ? 'Proxmox' : 'ESXi'} · ${item.host}${item.node ? ` · ${item.node}` : ''}${item.default_network ? ` · Default network: ${item.default_network}` : ''}`), actions));
+      }
+      if (!list.children.length) list.append(el('p', {class: 'muted'}, 'Add an ESXi or Proxmox host to begin.'));
+    }
+    const inspect = button('Retrieve certificate', 'button-small', () => run(async () => {
+      const endpoint = {host: host.value.trim(), hypervisor: provider.value};
+      const details = await api('/api/hosts/certificate/inspect', {method: 'POST', body: endpoint});
+      if (!current()) return;
+      inspected = {...endpoint, fingerprint_sha256: details.fingerprint_sha256};
+      cert.replaceChildren(el('p', {}, 'SHA-256 fingerprint'), el('code', {class: 'certificate-fingerprint'}, details.fingerprint_sha256), el('p', {}, details.validation_error || 'Compare this fingerprint with the certificate shown by your hypervisor before approving it.'), button('Approve certificate', 'button-small', () => run(async () => {
+        if (!inspected || inspected.host !== host.value.trim() || inspected.hypervisor !== provider.value) throw new Error('Retrieve the certificate again for the current host.');
+        await api('/api/hosts/certificate/trust', {method: 'POST', body: inspected});
+        if (current()) { cert.replaceChildren(el('p', {class: 'alert alert-success'}, 'Host certificate approved. You can save and test this connection.')); inspected = null; }
+      })));
+    }));
+    const untrust = button('Remove certificate trust', 'button-small', () => run(async () => {
+      await api('/api/hosts/certificate/trust', {method: 'DELETE', body: {host: host.value.trim(), hypervisor: provider.value}});
+      if (current()) { inspected = null; cert.replaceChildren(el('p', {}, 'Saved certificate approval removed. CA verification remains enabled.')); }
+    }));
+    const form = el('form', {class: 'settings-form', onSubmit: event => { event.preventDefault(); if (!form.reportValidity()) return; run(async () => {
+      await api(editing ? `/api/hosts/${encodeURIComponent(editing)}` : '/api/hosts', {method: editing ? 'PUT' : 'POST', body: payload()});
+      if (!current()) return;
+      reset(); await refresh(); notify('Virtualization host saved.');
+    }); }}, el('h3', {}, 'Add or edit a target host'),
+      el('div', {class: 'field-grid'}, field('Display name', name), field('Hypervisor', provider), field('Host address', host, 'HTTPS: ESXi defaults to 443; Proxmox defaults to 8006.'), field('Authentication', auth), field('User or API token ID', username), field('Password / API token secret', password)),
+      proxmoxFields, field('Default network', network, 'Used for new VMs only. Save and test a host to load available bridges or port groups.'), isoOptions, networkOptions,
+      el('div', {class: 'form-actions'}, inspect, untrust), cert, error, result,
+      el('div', {class: 'form-footer'}, button('Add another host', 'button-ghost', reset), el('button', {type: 'submit', class: 'button button-primary', id: 'target-save'}, 'Save host')));
+    provider.addEventListener('change', () => { inspected = null; cert.replaceChildren(); if (provider.value === 'esxi') auth.value = 'password'; else auth.value = 'token'; sync(); });
+    host.addEventListener('input', () => { inspected = null; cert.replaceChildren(); });
+    const panel = el('section', {class: 'surface', id: 'target-hosts-panel'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {}, 'Virtualization hosts'), el('p', {}, 'Save named ESXi and Proxmox hosts. Deployment uses the selected host’s hypervisor automatically.'))), list, form);
+    drawList(); sync(); return panel;
+  }
   function renderSettings(initialSSHdraft) {
     const settings = state.settings || {};
     const viewEpoch = state.routeEpoch;
@@ -1654,7 +1755,7 @@
       tabs[key] = {button: tab, marker, description, number};
       steps.append(tab);
     }
-    createSetupTab('connection', '1', 'ESXi connection');
+    createSetupTab('connection', '1', 'Virtualization hosts');
     createSetupTab('media', '2', 'OS installation media');
     createSetupTab('ssh', '3', 'SSH access');
     createSetupTab('packages', '4', 'Software packages');
@@ -1672,14 +1773,14 @@
       updateTab('ssh', sshCount > 0, sshCount ? `${sshCount} public ${sshCount === 1 ? 'key' : 'keys'} saved · optional` : 'Optional · add your public keys');
       const configuredSoftware = Number(Boolean(saved.splunk_configured)) + Number(Boolean(saved.fleetmanager_configured)) + Number(Boolean(saved.corelight_sensor_configured));
       updateTab('packages', configuredSoftware > 0, configuredSoftware ? `${configuredSoftware} software ${configuredSoftware === 1 ? 'configuration' : 'configurations'} ready` : 'Set up the software you plan to deploy');
-      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'ESXi host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · when selected', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Open Software packages to upload or select the Splunk installer and verify its checksum.', 'layers'), item(saved.fleetmanager_configured, 'FleetManager · when selected', saved.fleetmanager_configured ? 'Online repository, community string, and license configured.' : 'Open Software packages → FleetManager to configure installation, community string, and license.', 'server'), item(saved.corelight_sensor_configured, 'Software Sensor · when selected', saved.corelight_sensor_configured ? 'Common defaults saved. Each sensor still needs a fresh Fleet pairing token.' : 'Configure repository access, the sensor license key, and existing FleetManager pairing defaults.', 'activity')));
+      readiness.replaceChildren(el('div', {class: 'surface-header'}, el('h2', {}, 'Setup checklist')), el('div', {class: 'setup-list'}, item(saved.configured, 'Virtualization host', saved.configured ? state.inventory ? 'Connection tested successfully.' : 'Connection details saved. Test the connection to verify access.' : 'Save your host credentials to load inventory.', 'server'), item(saved.iso_configured, 'OS ISO', saved.iso_configured ? 'Installation media saved. Preflight checks it again before deployment.' : 'Open the OS installation media tab to select or upload your ISO.', 'disc'), item(sshCount > 0, 'SSH access · optional', sshCount ? `${sshCount} public ${sshCount === 1 ? 'key will' : 'keys will'} be installed for gdeploy on newly queued deployments.` : 'Add your public keys for convenient access to future VMs.', 'key'), item(saved.splunk_configured, 'Splunk package · when selected', saved.splunk_configured ? 'Splunk package configured. Its license must be accepted for each deployment.' : 'Open Software packages to upload or select the Splunk installer and verify its checksum.', 'layers'), item(saved.fleetmanager_configured, 'FleetManager · when selected', saved.fleetmanager_configured ? 'Online repository, community string, and license configured.' : 'Open Software packages → FleetManager to configure installation, community string, and license.', 'server'), item(saved.corelight_sensor_configured, 'Software Sensor · when selected', saved.corelight_sensor_configured ? 'Common defaults saved. Each sensor still needs a fresh Fleet pairing token.' : 'Configure repository access, the sensor license key, and existing FleetManager pairing defaults.', 'activity')));
     }
     mediaControls = createMediaPanel(catalog => { if (state.settings) { state.settings.os_media_profiles = catalog.profile_selections; state.settings.iso_configured = hasInstallationMedia(); state.settings.os_profile = catalog.profile; } fleetControls?.syncProfile(); sensorControls?.syncProfile(); invalidatePreflight(); renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
     sshControls = createSSHAccessPanel(count => { if (state.settings) state.settings.ssh_key_count = count; renderReadiness(); }, value => { sshBusy = value; syncControls(); }, initialSSHdraft);
     packagesControls = createSplunkPackagePanel(catalog => { if (state.settings) state.settings.splunk_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { packagesBusy = value; syncControls(); });
     fleetControls = createFleetManagerPanel(catalog => { if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; } invalidatePreflight(); renderReadiness(); }, value => { fleetBusy = value; syncControls(); }, {onDirty: invalidatePreflight, onClear: () => clearSuspendedWizardConfiguration('fleet')});
     sensorControls = createSensorPanel(catalog => { if (state.settings) state.settings.corelight_sensor_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { sensorBusy = value; syncControls(); }, {onDirty: invalidatePreflight, onClear: () => clearSuspendedWizardConfiguration('sensor')});
-    panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, form, defaultsPanel);
+    panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, createTargetHostsPanel(), settings.host ? el('details', {class: 'surface'}, el('summary', {}, 'Default ESXi connection · legacy settings'), form, defaultsPanel) : null);
     panels.media = el('div', {id: 'setup-panel-media', role: 'tabpanel', 'aria-labelledby': 'setup-tab-media', tabindex: '0'}, mediaControls.panel);
     panels.ssh = el('div', {id: 'setup-panel-ssh', role: 'tabpanel', 'aria-labelledby': 'setup-tab-ssh', tabindex: '0'}, sshControls.panel);
     const softwareTabs = el('div', {class: 'software-tabs', role: 'tablist', 'aria-label': 'Software configuration'});
@@ -1743,7 +1844,7 @@
     const focusedHistoryControl = document.activeElement?.id === `history-visibility-${data.id}` ? document.activeElement.id : null;
     const vms = data.vms || [];
     const back = el('a', {id: 'deployment-back', class: 'back-link', href: data.hidden_at ? '#deployments/previous' : '#deployments'}, icon('back'), data.hidden_at ? 'Previous deployments' : 'All deployments');
-    const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), el('span', {id: 'deployment-detail-status', role: 'status'}, statusBadge(data.status))), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'} · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
+    const title = el('div', {class: 'page-heading'}, el('div', {}, el('div', {class: 'detail-title'}, el('h1', {}, data.name), el('span', {id: 'deployment-detail-status', role: 'status'}, statusBadge(data.status))), el('p', {class: 'detail-meta'}, `${vms.length} ${vms.length === 1 ? 'virtual machine' : 'virtual machines'}${data.spec?.target ? ` · ${data.spec.target.name} (${data.spec.target.hypervisor === 'proxmox' ? 'Proxmox' : 'ESXi'})` : ''} · Created ${date(data.created_at, true)}`)), button('Refresh', 'button-ghost button-small', () => refreshDetail(true), 'refresh'));
     const vmSurface = el('section', {class: 'surface'}, el('div', {class: 'surface-header'}, el('h2', {}, 'Virtual machines', el('span', {class: 'count-badge'}, vms.length))));
     for (const vm of vms) {
       const spec = (label, value) => el('div', {}, el('dt', {}, label), el('dd', {}, value || '—'));
@@ -1966,7 +2067,7 @@
   async function openWizard() {
     if (!state.session || setupRequired()) return;
     if (state.wizard?.busy) return;
-    if (!state.settings?.configured) { location.hash = 'settings/connection'; notify('Configure an ESXi connection in Setup to begin a deployment.'); return; }
+    if (!state.settings?.configured) { location.hash = 'settings/connection'; notify('Configure a virtualization host in Setup to begin a deployment.'); return; }
     hideCredentials();
     const dialog = $('#wizard-dialog');
     if (state.wizard?.suspended) {
@@ -1974,16 +2075,20 @@
       state.wizard.fleetNeedsRefresh = true; state.wizard.fleetValidated = false; state.wizard.sensorNeedsRefresh = true; state.wizard.sensorValidated = false;
       if (configurationSteps().length && state.wizard.step > 2) state.wizard.step = 2;
     }
-    else { discardWizard(); state.wizard = {step: 0, name: '', osProfile: '', selected: new Set(), vms: {}, accepted: false, autoDeploy: false, preflight: null, sensorPairingToken: '', busy: true, error: ''}; }
-    dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), loading('Loading ESXi datastores and networks…')));
+    else { discardWizard(); state.wizard = {step: 0, name: '', osProfile: '', selected: new Set(), vms: {}, accepted: false, autoDeploy: false, preflight: null, sensorPairingToken: '', targetHostId: '', busy: true, error: ''}; }
+    dialog.replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), loading('Loading virtualization hosts…')));
     dialog.showModal();
     const wizard = state.wizard;
     try {
-      const results = await Promise.allSettled([api('/api/inventory'), api('/api/settings')]);
+      const settings = await api('/api/settings');
       if (state.wizard !== wizard) return;
-      if (results[0].status === 'rejected') throw results[0].reason;
-      if (results[1].status === 'rejected') throw results[1].reason;
-      state.inventory = results[0].value; state.settings = results[1].value; state.inventoryHost = state.settings.host;
+      state.settings = settings;
+      if (!configuredTargets().some(item => item.id === wizard.targetHostId)) wizard.targetHostId = configuredTargets()[0]?.id || '';
+      state.inventory = null; state.inventoryHost = null;
+      if (wizard.targetHostId) {
+        try { state.inventory = await api(`/api/inventory?target_host_id=${encodeURIComponent(wizard.targetHostId)}`); state.inventoryHost = wizardTarget()?.host; }
+        catch (error) { wizard.error = error.message; }
+      }
       wizard.fleetControls?.syncProfile(); wizard.sensorControls?.syncProfile();
       wizard.busy = false;
       renderWizard();
@@ -2091,6 +2196,11 @@
   }
   function defaultVMName(name, role, profile = osProfile()) { const suffix = role === 'ubuntu' && profile === 'alma10-kickstart' ? 'almalinux' : role.replaceAll('_', '-'); return `${(name || 'environment').slice(0, 62 - suffix.length).replace(/-+$/, '')}-${suffix}`; }
   function savedNetworkDefault() {
+    const target = wizardTarget();
+    if (target) {
+      const name = target.default_network || '';
+      return {name, sameHost: true, available: Boolean(state.inventory) && (state.inventory?.networks || []).filter(item => item.name === name).length === 1, host: target.host};
+    }
     const saved = state.settings?.deployment_defaults;
     const name = saved?.default_network || '';
     const sameHost = Boolean(state.settings?.host) && saved?.applies_to_host === true;
@@ -2133,7 +2243,7 @@
     else actions.append(button('Cancel', 'button-ghost', closeWizard));
     const nextLabel = isFleetStep() || isSensorStep() ? 'Save & continue' : wizard.step < reviewStep ? 'Continue' : wizard.preflight?.ok ? `Deploy ${selectedRoles().length} ${selectedRoles().length === 1 ? 'VM' : 'VMs'}` : wizard.autoDeploy ? 'Run preflight & deploy' : 'Run preflight';
     const next = button(nextLabel, 'button-primary', wizardNext, wizard.step < reviewStep ? 'arrow' : wizard.preflight?.ok ? 'plus' : 'shield'); next.id = 'wizard-next';
-    next.disabled = wizard.busy || (wizard.step === 0 && (!wizard.selected.size || !osProfiles.includes(wizard.osProfile)));
+    next.disabled = wizard.busy || (wizard.step === 0 && (!wizard.selected.size || !osProfiles.includes(wizard.osProfile) || !wizard.targetHostId || !state.inventory));
     if (wizard.busy) setBusy(next, wizard.preflight?.ok ? 'Queuing deployment…' : 'Checking prerequisites…');
     for (const action of actions.children) action.disabled = wizard.busy;
     actions.append(next); footer.append(actions);
@@ -2155,6 +2265,27 @@
       for (const role of Object.keys(wizard.vms)) if (wizard.vms[role].name === defaultVMName(previous, role)) wizard.vms[role].name = defaultVMName(wizard.name, role);
     }});
     content.append(field('Deployment name', name, 'Use lowercase letters, numbers, and hyphens. VM names use this as a starting point.'));
+    const targetSelect = el('select', {id: 'wizard-target-host', required: true, onChange: async event => {
+      const targetId = event.target.value;
+      if (wizard.busy || targetId === wizard.targetHostId) return;
+      wizard.targetHostId = targetId; invalidatePreflight(); wizard.busy = true;
+      state.inventory = null; state.inventoryHost = null;
+      renderWizard();
+      try {
+        const inventory = await api(`/api/inventory?target_host_id=${encodeURIComponent(targetId)}`);
+        if (state.wizard !== wizard || wizard.targetHostId !== targetId) return;
+        state.inventory = inventory; state.inventoryHost = wizardTarget()?.host;
+        const savedDefault = savedNetworkDefault();
+        for (const vm of Object.values(wizard.vms)) {
+          vm.datastore = inventory.datastores?.[0]?.name || '';
+          vm.network = savedDefault.available ? savedDefault.name : '';
+          if (vm.role === 'corelight_sensor') vm.monitor_network = '';
+        }
+      } catch (error) { if (state.wizard === wizard) wizard.error = error.message; }
+      finally { if (state.wizard === wizard) { wizard.busy = false; renderWizard(); } }
+    }}, el('option', {value: ''}, 'Choose a target host'), configuredTargets().map(host => el('option', {value: host.id}, `${host.name} · ${host.hypervisor === 'proxmox' ? 'Proxmox' : 'ESXi'}`)));
+    targetSelect.value = wizard.targetHostId;
+    content.append(field('Target virtualization host', targetSelect, 'Host type is detected from its saved configuration. VM storage and networks come from this host.'));
     const installer = el('select', {id: 'wizard-os-profile', required: true, 'aria-describedby': 'wizard-os-media', onChange: event => {
       if (wizard.busy) return;
       const previousProfile = wizard.osProfile;
@@ -2215,18 +2346,18 @@
       if (role === 'corelight_sensor') form.append(el('p', {class: 'media-help'}, 'Software Sensor requires at least 4 CPUs, 16 GB RAM, and 500 GB free after OS installation. Allocate at least 550 GB disk; the 600 GB default provides headroom. Use SSD or better storage.'));
       const datastore = el('select', {id: `vm-${role}-datastore`, ...invalidAttrs('datastore'), required: true, onChange: event => { vm.datastore = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a datastore'), (state.inventory?.datastores || []).map(store => el('option', {value: store.name}, `${store.name} · ${Math.floor(Number(store.free_gb))} GB free`))); datastore.value = vm.datastore;
       const networks = state.inventory?.networks || [], networkCount = name => networks.filter(item => item.name === name).length;
-      const network = el('select', {id: `vm-${role}-network`, ...invalidAttrs('network'), required: true, onChange: event => { vm.network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose a port group'), [...new Set(networks.map(item => item.name))].map(name => el('option', {value: name, disabled: networkCount(name) !== 1}, networkCount(name) === 1 ? name : `${name} · ambiguous name`))); network.value = vm.network;
-      if (vm.network && networkCount(vm.network) !== 1) { if (!networkCount(vm.network)) network.append(el('option', {value: vm.network, disabled: true}, `${vm.network} · unavailable on this host`)); network.value = vm.network; form.append(el('p', {class: 'alert alert-warning'}, 'This VM’s selected port group is unavailable or ambiguous on the current ESXi host. Choose a group with a unique name before continuing.')); }
-      form.append(el('div', {class: 'field-grid'}, field('Datastore', datastore, 'Storage destination on the ESXi host.'), field(role === 'corelight_sensor' ? 'Management network / port group' : 'Network / port group', network, role === 'corelight_sensor' ? 'Must reach GDeploy, the package repositories, and your existing FleetManager instance.' : 'Must be reachable from GDeploy.')));
+      const network = el('select', {id: `vm-${role}-network`, ...invalidAttrs('network'), required: true, onChange: event => { vm.network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, isProxmox() ? 'Choose a bridge' : 'Choose a port group'), [...new Set(networks.map(item => item.name))].map(name => el('option', {value: name, disabled: networkCount(name) !== 1}, networkCount(name) === 1 ? name : `${name} · ambiguous name`))); network.value = vm.network;
+      if (vm.network && networkCount(vm.network) !== 1) { if (!networkCount(vm.network)) network.append(el('option', {value: vm.network, disabled: true}, `${vm.network} · unavailable on this host`)); network.value = vm.network; form.append(el('p', {class: 'alert alert-warning'}, isProxmox() ? 'This VM’s selected bridge is unavailable on the selected Proxmox node.' : 'This VM’s selected port group is unavailable or ambiguous on the current ESXi host. Choose a group with a unique name before continuing.')); }
+      form.append(el('div', {class: 'field-grid'}, field('Datastore', datastore, 'Storage destination on the selected virtualization host.'), field(isProxmox() ? (role === 'corelight_sensor' ? 'Management network / bridge' : 'Network / bridge') : (role === 'corelight_sensor' ? 'Management network / port group' : 'Network / port group'), network, role === 'corelight_sensor' ? 'Must reach GDeploy, the package repositories, and your existing FleetManager instance.' : 'Must be reachable from GDeploy.')));
       if (role === 'corelight_sensor') {
-        const monitor = el('select', {id: `vm-${role}-monitor_network`, ...invalidAttrs('monitor_network'), required: true, onChange: event => { vm.monitor_network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, 'Choose the monitoring port group'), [...new Set(networks.map(item => item.name))].map(name => el('option', {value: name, disabled: networkCount(name) !== 1}, name)));
+        const monitor = el('select', {id: `vm-${role}-monitor_network`, ...invalidAttrs('monitor_network'), required: true, onChange: event => { vm.monitor_network = event.target.value; invalidatePreflight(); }}, el('option', {value: ''}, isProxmox() ? 'Choose the monitoring bridge' : 'Choose the monitoring port group'), [...new Set(networks.map(item => item.name))].map(name => el('option', {value: name, disabled: networkCount(name) !== 1}, name)));
         if (vm.monitor_network && !networkCount(vm.monitor_network)) monitor.append(el('option', {value: vm.monitor_network, disabled: true}, `${vm.monitor_network} · unavailable on this host`));
         monitor.value = vm.monitor_network || '';
-        form.append(field('Monitoring port group · second NIC, no IP', monitor, 'A dedicated monitoring port group is recommended. Configure traffic mirroring and the required ESXi monitoring permissions separately; GDeploy does not change shared port-group security.'));
+        form.append(field(isProxmox() ? 'Monitoring bridge · second NIC, no IP' : 'Monitoring port group · second NIC, no IP', monitor, isProxmox() ? 'Provide TAP/SPAN traffic to a dedicated monitoring bridge. GDeploy does not configure shared host networking or traffic mirroring.' : 'A dedicated monitoring port group is recommended. Configure traffic mirroring and the required ESXi monitoring permissions separately; GDeploy does not change shared port-group security.'));
       }
       form.append(el('hr', {class: 'form-divider'}), el('div', {class: 'field-section-label'}, role === 'corelight_sensor' ? 'Management IP address configuration' : 'IP address configuration'));
       const staticFields = el('div', {class: 'static-fields', hidden: vm.ip_mode !== 'static'}, el('div', {class: 'field-grid'}, field('IPv4 address / prefix', input('address', {type: 'text', required: true, placeholder: '192.168.1.20/24', autocomplete: 'off', spellcheck: 'false'}), 'Include the subnet prefix, for example /24.'), field('Default gateway', input('gateway', {type: 'text', required: true, placeholder: '192.168.1.1', autocomplete: 'off', spellcheck: 'false'}))), field('DNS servers', input('dnsText', {type: 'text', required: true, placeholder: '192.168.1.1, 1.1.1.1', autocomplete: 'off', spellcheck: 'false'}), 'Separate multiple IPv4 addresses with commas.'));
-      const dhcpNote = el('p', {class: 'network-note', hidden: vm.ip_mode !== 'dhcp'}, 'A DHCP server on this network must provide an address, gateway, and DNS. GDeploy discovers the guest address through VMware Tools.');
+      const dhcpNote = el('p', {class: 'network-note', hidden: vm.ip_mode !== 'dhcp'}, `A DHCP server on this network must provide an address, gateway, and DNS. GDeploy discovers the guest address through ${isProxmox() ? 'QEMU Guest Agent' : 'VMware Tools'}.`);
       const reservation = role === 'corelight_sensor' ? el('label', {class: 'check-label sensor-dhcp-reservation', hidden: vm.ip_mode !== 'dhcp'}, el('input', {id: `vm-${role}-dhcp_reserved`, type: 'checkbox', ...invalidAttrs('dhcp_reserved'), checked: vm.dhcp_reserved, onChange: event => { vm.dhcp_reserved = event.target.checked; invalidatePreflight(); }}), el('span', {}, 'I have arranged a reserved DHCP IPv4 address for this sensor’s management NIC. An ordinary changing DHCP lease is not supported.')) : null;
       const choices = el('div', {class: 'network-choices', role: 'radiogroup', 'aria-label': `${roleName(role)} IP address configuration`});
       for (const [mode, label] of [['dhcp', role === 'corelight_sensor' ? 'Reserved DHCP' : 'Automatic (DHCP)'], ['static', 'Static IP']]) choices.append(el('label', {}, el('input', {id: `vm-${role}-network-${mode}`, type: 'radio', name: `ip-mode-${role}`, value: mode, checked: vm.ip_mode === mode, onChange: () => { vm.ip_mode = mode; invalidatePreflight(); staticFields.hidden = mode !== 'static'; dhcpNote.hidden = mode !== 'dhcp'; if (reservation) reservation.hidden = mode !== 'dhcp'; }}), label));
@@ -2236,7 +2367,7 @@
   }
   function getSpec() {
     const wizard = state.wizard;
-    return {name: wizard.name.trim(), os_profile: wizard.osProfile, splunk_license_accepted: wizard.accepted, ...(wizard.selected.has('corelight_sensor') ? {sensor_pairing_token: wizard.sensorPairingToken || ''} : {}), vms: selectedRoles().map(role => {
+    return {name: wizard.name.trim(), target_host_id: wizard.targetHostId || null, os_profile: wizard.osProfile, splunk_license_accepted: wizard.accepted, ...(wizard.selected.has('corelight_sensor') ? {sensor_pairing_token: wizard.sensorPairingToken || ''} : {}), vms: selectedRoles().map(role => {
       const vm = wizard.vms[role];
       return {role, name: vm.name.trim(), cpu: Number(vm.cpu), ram_gb: Number(vm.ram_gb), disk_gb: Number(vm.disk_gb), datastore: vm.datastore, network: vm.network, ip_mode: vm.ip_mode, address: vm.ip_mode === 'static' ? vm.address.trim() : null, gateway: vm.ip_mode === 'static' ? vm.gateway.trim() : null, dns: vm.ip_mode === 'static' ? vm.dnsText.split(',').map(value => value.trim()).filter(Boolean) : [], ...(role === 'corelight_sensor' ? {monitor_network: vm.monitor_network, dhcp_reserved: vm.ip_mode === 'dhcp' && vm.dhcp_reserved === true} : {})};
     })};
@@ -2248,7 +2379,7 @@
     content.append(el('div', {class: 'wizard-summary'}, summary(spec.vms.length, 'DEDICATED VIRTUAL MACHINES'), summary(`${spec.vms.reduce((n, vm) => n + vm.cpu, 0)} vCPU`, `${spec.vms.reduce((n, vm) => n + vm.ram_gb, 0)} GB TOTAL MEMORY`), summary(`${spec.vms.reduce((n, vm) => n + vm.disk_gb, 0)} GB`, 'TOTAL VIRTUAL DISK CAPACITY')));
     const review = el('div', {});
     for (const vm of spec.vms) review.append(el('div', {class: 'review-vm'}, el('div', {class: 'review-vm-head'}, roleIcon(vm.role), el('strong', {}, vm.name)), el('small', {}, `${roleName(vm.role)} · ${vm.cpu} vCPU · ${vm.ram_gb} GB RAM · ${vm.disk_gb} GB disk`, el('br'), `${vm.datastore} · ${vm.network} · ${vm.ip_mode === 'dhcp' ? vm.dhcp_reserved ? 'Reserved DHCP' : 'DHCP' : vm.address}`, vm.monitor_network ? [el('br'), `Monitoring: ${vm.monitor_network} · second NIC, no IP`] : null, vm.ip_mode === 'static' ? [el('br'), `Gateway ${vm.gateway} · DNS ${vm.dns.join(', ')}`] : null)));
-    content.append(el('p', {class: 'media-help'}, `Operating system: ${osName(spec.os_profile)}`), review);
+    content.append(el('p', {class: 'media-help'}, `Target: ${wizardTarget()?.name || 'Unavailable'} · ${isProxmox() ? 'Proxmox' : 'ESXi'}`), el('p', {class: 'media-help'}, `Operating system: ${osName(spec.os_profile)}`), review);
     if (spec.os_profile === 'alma10-kickstart' && spec.vms.some(vm => ['fleetmanager', 'corelight_sensor'].includes(vm.role))) content.append(almaWarning());
     if (wizard.selected.has('fleetmanager')) {
       const fleet = wizard.fleetCatalog || {};
@@ -2293,7 +2424,7 @@
       else if (!Number.isInteger(vm.ram_gb) || vm.ram_gb < limits.ram || vm.ram_gb > 2048) invalid = ['ram_gb', `Memory must be a whole number from ${limits.ram} to 2048 GB for this role.`];
       else if (!Number.isInteger(vm.disk_gb) || vm.disk_gb < limits.disk || vm.disk_gb > 65536) invalid = ['disk_gb', `Disk size must be a whole number from ${limits.disk} to 65536 GB.`];
       else if (!vm.datastore || !vm.network) invalid = [!vm.datastore ? 'datastore' : 'network', 'Choose a datastore and network for this VM.'];
-      else if ((state.inventory?.networks || []).filter(network => network.name === vm.network).length !== 1) invalid = ['network', 'The selected port group is unavailable or ambiguous on this ESXi host. Choose an available port group with a unique name.'];
+      else if ((state.inventory?.networks || []).filter(network => network.name === vm.network).length !== 1) invalid = ['network', isProxmox() ? 'The selected bridge is unavailable on this Proxmox node. Choose an available bridge.' : 'The selected port group is unavailable or ambiguous on this ESXi host. Choose an available port group with a unique name.'];
       else if (vm.role === 'corelight_sensor' && !vm.monitor_network) invalid = ['monitor_network', 'Choose a port group for the second, monitoring NIC.'];
       else if (vm.role === 'corelight_sensor' && (state.inventory?.networks || []).filter(network => network.name === vm.monitor_network).length !== 1) invalid = ['monitor_network', 'Choose an available monitoring port group with a unique name.'];
       else if (vm.role === 'corelight_sensor' && vm.ip_mode === 'dhcp' && !vm.dhcp_reserved) invalid = ['dhcp_reserved', 'Use a static IPv4 address or confirm a reserved DHCP address for the management NIC.'];

@@ -1,4 +1,4 @@
-"""Explicit certificate approval, scoped to one normalized ESXi endpoint."""
+"""Explicit certificate approval, scoped to one normalized virtualization endpoint."""
 
 from __future__ import annotations
 
@@ -16,8 +16,14 @@ class CertificateTrustError(ValueError):
         self.status_code = status_code
 
 
-def certificate_endpoint(value):
-    host, port, _ = ESXiClient._parse_host(value)
+def certificate_endpoint(value, hypervisor="esxi"):
+    if hypervisor == "proxmox":
+        from .proxmox import ProxmoxClient
+        host, port, _ = ProxmoxClient._parse_host(value)
+    elif hypervisor == "esxi":
+        host, port, _ = ESXiClient._parse_host(value)
+    else:
+        raise VMwareError("Unknown virtualization host type.")
     try:
         host = ipaddress.ip_address(host).compressed
     except ValueError:
@@ -31,9 +37,9 @@ class CertificateTrust:
         self.db = db
         self.lock = threading.Lock()
 
-    def _target(self, host):
+    def _target(self, host, hypervisor="esxi"):
         try:
-            return certificate_endpoint(host)
+            return certificate_endpoint(host, hypervisor)
         except VMwareError as error:
             raise CertificateTrustError(str(error)) from None
 
@@ -58,9 +64,9 @@ class CertificateTrust:
             "trusted_at": saved["trusted_at"] if saved else None,
         }
 
-    def saved(self, host):
+    def saved(self, host, hypervisor="esxi"):
         try:
-            hostname, _, endpoint = certificate_endpoint(host)
+            hostname, _, endpoint = certificate_endpoint(host, hypervisor)
         except VMwareError:
             # Older versions accepted malformed DNS labels. Keep those settings
             # visible and editable; retrieval and connections still reject them.
@@ -68,13 +74,13 @@ class CertificateTrust:
         saved = self.db.esxi_certificate(endpoint)
         return self._details(saved["pem"], hostname, endpoint, saved) if saved else None
 
-    def inspect(self, host):
-        hostname, port, endpoint = self._target(host)
+    def inspect(self, host, hypervisor="esxi"):
+        hostname, port, endpoint = self._target(host, hypervisor)
         pem = self._fetch(hostname, port)
         return self._details(pem, hostname, endpoint, self.db.esxi_certificate(endpoint))
 
-    def trust(self, host, fingerprint):
-        hostname, port, endpoint = self._target(host)
+    def trust(self, host, fingerprint, hypervisor="esxi"):
+        hostname, port, endpoint = self._target(host, hypervisor)
         # Serialize approval/removal. Fetch again so an old preview can never
         # silently approve the certificate a host presents after replacement.
         with self.lock:
@@ -82,14 +88,14 @@ class CertificateTrust:
             details = self._details(pem, hostname, endpoint, self.db.esxi_certificate(endpoint))
             if not hmac.compare_digest(details["fingerprint_sha256"].upper(), fingerprint.upper()):
                 raise CertificateTrustError(
-                    "The ESXi certificate changed after retrieval. Retrieve it again and review the new fingerprint.", 409
+                    "The host certificate changed after retrieval. Retrieve it again and review the new fingerprint.", 409
                 )
             if not details["can_trust"]:
                 raise CertificateTrustError(details["validation_error"] or "This certificate cannot be trusted.")
             saved = self.db.trust_esxi_certificate(endpoint, pem, details["fingerprint_sha256"])
             return self._details(pem, hostname, endpoint, saved)
 
-    def remove(self, host):
-        _, _, endpoint = self._target(host)
+    def remove(self, host, hypervisor="esxi"):
+        _, _, endpoint = self._target(host, hypervisor)
         with self.lock:
             self.db.remove_esxi_certificate(endpoint)

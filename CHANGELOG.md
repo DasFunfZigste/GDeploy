@@ -2,6 +2,23 @@
 
 Each numbered release has a matching Git tag, Docker image, installation bundle and GitHub Release page. Versions follow semantic versioning; the 0.x series is for lab validation before production use.
 
+## [0.17.0] - 2026-10-19
+
+### Added
+
+- Deploy Ubuntu 24.04 and AlmaLinux 10 VMs to **Proxmox VE 9.2**, including OS only, Splunk, Elasticsearch/Kibana, FleetManager and Software Sensor. Use verified REST API token/password authentication, node selection, dedicated VM resources, VirtIO networking/disks, QEMU Guest Agent, unattended installers and the existing OS-specific application flows. Corelight on Alma 10 remains experimental.
+- Add **Setup → Virtualization hosts** for named ESXi/Proxmox hosts, endpoint certificate retrieval/approval/removal, default port groups/bridges and Proxmox ISO storage. In **New deployment**, select one **Target virtualization host**; its saved type determines the hypervisor automatically. Retain per-VM resources and sensitive configuration drafts when switching targets.
+- Stream private installation ISOs from verified GDeploy uploads/server-mounted media into Proxmox ISO storage, account for disk/ISO capacity separately, and check effective permissions, active bridges and node inventory before provisioning. Proxmox media import over SSH is not included.
+- Preserve immutable host/node/authentication/ISO-storage snapshots for worker execution and recovery, show the target in review/history details, and scope queued VM names/resources to the target. Retain global advisory static-IP conflict checks.
+- Add ownership-checked Proxmox stop/recovery integration, UUID resource discovery and safeguards against foreign disks/media, changed configuration, insufficient VM visibility and ISOs attached across cluster nodes. Stop retains VMs and disks; deletion remains a separate explicit recovery action.
+- Remove **Proxmox** from **Preview / Planned**; retain **VM Manager**. Add a Proxmox setup/permissions guide and live-lab acceptance checklist to the release bundle.
+
+### Installation and compatibility
+
+- Update from the same clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. No registry login is required. Existing default ESXi configuration, certificates, media, jobs and credentials remain available.
+- The encrypted `target_hosts` table is additive. Preserve the complete data volume and original encryption key, bootstrap/environment files and source media. Finish or resolve active work before upgrading or rolling back. Releases before v0.17.0 do not understand named targets or Proxmox jobs; use a matching pre-upgrade backup for rollback. App updates do not resume failed deployments, alter installed guests, undo deleted disks or reverse vendor token use.
+- Automated API, real loopback HTTPS/upload, guest-readiness and browser tests cover the integration. Full unattended boots, licensed application installation and sensor capture on a live Proxmox VE 9.2 host remain lab validation. Proxmox fixed RAM/shared CPU scheduling does not provide ESXi reservation guarantees.
+
 ## [Unreleased]
 
 ## [0.16.2] - 2026-10-15

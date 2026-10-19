@@ -1,6 +1,6 @@
 # First deployment acceptance
 
-Use an isolated datastore/network with disposable VMs. This checklist verifies the parts that unit tests cannot exercise without ESXi and installation media.
+Use an isolated datastore/network with disposable VMs. This checklist verifies the parts that unit tests cannot exercise without a hypervisor and installation media. The ESXi checklist follows; [Proxmox acceptance](#proxmox-ve-92-acceptance) is below.
 
 1. Supply and verify Ubuntu 24.04 amd64 live-server media; repeat all selected roles with AlmaLinux 10 using the [Alma checklist](#almalinux-10-acceptance). Confirm the ESXi account/license supports API writes and complete the certificate-trust checks below.
 2. Deploy an **OS only** VM using DHCP. Observe EFI falling back from the empty disk to the installation CD. Confirm there are no keyboard prompts, Ubuntu reboots to disk, VMware Tools reports its IP, the readiness checks below pass and the deployment's ISO is detached/removed.
@@ -17,7 +17,7 @@ Record your exact ESXi build, OS installer profile and ISO checksum, Splunk vers
 
 ## Readable passwords and planned items
 
-New deployments created with v0.12.1 or later use readable generated OS, Elastic and Splunk passwords. Verify SSH/sudo and application sign-in with their recorded credentials; previously queued/deployed passwords must remain valid. FleetManager still supplies its own temporary password and requires a first-sign-in change. The collapsed **Preview** navigation section lists Proxmox and VM Manager as future work only. AlmaLinux 10 must be available in Setup’s OS installer selector and absent from Preview. Expanding it reveals Planned badges and adds no active routes or deployment options. Check keyboard operation and narrow-screen layout.
+New deployments created with v0.12.1 or later use readable generated OS, Elastic and Splunk passwords. Verify SSH/sudo and application sign-in with their recorded credentials; previously queued/deployed passwords must remain valid. FleetManager still supplies its own temporary password and requires a first-sign-in change. The collapsed **Preview** navigation section lists VM Manager as future work only. Proxmox must be available as a host type in Setup and absent from Preview. AlmaLinux 10 must be available in Setup’s OS installer selector and absent from Preview. Expanding it reveals Planned badges and adds no active routes or deployment options. Check keyboard operation and narrow-screen layout.
 
 ## Stop deployment and default port group
 
@@ -187,3 +187,16 @@ Use a disposable ESXi lab endpoint for certificate replacement and invalid-date 
 5. Test expired and not-yet-valid lab certificates and verify neither can establish approved connections.
 6. Remove the endpoint's approval and confirm normal system/private CA and hostname verification resumes. A CA-trusted, hostname-matching certificate should connect; a self-signed certificate outside that trust store should fail until explicitly approved again.
 7. Confirm authenticated administrative access is required for retrieval/trust/removal and that the certificate workflow does not expose ESXi passwords in its responses or logs.
+
+## Proxmox VE 9.2 acceptance
+
+Automated contract/browser/loopback TLS tests are separate from these live checks; no Proxmox installation is certified by a mocked test.
+
+- Add a named host with an API token and with password authentication; test node selection, missing permissions, token privilege separation, self-signed certificate approval/rotation/removal and ordinary CA verification. Test both fresh Proxmox-only Setup and existing ESXi data.
+- Save a valid default bridge, switch targets and confirm defaults come from that target, per-VM resources remain independent, secrets/drafts remain available and no separate provider choice appears. Reject offline nodes, missing bridges, disk-only ISO stores and insufficient space before creation.
+- Boot original Ubuntu 24.04.5 live-server and AlmaLinux 10 full DVDs through remastered media; verify growing installed disks, SSH/sudo/authorized keys, QGA, DHCP and static IPv4, installer completion and removal of temporary media without changing source files.
+- Deploy OS only, Elasticsearch plus Kibana, Splunk, FleetManager and Software Sensor on each OS. Record actual vendor versions, licenses, ports, service health and sign-in. Keep Corelight Alma 10 marked experimental.
+- For sensors, verify both MACs, reserved/static management, nonaddressed capture NIC, real TAP/SPAN delivery, Fleet pairing and throughput with fixed RAM/shared CPU scheduling.
+- Stop during queueing, upload, OS wait and applications; verify safe acknowledgement, retained resources/credentials and skipped later work. Test task timeouts and find UUID-owned VMs before retrying.
+- Fail early and late, edit/remove Setup profiles and verify cleanup/redeployment uses the original endpoint/node/ISO store. Reject foreign disks/state/ISOs, changed configuration, hidden/inaccessible VMs and ISOs attached on another cluster node. Verify original media and unrelated VMs/disks remain intact.
+- Test the amd64 Docker image and source-build update with existing ESXi jobs, settings, certificates, encryption keys and media intact. Back up complete data before migration/rollback; older workers cannot process Proxmox jobs.

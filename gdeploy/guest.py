@@ -91,7 +91,7 @@ print(json.dumps({
 '''
 
 
-def _installed_system_pending(evidence: dict, *, disabled: bool) -> str | None:
+def _installed_system_pending(evidence: dict, *, disabled: bool, hypervisor: str = "esxi") -> str | None:
     """Reject unsafe evidence; return a reason to wait for normal boot progress."""
     if evidence.get("sudo") is not True:
         raise GuestError("OS readiness check could not verify sudo access for the GDeploy account.")
@@ -107,7 +107,7 @@ def _installed_system_pending(evidence: dict, *, disabled: bool) -> str | None:
     if not isinstance(services, dict):
         raise GuestError("OS readiness probe did not report service states.")
     pending = []
-    for name in ("ssh.service", "open-vm-tools.service"):
+    for name in ("ssh.service", "qemu-guest-agent.service" if hypervisor == "proxmox" else "open-vm-tools.service"):
         state = services.get(name)
         if not isinstance(state, dict) or state.get("LoadState") != "loaded":
             raise GuestError(f"OS readiness check could not find {name}.")
@@ -211,10 +211,10 @@ def _autoinstall_data(
             "network": {"version": 2, "ethernets": {"gdeploy": network}},
             "storage": {"layout": {"name": "direct"}},
             "ssh": {"install-server": True, "allow-pw": True, "authorized-keys": ssh_keys},
-            "packages": ["open-vm-tools", "openssh-server", "python3", "ca-certificates"],
+            "packages": ["qemu-guest-agent" if spec.get("hypervisor") == "proxmox" else "open-vm-tools", "openssh-server", "python3", "ca-certificates"],
             "updates": "security",
             "late-commands": [
-                "curtin in-target --target=/target -- systemctl enable open-vm-tools ssh",
+                "curtin in-target --target=/target -- systemctl enable " + ("qemu-guest-agent" if spec.get("hypervisor") == "proxmox" else "open-vm-tools") + " ssh",
             ],
             "shutdown": "reboot",
         }
@@ -729,6 +729,7 @@ class GuestSession:
         if os_profile not in PROFILES:
             raise GuestError("Unknown guest OS installer profile.")
         self.os_profile = os_profile
+        self.hypervisor = "esxi"
         self.expected_hostname = expected_hostname
         self.ip = _ipv4(ip)
         self.username = _safe_text(username, "SSH username")
@@ -908,6 +909,7 @@ class GuestSession:
             self._wait_callback = wait
         self._check_cancelled()
         deadline = time.monotonic() + timeout
+        agent = "QEMU Guest Agent" if self.hypervisor == "proxmox" else "VMware Tools"
 
         def emit(message: str, level: str = "info") -> None:
             for line in _iso_tool_log(self._sanitize(message), self._secrets):
@@ -934,7 +936,7 @@ class GuestSession:
             last_pending = "Kickstart completion has not been verified"
             while time.monotonic() < deadline:
                 self._check_cancelled()
-                probe = self._exec_result("python3 -c " + shlex.quote(PROBE),
+                probe = self._exec_result("python3 -c " + shlex.quote(PROBE.replace("vmtoolsd.service", "qemu-guest-agent.service") if self.hypervisor == "proxmox" else PROBE),
                     timeout=min(60, max(1, int(deadline - time.monotonic()))), sudo=True)
                 self._check_cancelled()
                 if probe.stderr.strip():
@@ -945,11 +947,11 @@ class GuestSession:
                     evidence = json.loads(probe.stdout)
                 except json.JSONDecodeError:
                     raise GuestError("AlmaLinux readiness probe returned invalid JSON; check guest Python and sudo.") from None
-                pending = pending_reason(evidence, self.expected_hostname)
+                pending = pending_reason(evidence, self.expected_hostname, self.hypervisor)
                 if time.monotonic() >= deadline:
                     break
                 if pending is None:
-                    emit("AlmaLinux OS readiness verified: Kickstart completion, installed disk, hostname, sudo, SSH and VMware Tools checks passed.")
+                    emit(f"AlmaLinux OS readiness verified: Kickstart completion, installed disk, hostname, sudo, SSH and {agent} checks passed.")
                     return
                 if pending != previous:
                     emit("Waiting for AlmaLinux OS readiness: " + pending + ".")
@@ -1019,7 +1021,7 @@ class GuestSession:
                     break
                 self._check_cancelled()
                 probe = self._exec_result(
-                    "python3 -c " + shlex.quote(_READINESS_PROBE),
+                    "python3 -c " + shlex.quote(_READINESS_PROBE.replace("open-vm-tools.service", "qemu-guest-agent.service") if self.hypervisor == "proxmox" else _READINESS_PROBE),
                     timeout=min(60, max(1, int(deadline - time.monotonic()))), sudo=True,
                 )
                 self._check_cancelled()
@@ -1041,16 +1043,16 @@ class GuestSession:
                     )
                     services = evidence.get("services")
                     for name, state_info in (services.items() if isinstance(services, dict) else []):
-                        if name in {"ssh.service", "open-vm-tools.service"} and isinstance(state_info, dict):
+                        if name in {"ssh.service", "open-vm-tools.service", "qemu-guest-agent.service"} and isinstance(state_info, dict):
                             emit(f"OS readiness {name}: load={state_info.get('LoadState')}; active={state_info.get('ActiveState')}; "
                                  f"substate={state_info.get('SubState')}; result={state_info.get('Result')}.")
                     previous_evidence = evidence
                 if time.monotonic() >= deadline:
                     break
-                pending = _installed_system_pending(evidence, disabled=state == "disabled")
+                pending = _installed_system_pending(evidence, disabled=state == "disabled", hypervisor=self.hypervisor)
                 if pending is None:
                     reason = "Ubuntu installer disabled cloud-init after completion" if state == "disabled" else "cloud-init completed"
-                    emit(f"OS readiness verified: {reason}; installed disk, sudo, SSH and VMware Tools checks passed.")
+                    emit(f"OS readiness verified: {reason}; installed disk, sudo, SSH and {agent} checks passed.")
                     return
             elif state in {"running", "not started"}:
                 pending = "cloud-init is " + state

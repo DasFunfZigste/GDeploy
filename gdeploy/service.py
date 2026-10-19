@@ -21,6 +21,8 @@ from .media import MediaError, MediaManager
 from .packages import PackageError, SplunkPackageManager
 from .passwords import generate_login_password
 from .vmware import ESXiClient
+from .proxmox import ProxmoxClient
+from .targets import target_settings
 
 
 class DeploymentError(RuntimeError):
@@ -84,8 +86,9 @@ def safe_error(error, secret_data=None):
 
 
 class DeploymentService:
-    def __init__(self, db, config, client_factory=ESXiClient):
+    def __init__(self, db, config, client_factory=ESXiClient, proxmox_factory=ProxmoxClient):
         self.db, self.config, self.client_factory = db, config, client_factory
+        self.proxmox_factory = proxmox_factory
         self.media = MediaManager(db, config)
         self.packages = SplunkPackageManager(db, config)
         self.fleetmanager = FleetManager(db, config)
@@ -132,30 +135,44 @@ class DeploymentService:
         )
         guest.os_profile = (vm or {}).get("os_profile", UBUNTU)
         guest.expected_hostname = (vm or {}).get("name")
+        guest.hypervisor = (vm or {}).get("hypervisor", "esxi")
         if callable(getattr(guest, "set_cancellation_hooks", None)):
             guest.set_cancellation_hooks(
                 lambda: self._check_stop(deployment_id), lambda seconds: self._wait(deployment_id, seconds),
             )
         return guest
 
+    def _settings(self, spec):
+        if spec.get("target_host_id"):
+            return target_settings(self.db, spec["target_host_id"])
+        return self.db.settings()
+
+    @staticmethod
+    def _target_identity(settings):
+        if not settings:
+            return None
+        provider = settings.get("hypervisor", "esxi")
+        return (provider, certificate_endpoint(settings["host"], provider)[2], settings.get("node", ""))
+
     def client(self, settings):
         if not settings:
-            raise DeploymentError("Configure the ESXi connection in Setup first.")
-        options = dict(settings)
-        # Trust must use either the approved endpoint certificate or the CA
-        # store, including older deployment snapshots that disabled validation.
+            raise DeploymentError("Configure a virtualization host in Setup first.")
+        provider = settings.get("hypervisor", "esxi")
+        keys = ("host", "username", "password") + (("node", "iso_storage", "auth_type") if provider == "proxmox" else ())
+        options = {key: settings[key] for key in keys if key in settings}
         options["verify_tls"] = True
-        _, _, endpoint = certificate_endpoint(options["host"])
+        _, _, endpoint = certificate_endpoint(options["host"], provider)
         trusted = self.db.esxi_certificate(endpoint)
         if trusted:
             options["trusted_certificate"] = trusted["pem"]
-        return self.client_factory(**options)
+        factory = self.proxmox_factory if provider == "proxmox" else self.client_factory
+        return factory(**options)
 
-    def inventory(self):
-        settings = self.db.settings()
+    def inventory(self, target_host_id=None):
+        settings = self._settings({"target_host_id": target_host_id})
         try:
-            with self.client(settings) as esxi:
-                return esxi.inventory()
+            with self.client(settings) as client:
+                return client.inventory()
         except Exception as exc:
             raise DeploymentError(safe_error(exc, settings)) from None
 
@@ -164,8 +181,10 @@ class DeploymentService:
         return self.media.selected(profile) if profile else self.media.selected()
 
     def preflight(self, spec, settings=None, exclude_id=None, os_media=None, splunk_package=None, fleetmanager=None, corelight_sensor=None):
-        settings = settings or self.db.settings()
+        settings = self._settings(spec) if settings is None else settings
         checks = []
+        proxmox = bool(settings and settings.get("hypervisor") == "proxmox")
+        connection_label = "Proxmox connection" if proxmox else "ESXi connection"
 
         def check(name, ok, message):
             checks.append({"name": name, "ok": bool(ok), "message": message})
@@ -248,14 +267,21 @@ class DeploymentService:
                 f"{free / 1024**3:.1f} GiB free; at least {needed / 1024**3:.1f} GiB needed for one temporary ISO.",
             )
         if not settings:
-            check("ESXi connection", False, "Save the ESXi connection in Setup.")
+            check(connection_label, False, "Save a virtualization host in Setup.")
             return {"ok": False, "checks": checks}
         try:
             with self.client(settings) as esxi:
                 inventory = esxi.inventory()
-            check("ESXi connection", True, "Connected to standalone ESXi; inventory is readable.")
+                if proxmox:
+                    settings["node"] = inventory["node"]
+                    try:
+                        esxi.preflight_permissions(spec)
+                        check("Proxmox provisioning permissions", True, "Node, VM, guest-agent, bridge and storage permissions are available.")
+                    except Exception as exc:
+                        check("Proxmox provisioning permissions", False, safe_error(exc, settings))
+            check(connection_label, True, "Connected to Proxmox; node inventory is readable." if proxmox else "Connected to standalone ESXi; inventory is readable.")
         except Exception as exc:
-            check("ESXi connection", False, safe_error(exc, settings))
+            check(connection_label, False, safe_error(exc, settings))
             return {"ok": False, "checks": checks}
         if "api_write_supported" in inventory["host"]:
             check(
@@ -269,7 +295,13 @@ class DeploymentService:
         requested_names = {vm["name"] for vm in spec["vms"]}
         names = {vm["name"] for vm in inventory["vms"]}
         retained = [d for d in self.db.retained() if d["id"] != exclude_id]
-        pending = [d for d in retained if d["status"] in {"queued", "running", "stopping", "cleaning"}]
+        pending = []
+        for item in retained:
+            if item["status"] not in {"queued", "running", "stopping", "cleaning"}:
+                continue
+            snapshot = self.db.get(item["id"], private=True)["secrets"].get("esxi")
+            if self._target_identity(snapshot) == self._target_identity(settings):
+                pending.append(item)
         reserved = [vm for d in pending for vm in d["vms"]]
         conflicts = requested_names & (names | {vm["name"] for vm in reserved})
         check(
@@ -312,7 +344,12 @@ class DeploymentService:
             f"{ram} GiB requested/reserved plus 2 GiB headroom; {free_memory:.1f} GiB host memory available.",
         )
         sensors = [vm for vm in spec["vms"] if vm["role"] == "corelight_sensor"]
-        if sensors:
+        if sensors and proxmox:
+            requested_cpu = sum(vm["cpu"] for vm in sensors + reserved)
+            check("Sensor physical CPU capacity", requested_cpu <= host.get("cpu_cores", 0),
+                  f"{requested_cpu} cores requested/reserved; {host.get('cpu_cores', 0)} physical cores available. Proxmox uses shared scheduling, not ESXi CPU reservations. Avoid competing workloads and configure capture delivery on the monitoring bridge.")
+            checks[-1]["warning"] = True
+        if sensors and not proxmox:
             # ESXi already accounts for reservations on created VMs. Include
             # queued sensors whose reservations have not reached ESXi yet.
             waiting = [vm for vm in reserved if vm["role"] == "corelight_sensor" and not vm.get("vm_id")]
@@ -330,11 +367,11 @@ class DeploymentService:
         stores = {store["name"]: store for store in inventory["datastores"]}
         iso_gb = iso_size / 1024**3 if iso_size is not None else 6
         for vm in spec["vms"]:
-            check(f"{vm['name']} network", vm["network"] in networks, f"Port group: {vm['network']}")
+            check(f"{vm['name']} network", vm["network"] in networks, f"{'Bridge' if proxmox else 'Port group'}: {vm['network']}")
             if vm["role"] == "corelight_sensor":
                 monitor = vm.get("monitor_network")
                 check(f"{vm['name']} monitoring network", bool(monitor and monitor in networks),
-                      f"Monitoring port group: {monitor or 'not selected'}. Configure TAP/SPAN delivery and ESXi promiscuous mode for this dedicated capture network; it will have no IP address.")
+                      f"Monitoring {'bridge' if proxmox else 'port group'}: {monitor or 'not selected'}. Configure TAP/SPAN delivery{'' if proxmox else ' and ESXi promiscuous mode'} for this dedicated capture network; it will have no IP address.")
                 check(f"{vm['name']} management address", vm.get("ip_mode") == "static" or vm.get("dhcp_reserved") is True,
                       "Sensor management requires static IPv4 or an administrator-confirmed DHCP reservation.")
                 physical = host.get("cpu_cores")
@@ -342,20 +379,27 @@ class DeploymentService:
                       f"Sensor requires {vm['cpu']} dedicated physical CPU cores; host reports {physical if physical is not None else 'unknown'}. CPU over-subscription is unsupported.")
         for name in {vm["datastore"] for vm in spec["vms"]}:
             space = sum(
-                vm["disk_gb"] + iso_gb + vm["ram_gb"] for vm in spec["vms"] + reserved if vm["datastore"] == name
+                vm["disk_gb"] + (0 if proxmox else iso_gb + vm["ram_gb"]) for vm in spec["vms"] + reserved if vm["datastore"] == name
             )
             store = stores.get(name)
             check(
                 f"Datastore {name}",
                 store is not None and store["free_gb"] >= space,
-                f"{space:.1f} GiB required including disks, install media and VM swap; {store['free_gb']:.1f} GiB free."
+                f"{space:.1f} GiB required{' for VM disks' if proxmox else ' including disks, install media and VM swap'}; {store['free_gb']:.1f} GiB free."
                 if store
                 else "Datastore is unavailable.",
             )
+        if proxmox:
+            iso_store = next((item for item in inventory.get("iso_storages", []) if item["name"] == settings.get("iso_storage")), None)
+            needed = iso_gb * len(spec["vms"] + reserved)
+            # A directory store may serve both content types from one filesystem.
+            disk_space = sum(vm["disk_gb"] for vm in spec["vms"] + reserved if vm["datastore"] == settings.get("iso_storage"))
+            check("Proxmox ISO storage", iso_store is not None and iso_store["free_gb"] >= needed + disk_space,
+                  f"{needed:.1f} GiB for installation media plus {disk_space:.1f} GiB for disks on the same store; choose active ISO storage in Setup.")
         return {"ok": all(item["ok"] for item in checks), "checks": checks}
 
     def enqueue(self, spec, settings=None, parent_id=None, corelight_sensor=None, *, sensor_replacement=None, os_media=None):
-        settings = settings or self.db.settings()
+        settings = self._settings(spec) if settings is None else settings
         os_media = copy.deepcopy(self._deployment_media(spec) if os_media is None else os_media)
         splunk_package = self.packages.selected() if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
         fleetmanager = self.fleetmanager.selected() if any(vm["role"] == "fleetmanager" for vm in spec["vms"]) else None
@@ -408,6 +452,9 @@ class DeploymentService:
                 },
             },
         }
+        spec = copy.deepcopy(spec)
+        if settings and settings.get("id"):
+            spec["target"] = {key: settings.get(key, "") for key in ("id", "name", "hypervisor", "host", "node")}
         self.db.create(deployment_id, spec, data, parent_id, **({"sensor_replacement": sensor_replacement} if sensor_replacement else {}))
         return self.db.get(deployment_id)
 
@@ -470,10 +517,10 @@ class DeploymentService:
                 current_time = time.monotonic()
                 if observation != previous_observation or current_time - last_report >= 60:
                     message = (
-                        f"{vm['name']}: VMware Tools has not reported a guest IP address yet. "
+                        f"{vm['name']}: {'QEMU Guest Agent' if vm.get('hypervisor') == 'proxmox' else 'VMware Tools'} has not reported a guest IP address yet. "
                         "Waiting for OS installation and networking; check the VM console, NIC port group and DHCP."
                         if not ip else
-                        f"{vm['name']}: VMware Tools reports {ip}, but the requested static IP is {expected}. "
+                        f"{vm['name']}: {'QEMU Guest Agent' if vm.get('hypervisor') == 'proxmox' else 'VMware Tools'} reports {ip}, but the requested static IP is {expected}. "
                         "Waiting for the configured address; check the VM console, NIC port group and guest network."
                     )
                     self.db.event(deployment_id, message)
@@ -530,6 +577,7 @@ class DeploymentService:
             with self.client(secret_data["esxi"]) as esxi:
                 for vm in vms:
                     self._check_stop(deployment_id)
+                    vm["hypervisor"] = secret_data["esxi"].get("hypervisor", "esxi")
                     vm["os_profile"] = os_media.get("profile", UBUNTU) if os_media else UBUNTU
                     credential = secret_data["vm_credentials"][vm["name"]]
                     self.stage(deployment_id, "preparing", f"Preparing unattended OS installation for {vm['name']}")
@@ -585,7 +633,7 @@ class DeploymentService:
                     self.stage(
                         deployment_id,
                         "installing_os",
-                        f"Installing the operating system on {vm['name']}; waiting for VMware Tools and SSH",
+                        f"Installing the operating system on {vm['name']}; waiting for {'QEMU Guest Agent' if vm.get('hypervisor') == 'proxmox' else 'VMware Tools'} and SSH",
                     )
                     self._wait_for_guest(esxi, vm, credential, deployment_id)
                     self.db.update(deployment_id, secrets=secret_data)

@@ -251,7 +251,7 @@ user --name={username} --groups=wheel --password="{password_hash}" --iscrypted
 {network}
 selinux --enforcing
 firewall --enabled --service=ssh
-services --enabled=sshd,vmtoolsd,NetworkManager,firewalld
+services --enabled=sshd,{"qemu-guest-agent" if spec.get("hypervisor") == "proxmox" else "vmtoolsd"},NetworkManager,firewalld
 firstboot --disable
 ignoredisk --only-use=sda
 zerombr
@@ -265,7 +265,7 @@ reboot --eject
 %packages
 @core
 openssh-server
-open-vm-tools
+{"qemu-guest-agent" if spec.get("hypervisor") == "proxmox" else "open-vm-tools"}
 python3
 sudo
 NetworkManager
@@ -301,7 +301,7 @@ visudo -cf /etc/sudoers.d/gdeploy
 ssh-keygen -A
 restorecon -RF /etc/ssh
 sshd -t
-systemctl enable sshd.service vmtoolsd.service NetworkManager.service firewalld.service
+systemctl enable sshd.service {"qemu-guest-agent.service" if spec.get("hypervisor") == "proxmox" else "vmtoolsd.service"} NetworkManager.service firewalld.service
 {sensor_network}# This marker is written last; failed post-install setup never claims success.
 install -d -m 0700 -o root -g root /var/lib/gdeploy
 printf '%s\\n' '{marker}' > {COMPLETION_MARKER}

@@ -39,7 +39,7 @@ GDeploy prevents a pairing token already assigned to an unrelated job from being
 
 ## What GDeploy installs
 
-GDeploy creates two VMXNET3 adapters with distinct MAC addresses selected from VMware's supported manual range (`00:50:56:00:00:00`–`00:50:56:3f:ff:ff`). It excludes addresses already present in the target ESXi host's VM inventory and verifies the created adapters through ESXi before preparing the sensor ISO. This makes both addresses available while the VM is still powered off, including on standalone ESXi hosts that defer automatically generated addresses until first boot. Other deployment roles retain automatic MAC assignment.
+On ESXi, GDeploy creates two VMXNET3 adapters with distinct MAC addresses selected from VMware's supported manual range (`00:50:56:00:00:00`–`00:50:56:3f:ff:ff`). It excludes addresses already present in the target ESXi host's VM inventory and verifies the created adapters through ESXi before preparing the sensor ISO. This makes both addresses available while the VM is still powered off, including on standalone ESXi hosts that defer automatically generated addresses until first boot. Other deployment roles retain automatic MAC assignment.
 
 These are the virtual adapters' **MAC addresses**, separate from your static or DHCP **IP configuration**. Both installers match adapters by MAC: management receives the intended address and monitoring remains without an IP. Ubuntu uses Netplan; Alma persists NetworkManager profiles and interface names `gdeploymgmt`/`gdeploymon`. This check does not scan the LAN for an unused IP. Logs identify both MACs; use management's MAC for an external DHCP reservation. Replacements may have new MACs. Inventory checks cover the target host.
 
@@ -70,3 +70,7 @@ Completion requires healthy sensor services, including **sensor-core** and **con
 - Updating GDeploy does not upgrade or reconfigure existing sensors. Follow Corelight's supported backup and upgrade procedure for the sensor software, and keep the complete GDeploy data volume/encryption key and guest backups.
 
 Automated tests cover configuration, secret handling, VM/NIC construction and installer behavior. Alma 10 RPM compatibility, full ESXi boot, Fleet pairing and real mirrored traffic require the [lab acceptance checks](LAB_VALIDATION.md#corelight-software-sensor) and the [Alma test checklist](ALMALINUX.md#test-each-role). Keep the successful Ubuntu path available while validating Alma.
+
+## Proxmox deployment
+
+Select a saved Proxmox VE 9.2 target to use the same sensor installer with separate management/monitoring VirtIO NICs and explicit locally administered MAC addresses. QEMU Guest Agent replaces VMware Tools for IP discovery/readiness. Choose bridges rather than port groups, provide TAP/SPAN traffic, and keep the capture NIC unaddressed. Fixed RAM/shared CPU scheduling does not create ESXi reservations. See the [Proxmox guide](PROXMOX.md) and validate Fleet pairing/capture in the lab; Corelight Alma 10 remains experimental.
