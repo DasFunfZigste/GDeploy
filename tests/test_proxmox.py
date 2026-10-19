@@ -204,3 +204,15 @@ def test_recovery_refuses_partial_vm_visibility(connected):
     with pytest.raises(ProxmoxError, match="VM.Audit"):
         connected.find_owned_vms(OWNER)
     assert connected._request.call_count == 1
+
+
+@pytest.mark.parametrize('present', [False, True])
+def test_missing_config_http_500_requires_verified_inventory_absence(connected, present):
+    connected._request = Mock(side_effect=[ProxmoxError('Proxmox API operation failed (HTTP 500)'),
+        {'/vms': {'VM.Audit': 1}}, [{'vmid': 100}] if present else []])
+    if present:
+        with pytest.raises(ProxmoxError, match='HTTP 500'):
+            connected.destroy_vm('100', OWNER)
+    else:
+        connected.destroy_vm('100', OWNER)
+    assert not any(call.args[0] == 'DELETE' for call in connected._request.call_args_list)

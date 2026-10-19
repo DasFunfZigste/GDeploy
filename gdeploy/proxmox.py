@@ -308,7 +308,19 @@ class ProxmoxClient:
 
     def _owned(self, vmid, owner, *, missing_ok=False):
         owner = _owner(owner)
-        config = self._request("GET", self._vm_path(vmid, "/config"), missing_ok=missing_ok)
+        try:
+            config = self._request("GET", self._vm_path(vmid, "/config"), missing_ok=missing_ok)
+        except ProxmoxError:
+            if not missing_ok:
+                raise
+            # Proxmox reports a missing configuration as HTTP 500, rather than
+            # consistently using 404. Confirm absence through fully visible
+            # inventory; do not reinterpret arbitrary API failures as absence.
+            self._require_vm_audit()
+            inventory = self._request("GET", self._node_path("/qemu"))
+            if isinstance(inventory, list) and not any(str(vm.get("vmid")) == vmid for vm in inventory):
+                return None
+            raise
         if config is None and missing_ok:
             return None
         if not isinstance(config, dict) or config.get("description") != "GDeploy deployment " + owner:
