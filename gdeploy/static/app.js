@@ -2083,7 +2083,7 @@
       const settings = await api('/api/settings');
       if (state.wizard !== wizard) return;
       state.settings = settings;
-      if (!configuredTargets().some(item => item.id === wizard.targetHostId)) wizard.targetHostId = configuredTargets()[0]?.id || '';
+      if (!wizard.targetHostId) wizard.targetHostId = configuredTargets()[0]?.id || '';
       state.inventory = null; state.inventoryHost = null;
       if (wizard.targetHostId) {
         try { state.inventory = await api(`/api/inventory?target_host_id=${encodeURIComponent(wizard.targetHostId)}`); state.inventoryHost = wizardTarget()?.host; }
