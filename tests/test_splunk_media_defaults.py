@@ -59,6 +59,71 @@ def test_legacy_singleton_is_retained_when_other_format_is_saved(manager, config
     assert set(manager.db.splunk_package_format_settings()) == {'deb', 'rpm'}
 
 
+def legacy_restart(manager, config):
+    with manager.db.connect() as connection:
+        connection.execute('DELETE FROM splunk_package_format_settings')
+    return SplunkPackageManager(Database(config.data_dir, config.secret_key), config)
+
+
+@pytest.mark.parametrize('order', [('deb', 'rpm'), ('rpm', 'deb')])
+def test_old_uploads_are_adopted_without_reselection_and_stay_cleared(manager, config, order):
+    choices = {fmt: upload(manager, fmt) for fmt in order}
+    reopened = legacy_restart(manager, config)
+    assert reopened.selected() == choices[order[-1]]
+    for profile, fmt in [(UBUNTU, 'deb'), (ALMA10, 'rpm')]:
+        assert reopened.selected(profile) == choices[fmt]
+        catalog = reopened.catalog(profile)
+        assert catalog['ready'] and catalog['profile_selections'][profile]['ready']
+        assert all(item['saved_default'] and not item['can_delete'] for item in catalog['items'])
+    reopened.clear_selection('deb')
+    reopened = SplunkPackageManager(Database(config.data_dir, config.secret_key), config)
+    assert reopened.selected(UBUNTU) is None
+    reopened.delete(choices['deb']['id'])
+    reopened.clear_selection()
+    reopened = SplunkPackageManager(Database(config.data_dir, config.secret_key), config)
+    assert reopened.selected(ALMA10) is None
+    reopened.delete(choices['rpm']['id'])
+
+
+def test_legacy_adoption_does_not_guess_between_versions_or_mounted_files(manager, config):
+    first = upload(manager, 'deb')
+    second = upload(manager, 'deb')
+    rpm = upload(manager, 'rpm')
+    config.splunk_package.with_name('splunk.deb').write_bytes(deb_bytes())
+    reopened = legacy_restart(manager, config)
+    assert reopened.selected(UBUNTU) is None
+    assert reopened.selected(ALMA10) == rpm
+    reopened.delete(first['id'])
+    reopened = SplunkPackageManager(Database(config.data_dir, config.secret_key), config)
+    assert reopened.selected(UBUNTU) is None  # Deleting a version must not change the choice.
+    assert Path(second['path']).exists()
+
+
+@pytest.mark.parametrize('change', ['missing', 'unverified'])
+def test_legacy_adoption_never_marks_bad_upload_ready(manager, config, change):
+    deb = upload(manager, 'deb')
+    upload(manager, 'rpm')
+    if change == 'missing':
+        Path(deb['path']).unlink()
+    else:
+        deb['sha256'] = ''
+        with manager.db.connect() as connection:
+            connection.execute('UPDATE splunk_package_files SET value=? WHERE id=?', (manager.db.seal(deb), deb['id']))
+    reopened = legacy_restart(manager, config)
+    assert not reopened.catalog(UBUNTU)['ready']
+
+
+def test_existing_explicit_clear_is_not_reversed_during_upgrade(manager, config):
+    upload(manager, 'deb')
+    upload(manager, 'rpm')
+    manager.clear_selection('deb')
+    reopened = SplunkPackageManager(Database(config.data_dir, config.secret_key), config)
+    assert reopened.selected(UBUNTU) is None
+    manager.clear_selection()
+    reopened = legacy_restart(manager, config)
+    assert reopened.selected(ALMA10) is None
+
+
 def test_broken_native_default_is_reported_without_silent_fallback(manager):
     from test_packages_api import package_body
     body = package_body()

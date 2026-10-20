@@ -915,7 +915,8 @@
       badge.className = next.ready ? 'status status-completed' : 'status';
       badge.textContent = next.ready ? 'Ready for preflight' : 'Package required for Splunk';
       if (next.selected) {
-        selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('span', {class: 'eyebrow'}, 'SAVED SPLUNK PACKAGE'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${sourceLabel(next.selected)}`))), el('details', {class: 'media-integrity'}, el('summary', {}, `Saved ${next.selected.sha512 ? 'SHA-512' : 'SHA-256'} checksum`), el('code', {class: 'certificate-fingerprint'}, savedChecksum(next.selected) || 'Not configured')));
+        selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('span', {class: 'eyebrow'}, options.wizard && next.ready ? 'AUTOMATICALLY SELECTED' : 'SAVED SPLUNK PACKAGE'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${sourceLabel(next.selected)}`))), el('details', {class: 'media-integrity'}, el('summary', {}, `Saved ${next.selected.sha512 ? 'SHA-512' : 'SHA-256'} checksum`), el('code', {class: 'certificate-fingerprint'}, savedChecksum(next.selected) || 'Not configured')));
+        if (options.wizard && next.ready) selectedSummary.append(el('p', {class: 'media-help'}, `${osName(profile)} will use this verified ${'.' + (next.selected.format || next.selected.name.split('.').pop())} installer. Continue without selecting or uploading it again.`));
         if (!next.ready) selectedSummary.append(el('p', {class: 'media-help'}, 'The selected package is unavailable or needs attention. Choose and verify a package below before deploying Splunk.'));
       } else selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('strong', {}, 'Add the Splunk installer'), el('p', {}, 'Required only when your deployment includes Splunk. Use .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either.'))));
       if (!options.wizard && next.has_saved_selection) selectedSummary.append(el('div', {class: 'media-clear-selection'}, clearSelection, el('p', {class: 'media-help'}, 'Clearing all saved format defaults keeps the files. Queued and running deployments keep their package; a server-configured package may become the default.')));
@@ -931,6 +932,7 @@
         if (reason) { remove.setAttribute('aria-describedby', reasonId); remove.title = reason; }
         packageList.append(el('article', {class: 'stored-media-item'}, el('div', {class: 'stored-media-info'}, el('div', {class: 'stored-media-name'}, icon('layers'), el('strong', {}, item.name), item.selected || item.saved_default ? el('span', {class: 'status status-completed'}, item.selected ? 'Selected' : 'Saved default') : null), el('p', {class: 'media-help'}, `${formatBytes(item.size_bytes)} · ${sourceLabel(item)}${item.available === false ? ' · File unavailable' : ''}`), reason ? el('p', {class: 'media-delete-reason', id: reasonId}, reason) : null), remove));
       }
+      if (options.wizard && (!next.ready || pendingSelection())) editor.open = true;
       onChange(next); scopeMediaPanel(panel, options); syncControls();
     }
     async function load() {
@@ -987,6 +989,12 @@
     }
     const refresh = button('Refresh list', 'button-small', load, 'refresh'); refresh.id = 'splunk-package-refresh';
     const submit = button('Upload & use package', 'button-primary', null, 'layers'); submit.type = 'submit';
+    const editor = el(options.wizard ? 'details' : 'div', options.wizard ? {class: 'media-integrity'} : {},
+      options.wizard ? el('summary', {}, 'Change installer (optional)') : null,
+      el('div', {class: 'package-download-guide'}, el('p', {}, 'Download the ', el('strong', {}, 'Splunk Enterprise Linux x86_64 (.tgz, .deb or .rpm)'), ' installer and its SHA-512 checksum from ', el('a', {href: 'https://www.splunk.com/en_us/download/splunk-enterprise.html', target: '_blank', rel: 'noopener noreferrer'}, 'Splunk’s download page', icon('link')), '. Use a package covered by your Splunk license or trial.'), el('p', {class: 'media-help'}, 'GDeploy does not bundle or automatically download Splunk. Upload the package below or select one on the GDeploy server. License acceptance is required when you deploy.')),
+      el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose a package source'), el('label', {}, uploadRadio, 'Upload a package'), el('label', {}, serverRadio, 'GDeploy server')),
+      uploadFields, serverFields, field('Publisher checksum (SHA-512 or SHA-256)', checksum, el('span', {id: 'splunk-package-sha256-help'}, 'Paste the 128-character hash from Splunk’s .sha512 checksum download for this exact installer. A 64-character SHA-256 checksum is also accepted. GDeploy verifies it before saving.')), progressBox,
+      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), submit));
     const form = el('form', {onSubmit: async event => {
       event.preventDefault();
       if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return;
@@ -1009,12 +1017,7 @@
         successBox.textContent = `${chosenName || 'Splunk package'} verified and saved.${profile && next.selected ? ` This deployment uses ${next.selected.name}.` : ''} GDeploy automatically uses the saved .deb for Ubuntu or .rpm for AlmaLinux, with .tgz as a compatible fallback.`; successBox.hidden = false;
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
       finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
-    }}, el('div', {class: 'form-body'},
-      el('div', {class: 'package-download-guide'}, el('p', {}, 'Download the ', el('strong', {}, 'Splunk Enterprise Linux x86_64 (.tgz, .deb or .rpm)'), ' installer and its SHA-512 checksum from ', el('a', {href: 'https://www.splunk.com/en_us/download/splunk-enterprise.html', target: '_blank', rel: 'noopener noreferrer'}, 'Splunk’s download page', icon('link')), '. Use a package covered by your Splunk license or trial.'), el('p', {class: 'media-help'}, 'GDeploy does not bundle or automatically download Splunk. Upload the package below or select one on the GDeploy server. License acceptance is required when you deploy.')),
-      selectedSummary, errorBox, successBox,
-      el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose a package source'), el('label', {}, uploadRadio, 'Upload a package'), el('label', {}, serverRadio, 'GDeploy server')),
-      uploadFields, serverFields, field('Publisher checksum (SHA-512 or SHA-256)', checksum, el('span', {id: 'splunk-package-sha256-help'}, 'Paste the 128-character hash from Splunk’s .sha512 checksum download for this exact installer. A 64-character SHA-256 checksum is also accepted. GDeploy verifies it before saving.')), progressBox),
-      el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), submit));
+    }}, el('div', {class: 'form-body'}, selectedSummary, errorBox, successBox, editor));
     const panel = el('section', {class: 'surface', id: 'splunk-package-panel', 'aria-labelledby': 'splunk-package-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'splunk-package-title'}, 'Splunk Enterprise'), el('p', {}, 'Add and manage the installer used for Splunk deployments: .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either.')), badge, refresh), form, el('section', {class: 'media-storage'}, el('div', {class: 'media-storage-body'}, packageList)));
     serverSelect.addEventListener('change', () => { checksum.value = savedChecksum(currentItem()); successBox.hidden = true; syncControls(); });
     fileInput.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
@@ -2207,7 +2210,7 @@
   }
   function renderInstallationMedia(content) {
     const wizard = state.wizard, profile = wizard.osProfile, targetId = wizard.targetHostId;
-    content.append(el('h3', {}, 'Installation media'), el('p', {class: 'muted'}, `Choose the ${osName(profile)} ISO and Splunk installer here before preflight. GDeploy automatically selects the saved ${profile === 'alma10-kickstart' ? '.rpm' : '.deb'} package for this OS, or a compatible .tgz archive. Upload or select replacement files below and verify their publisher checksums.`));
+    content.append(el('h3', {}, 'Installation media'), el('p', {class: 'muted'}, `GDeploy automatically selects the saved ${osName(profile)} ISO and ${profile === 'alma10-kickstart' ? '.rpm' : '.deb'} Splunk installer, with a verified .tgz as a fallback. When both are ready, continue to the next step. You can add missing media or change the installer here.`));
     wizard.mediaPanels ||= {};
     const key = `${profile}:${targetId}`;
     if (!wizard.mediaPanels[key]) {

@@ -2,6 +2,20 @@
 
 Each numbered release has a matching Git tag, Docker image, installation bundle and GitHub Release page. Versions follow semantic versioning; the 0.x series is for lab validation before production use.
 
+## [0.19.1] - 2026-10-20
+
+### Fixed
+
+- Automatically recover OS-specific Splunk defaults when upgrading older installations that have one verified uploaded `.deb` and one `.rpm`, but only remember the last selected package. Ubuntu uses the `.deb`; AlmaLinux uses the `.rpm`, without re-uploading, re-entering checksums or returning to Setup.
+- Show the matching verified package as **Automatically selected** in the deployment wizard. Keep replacement controls under **Change installer (optional)** when ready; continue directly with the matching installer. Missing or invalid media still requires correction before preflight.
+- Preserve explicit format choices and cleared defaults. An older ambiguous collection with multiple uploads of the missing format requires choosing a version within the wizard; arbitrary filenames and unverified mounted files are never adopted automatically. Queued jobs retain their original installer snapshots.
+
+### Installation and compatibility
+
+- From the existing clone, run `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. Keep the persistent data volume, encryption key, credentials and installers. No registry login is needed.
+- On startup, the existing encrypted format-defaults table receives unambiguous verified upload records only for an older singleton-only configuration. No new schema or re-upload is required. Existing explicit defaults remain unchanged. Updates do not change existing guests or restart failed deployments; older versions see only their legacy most-recent selection.
+- Automated browser/API checks cover upgraded upload records, both OS choices through preflight and job creation, restart persistence, optional replacement, deletion protection, deliberate clearing, ambiguous versions and unavailable files. Licensed Splunk guest installs remain lab validation.
+
 ## [0.19.0] - 2026-10-20
 
 ### Added and fixed

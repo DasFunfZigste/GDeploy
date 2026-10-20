@@ -1,6 +1,6 @@
 # GDeploy operations and reference
 
-Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers network settings, accounts, media, software, storage, backups and advanced launch methods for **GDeploy 0.19.0**. Commands assume the same clone at `~/GDeploy` and use `sudo docker`; users authorized to run Docker directly may omit `sudo`. New guests can use Ubuntu 24.04 or AlmaLinux 10; see the [Alma setup and testing guide](ALMALINUX.md).
+Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers network settings, accounts, media, software, storage, backups and advanced launch methods for **GDeploy 0.19.1**. Commands assume the same clone at `~/GDeploy` and use `sudo docker`; users authorized to run Docker directly may omit `sudo`. New guests can use Ubuntu 24.04 or AlmaLinux 10; see the [Alma setup and testing guide](ALMALINUX.md).
 
 - [Network binding](#optional-restrict-the-bind-address-or-change-the-port) and [HTTPS/SSH access](#https-and-optional-ssh-access)
 - [Account setup](#complete-the-first-sign-in) and [startup recovery](#fix-an-existing-source-checkout-that-cannot-start)
@@ -197,7 +197,9 @@ For defaults and storage management, **Setup → Software packages** and `http:/
 
 To get Splunk's publisher checksum, copy the exact direct download URL for your chosen `.tgz`, `.deb` or `.rpm` from Splunk's official download page. Open that URL in a browser with **`.sha512` appended**: for example, `.deb` becomes `.deb.sha512` and `.rpm` becomes `.rpm.sha512`. Copy only the **128 hexadecimal characters** from the checksum file into GDeploy, without the filename or the rest of the line. These are [Splunk's documented checksum instructions](https://help.splunk.com/en/splunk-enterprise/administer/install-and-upgrade/10.4/secure-your-splunk-enterprise-installation/install-splunk-enterprise-securely). You do not need to calculate a checksum yourself: GDeploy hashes the uploaded or selected package and compares it with the publisher's value. A hash calculated from an unverified download alone would not verify its source.
 
-Save `.deb` and `.rpm` defaults independently; Ubuntu automatically chooses `.deb` and AlmaLinux chooses `.rpm`, regardless of which was saved last. If no matching native default is saved, GDeploy uses a matching environment-configured native installer, then a saved `.tgz`, then an environment-configured `.tgz`. A missing or changed saved native package is reported for correction without silently substituting an archive. The wizard filters choices to the chosen OS. Queued jobs keep their original package. Native packages install with APT on Ubuntu or DNF on AlmaLinux. GDeploy reads their metadata without installing or extracting them on the app server. The guest package manager validates the payload during installation; its errors appear in the deployment logs.
+Save `.deb` and `.rpm` defaults independently; Ubuntu automatically chooses `.deb` and AlmaLinux chooses `.rpm`, regardless of which was saved last. The wizard shows **Automatically selected** and needs no package input when ready. Replacement controls are under **Change installer (optional)**. When upgrading a legacy singleton-only configuration, GDeploy recovers a missing native default if there is exactly one verified upload of that format; no checksum entry or re-upload is required. Multiple versions require a choice inside the wizard. Existing explicit per-format defaults and intentional clears are preserved; unverified mounted files are never automatically trusted.
+
+If no matching native default is saved, GDeploy uses a matching environment-configured native installer, then a saved `.tgz`, then an environment-configured `.tgz`. A missing or changed saved native package is reported for correction without silently substituting an archive. The wizard filters choices to the chosen OS. Queued jobs keep their original package. Native packages install with APT on Ubuntu or DNF on AlmaLinux. GDeploy reads their metadata without installing or extracting them on the app server. The guest package manager validates the payload during installation; its errors appear in the deployment logs.
 
 Uploads accept packages up to **4 GiB**, need free space on GDeploy's data filesystem and persist under `/data/packages`. No `.env` edit, container restart or package rename is needed. Include uploaded packages in complete data-volume backups; back up server-mounted packages separately. GDeploy does not bundle or automatically download Splunk, supply a license, or bypass the license acceptance required in each Splunk deployment. Elasticsearch and Kibana continue to use the Elastic package repository.
 
@@ -345,7 +347,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from Deployments** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.19.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.19.1/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ### Check AlmaLinux readiness after a deployment error
 
@@ -417,10 +419,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.19.0** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.19.1** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.19.0-deploy.tar.gz`
-- `gdeploy-0.19.0-linux-amd64.image.tar.gz`
+- `gdeploy-0.19.1-deploy.tar.gz`
+- `gdeploy-0.19.1-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -432,12 +434,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.19.0-deploy.tar.gz
-sudo docker load --input gdeploy-0.19.0-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.19.1-deploy.tar.gz
+sudo docker load --input gdeploy-0.19.1-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.19.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.19.1` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 

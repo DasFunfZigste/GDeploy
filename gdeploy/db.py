@@ -105,6 +105,7 @@ class Database:
             # The singleton remains the legacy/current selection. Copy its
             # already-approved snapshot into additive encrypted per-OS state.
             self._sync_legacy_media_settings(conn)
+            self._migrate_legacy_splunk_packages(conn)
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -370,6 +371,39 @@ class Database:
         with self.connect() as connection:
             row = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
         return self.unseal(row[0]) if row else None
+
+    def _migrate_legacy_splunk_packages(self, connection):
+        """Recover unique verified uploads from the former single-default store."""
+        # Existing per-format rows mean the administrator has already configured
+        # these defaults. Never resurrect a deliberately cleared format.
+        if connection.execute("SELECT 1 FROM splunk_package_format_settings LIMIT 1").fetchone():
+            return
+        current = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
+        if not current:
+            return
+        selected = self.unseal(current[0])
+        selected_format = selected.get("format", Path(selected["path"]).suffix.lower().lstrip("."))
+        choices = {selected_format: selected}
+        uploads = {}
+        for row in connection.execute("SELECT value FROM splunk_package_files"):
+            value = self.unseal(row[0])
+            package_format = Path(value.get("path", "")).suffix.lower().lstrip(".")
+            checksum = value.get("sha256", "")
+            if (
+                package_format in ("deb", "rpm") and value.get("format", package_format) == package_format
+                and value.get("source") == "upload" and value.get("profile") == "splunk-enterprise-linux-x86_64"
+                and isinstance(checksum, str) and len(checksum) == 64
+                and all(char in "0123456789abcdef" for char in checksum)
+            ):
+                uploads.setdefault(package_format, []).append(value)
+        for package_format, candidates in uploads.items():
+            if package_format not in choices and len(candidates) == 1:
+                choices[package_format] = candidates[0]
+                connection.execute("INSERT INTO audit VALUES(?,?)", (now(), f"Splunk {package_format} default recovered from verified upload"))
+        # Persist the singleton too: these rows mark adoption as complete even
+        # if uploads are ambiguous, so later deletion cannot change a default.
+        for package_format, value in choices.items():
+            connection.execute("INSERT INTO splunk_package_format_settings VALUES(?,?)", (package_format, self.seal(value)))
 
     def _splunk_format_settings(self, connection):
         rows = connection.execute("SELECT format,value FROM splunk_package_format_settings").fetchall()

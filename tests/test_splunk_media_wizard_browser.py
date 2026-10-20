@@ -1,10 +1,13 @@
 """Configure Splunk and OS media inside the wizard; no licensed vendor payloads."""
+import asyncio
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from gdeploy.os_profiles import ALMA10, UBUNTU
-from test_splunk_native import deb_bytes, rpm_bytes
+from gdeploy.db import Database
+from test_splunk_native import Request, deb_bytes, rpm_bytes
 from test_wizard_drafts_browser import chromium, ui as wizard_ui, expect  # noqa: F401
 
 
@@ -98,6 +101,8 @@ def test_saved_native_is_automatically_matched_and_os_changes_refresh(ui, monkey
     expect(ui.next).to_be_enabled()
     pkg = ui.wizard.locator('#wizard-splunk-package-panel')
     expect(pkg.locator('.media-summary-heading strong')).to_have_text('splunk.' + extension)
+    expect(pkg.get_by_text('AUTOMATICALLY SELECTED', exact=True)).to_be_visible()
+    expect(pkg.get_by_role('radio', name='Upload a package', exact=True)).not_to_be_visible()
     assert 'splunk.' + ('rpm' if extension == 'deb' else 'deb') not in pkg.locator('select').inner_text()
     no_duplicate_ids(ui)
     ui.back.click()
@@ -118,6 +123,7 @@ def test_unverified_candidate_survives_back_validation_and_cannot_continue(ui, m
     start(ui)
     expect(ui.next).to_be_enabled()
     pkg = ui.wizard.locator('#wizard-splunk-package-panel')
+    pkg.get_by_text('Change installer (optional)', exact=True).click()
     pkg.get_by_role('radio', name='Upload a package', exact=True).check()
     pkg.locator('input[type=file]').set_input_files({'name': 'splunk-new.deb', 'mimeType': 'application/octet-stream', 'buffer': body})
     pkg.locator('input[name=checksum]').fill(hashlib.sha512(body).hexdigest())
@@ -134,6 +140,34 @@ def test_unverified_candidate_survives_back_validation_and_cannot_continue(ui, m
     expect(ui.next).to_be_disabled()
     pkg.get_by_role('button', name='Upload & use package', exact=True).click()
     expect(ui.next).to_be_enabled()
+
+
+@pytest.mark.parametrize('profile,fmt', [(UBUNTU, 'deb'), (ALMA10, 'rpm')])
+def test_older_uploads_queue_matching_package_without_any_package_input(ui, monkeypatch, profile, fmt):
+    seed(ui, monkeypatch)
+    choices = {}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        for extension, body in [('deb', deb_bytes()), ('rpm', rpm_bytes())]:
+            task = ui.service.packages.upload(Request(body), 'uploaded-splunk.' + extension, hashlib.sha256(body).hexdigest())
+            choices[extension] = pool.submit(asyncio.run, task).result()['selected']
+    # Reproduce the pre-format-defaults database on an existing data volume.
+    with ui.db.connect() as connection:
+        connection.execute('DELETE FROM splunk_package_format_settings')
+    Database(ui.service.config.data_dir, ui.service.config.secret_key)
+    start(ui, profile)
+    pkg = ui.wizard.locator('#wizard-splunk-package-panel')
+    expect(pkg.get_by_text('AUTOMATICALLY SELECTED', exact=True)).to_be_visible()
+    expect(pkg.locator('.media-summary-heading strong')).to_have_text('uploaded-splunk.' + fmt)
+    expect(pkg.get_by_role('radio', name='Upload a package', exact=True)).not_to_be_visible()
+    expect(ui.next).to_be_enabled()
+    ui.next.click()
+    expect(ui.wizard.locator('#wizard-media-review')).to_contain_text('uploaded-splunk.' + fmt)
+    ui.wizard.get_by_role('checkbox', name='I have reviewed', exact=False).check()
+    ui.wizard.locator('#wizard-auto-deploy').check()
+    ui.next.click()
+    expect(ui.wizard).not_to_be_visible()
+    job = ui.db.get(ui.db.list()[0]['id'], private=True)
+    assert job['secrets']['splunk_package'] == choices[fmt]
 
 
 def test_server_media_is_verified_in_wizard_and_failed_preflight_links_return_here(ui, monkeypatch):
