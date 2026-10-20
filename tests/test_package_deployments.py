@@ -221,16 +221,62 @@ def test_native_ubuntu_job_keeps_queued_deb_after_setup_changes_to_rpm(package_j
     assert ("install", deb, selected["sha256"]) in calls
 
 
-def test_rpm_for_ubuntu_fails_preflight_before_queue_or_vm_creation(package_job):
+def test_only_rpm_without_archive_for_ubuntu_fails_before_vm_creation(package_job):
     from test_splunk_native import rpm_bytes
     service, db, spec, config, calls = package_job
     rpm = config.splunk_package.with_name("splunk.rpm")
     rpm.write_bytes(rpm_bytes())
     choose(service, rpm, hashlib.sha256(rpm.read_bytes()).hexdigest())
+    config.splunk_package.unlink()
     result = service.preflight(spec)
     failure = next(check for check in result["checks"] if check["name"] == "Splunk Linux x86_64 package")
-    assert not failure["ok"] and "does not match" in failure["message"]
+    assert not failure["ok"] and ".deb" in failure["message"]
     assert failure["action"]["label"] == "Configure Splunk package"
-    with pytest.raises(DeploymentError, match="does not match"):
+    with pytest.raises(DeploymentError, match="Splunk"):
         service.enqueue(spec)
     assert db.list() == [] and calls == []
+
+
+def test_ubuntu_job_automatically_uses_saved_deb_when_rpm_was_selected_last(package_job):
+    from test_splunk_native import deb_bytes, rpm_bytes
+    service, db, spec, config, calls = package_job
+    for fmt, body in [('deb', deb_bytes()), ('rpm', rpm_bytes())]:
+        path = config.splunk_package.with_name('splunk.' + fmt)
+        path.write_bytes(body)
+        choose(service, path, hashlib.sha256(body).hexdigest())
+    assert service.packages.selected()['format'] == 'rpm'
+    assert service.preflight(spec)['ok']
+    job = service.enqueue(spec)
+    assert db.get(job['id'], private=True)['secrets']['splunk_package']['format'] == 'deb'
+    assert calls == []
+
+
+def test_legacy_tgz_stays_available_for_ubuntu_when_only_rpm_default_exists(package_job):
+    from test_splunk_native import rpm_bytes
+    service, db, spec, config, calls = package_job
+    path = config.splunk_package.with_name('splunk.rpm')
+    path.write_bytes(rpm_bytes())
+    choose(service, path, hashlib.sha256(path.read_bytes()).hexdigest())
+    assert service.preflight(spec)['ok']
+    job = service.enqueue(spec)
+    assert db.get(job['id'], private=True)['secrets']['splunk_package']['path'] == str(config.splunk_package)
+
+
+def test_alma_job_automatically_uses_saved_rpm_when_deb_selected_last(package_job, monkeypatch):
+    from gdeploy.os_profiles import ALMA10
+    from test_splunk_native import deb_bytes, rpm_bytes
+    service, db, spec, config, calls = package_job
+    monkeypatch.setattr('gdeploy.alma_guest.validate_install_iso', lambda *a, **kw: {'version': '10.1', 'arch': 'x86_64'})
+    source = service.media.catalog()['items'][0]
+    service.media.select(source['id'], config.ubuntu_sha256, profile=ALMA10)
+    spec['os_profile'] = ALMA10
+    for fmt, body in [('rpm', rpm_bytes()), ('deb', deb_bytes())]:
+        path = config.splunk_package.with_name('splunk.' + fmt)
+        path.write_bytes(body)
+        choose(service, path, hashlib.sha256(body).hexdigest())
+    assert service.packages.selected()['format'] == 'deb'
+    assert service.preflight(spec)['ok']
+    job = service.enqueue(spec)
+    saved = db.get(job['id'], private=True)['secrets']
+    assert saved['splunk_package']['format'] == 'rpm' and saved['os_media']['profile'] == ALMA10
+    assert calls == []

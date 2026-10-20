@@ -217,7 +217,7 @@ class DeploymentService:
                 check("Corelight AlmaLinux 10 compatibility", True, CORELIGHT_ALMA_WARNING)
                 checks[-1]["warning"] = True
         if any(vm["role"] == "splunk" for vm in spec["vms"]):
-            package = self.packages.selected() if splunk_package is None else splunk_package
+            package = self.packages.selected(profile) if splunk_package is None else splunk_package
             try:
                 if not package:
                     raise PackageError("Upload or select a Splunk Enterprise Linux x86_64 .tgz, .deb (Ubuntu) or .rpm (AlmaLinux) and verify its publisher SHA-512 or SHA-256 checksum.")
@@ -401,7 +401,8 @@ class DeploymentService:
     def enqueue(self, spec, settings=None, parent_id=None, corelight_sensor=None, *, sensor_replacement=None, os_media=None):
         settings = self._settings(spec) if settings is None else settings
         os_media = copy.deepcopy(self._deployment_media(spec) if os_media is None else os_media)
-        splunk_package = self.packages.selected() if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
+        profile = spec.get("os_profile") or (os_media or {}).get("profile", UBUNTU)
+        splunk_package = self.packages.selected(profile) if any(vm["role"] == "splunk" for vm in spec["vms"]) else None
         fleetmanager = self.fleetmanager.selected() if any(vm["role"] == "fleetmanager" for vm in spec["vms"]) else None
         sensor = None
         if any(vm["role"] == "corelight_sensor" for vm in spec["vms"]):

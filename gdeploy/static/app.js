@@ -530,14 +530,26 @@
       xhr.send(file);
     });
   }
-  function createMediaPanel(onChange, onBusy) {
+  function scopeMediaPanel(panel, options) {
+    if (!options.wizard) return;
+    for (const node of panel.querySelectorAll('[id]')) if (!node.id.startsWith('wizard-')) node.id = `wizard-${node.id}`;
+    if (!panel.id.startsWith('wizard-')) panel.id = `wizard-${panel.id}`;
+    for (const node of [panel, ...panel.querySelectorAll('[for],[aria-labelledby],[aria-describedby]')]) {
+      for (const attr of ['for', 'aria-labelledby', 'aria-describedby']) {
+        if (node.hasAttribute(attr)) node.setAttribute(attr, node.getAttribute(attr).split(' ').map(value => value.startsWith('wizard-') ? value : `wizard-${value}`).join(' '));
+      }
+    }
+    for (const radio of panel.querySelectorAll('input[type=radio]')) if (!radio.name.startsWith('wizard-')) radio.name = `wizard-${radio.name}`;
+  }
+  function createMediaPanel(onChange, onBusy, options = {}) {
     const viewEpoch = state.routeEpoch;
-    let catalog = null, mode = 'server', busy = '', externalBusy = false;
-    let viewedProfile = state.wizard?.suspended ? state.wizard.osProfile : '';
+    let catalog = null, mode = 'server', busy = '', externalBusy = false, disposed = false;
+    let viewedProfile = options.getProfile?.() || (state.wizard?.suspended ? state.wizard.osProfile : '');
+    const mediaTarget = () => options.getTarget ? options.getTarget() : {host: state.settings?.host};
     let storage = null, storageBusy = false, storageRequest = 0;
     let esxiListing = null, browseBusy = false, browseRequest = 0;
     let browseTarget = {datastore: '', folder: ''};
-    const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    const currentView = () => !disposed && panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
     const normalizedHost = value => String(value || '').trim().toLowerCase();
     const sourceLabel = item => ({server: 'GDeploy server', upload: 'Uploaded', esxi: 'ESXi copy'})[item.source] || 'GDeploy server';
     const originLabel = origin => origin ? `${origin.host} · [${origin.datastore}] ${origin.path}` : '';
@@ -596,7 +608,7 @@
     const progressBox = el('div', {class: 'media-progress', hidden: true}, progress, el('div', {}, progressText, cancel));
     const currentItem = () => catalog?.items?.find(item => item.id === serverSelect.value);
     const currentEsxiFile = () => esxiListing?.files.find(file => file.path === esxiFileSelect.value);
-    const currentEsxiHost = () => esxiListing && state.settings?.host && normalizedHost(esxiListing.host) === normalizedHost(state.settings.host);
+    const currentEsxiHost = () => esxiListing && mediaTarget()?.host && normalizedHost(esxiListing.host) === normalizedHost(mediaTarget().host);
     function parentFolder() {
       if (esxiListing && esxiListing.datastore === browseTarget.datastore && esxiListing.folder === browseTarget.folder) return esxiListing.parent;
       if (!browseTarget.folder) return null;
@@ -607,17 +619,17 @@
       const locked = Boolean(busy || externalBusy || storageBusy || !catalog);
       for (const radio of [serverRadio, uploadRadio, esxiRadio]) { radio.checked = mode === radio.value; radio.disabled = locked; }
       serverFields.hidden = mode !== 'server'; uploadFields.hidden = mode !== 'upload'; esxiFields.hidden = mode !== 'esxi';
-      installer.disabled = locked;
+      installer.disabled = locked || Boolean(options.wizard);
       serverSelect.disabled = locked || mode !== 'server';
       fileInput.disabled = locked || mode !== 'upload'; fileInput.required = mode === 'upload';
-      const browsingDisabled = locked || mode !== 'esxi' || !state.settings?.host || browseBusy;
-      connectionPrompt.hidden = Boolean(state.settings?.host); esxiBrowser.hidden = !state.settings?.host;
+      const browsingDisabled = locked || mode !== 'esxi' || !mediaTarget()?.host || browseBusy;
+      connectionPrompt.hidden = Boolean(mediaTarget()?.host); esxiBrowser.hidden = !mediaTarget()?.host;
       datastoreSelect.disabled = browsingDisabled || datastoreSelect.options.length <= 1;
       esxiFileSelect.disabled = browsingDisabled || !currentEsxiHost();
       browseRefresh.disabled = browsingDisabled;
       up.disabled = browsingDisabled || parentFolder() === null;
       for (const folder of folderList.querySelectorAll('button')) folder.disabled = browsingDisabled;
-      checksum.disabled = locked || (mode === 'esxi' && (!state.settings?.host || browseBusy));
+      checksum.disabled = locked || (mode === 'esxi' && (!mediaTarget()?.host || browseBusy));
       refresh.disabled = Boolean(busy || externalBusy);
       refresh.hidden = mode === 'esxi';
       storageRefresh.disabled = Boolean(busy || externalBusy || storageBusy);
@@ -631,7 +643,7 @@
       esxiLocation.hidden = !currentEsxiFile();
       esxiLocation.textContent = currentEsxiFile() ? `${esxiListing.host} · [${esxiListing.datastore}] ${esxiFileSelect.value}` : '';
       esxiBrowser.setAttribute('aria-busy', browseBusy ? 'true' : 'false');
-      panel.setAttribute('aria-busy', busy ? 'true' : 'false');
+      panel.setAttribute('aria-busy', busy ? 'true' : 'false'); options.onDirty?.();
     }
     async function clearMediaSelection() {
       if (!currentView() || busy || externalBusy || storageBusy || !catalog?.has_saved_selection) return;
@@ -665,12 +677,12 @@
         remove.setAttribute('aria-label', `Delete ${item.name}`);
         if (reason) { remove.setAttribute('aria-describedby', reasonId); remove.title = reason; }
         remove.disabled = !item.can_delete;
-        storedMediaList.append(el('article', {class: 'stored-media-item'}, el('div', {class: 'stored-media-info'}, el('div', {class: 'stored-media-name'}, icon('disc'), el('strong', {}, item.name), item.selected ? el('span', {class: 'status status-completed'}, 'Selected') : null), el('p', {class: 'media-help'}, `${formatBytes(item.size_bytes)} · ${sourceLabel(item)}${item.available ? '' : ' · File unavailable'}`), item.origin ? el('p', {class: 'media-origin'}, originLabel(item.origin)) : null, reason ? el('p', {class: 'media-delete-reason', id: reasonId}, reason) : null), remove));
+        storedMediaList.append(el('article', {class: 'stored-media-item'}, el('div', {class: 'stored-media-info'}, el('div', {class: 'stored-media-name'}, icon('disc'), el('strong', {}, item.name), item.selected || item.saved_default ? el('span', {class: 'status status-completed'}, item.selected ? 'Selected' : 'Saved default') : null), el('p', {class: 'media-help'}, `${formatBytes(item.size_bytes)} · ${sourceLabel(item)}${item.available ? '' : ' · File unavailable'}`), item.origin ? el('p', {class: 'media-origin'}, originLabel(item.origin)) : null, reason ? el('p', {class: 'media-delete-reason', id: reasonId}, reason) : null), remove));
       }
       syncControls();
     }
     async function loadStorage() {
-      if (!currentView() || storageBusy) return;
+      if (options.wizard || !currentView() || storageBusy) return;
       const request = ++storageRequest;
       storageBusy = true; inlineError(storageError, ''); setBusy(storageRefresh, 'Refreshing…'); syncControls();
       try {
@@ -712,18 +724,19 @@
     }
     async function browseESXi(datastore = '', folder = '') {
       if (!currentView() || mode !== 'esxi' || busy || externalBusy) return;
-      const request = ++browseRequest, requestedHost = normalizedHost(state.settings?.host);
-      if (!state.settings?.host) { esxiListing = null; browseBusy = false; syncControls(); return; }
+      const request = ++browseRequest, requestedHost = normalizedHost(mediaTarget()?.host);
+      if (!mediaTarget()?.host) { esxiListing = null; browseBusy = false; syncControls(); return; }
       const previousListing = esxiListing, previousFile = esxiFileSelect.value, previousChecksum = checksum.value;
       browseTarget = {datastore, folder};
       folderPath.textContent = folder || 'Datastore root';
       browseBusy = true; successBox.hidden = true; inlineError(browseError, '');
-      browseStatus.textContent = `Loading folders and ISO files from ${state.settings.host}…`;
+      browseStatus.textContent = `Loading folders and ISO files from ${mediaTarget().host}…`;
       setBusy(browseRefresh, 'Loading…'); syncControls();
-      const currentRequest = () => currentView() && mode === 'esxi' && request === browseRequest && requestedHost === normalizedHost(state.settings?.host);
+      const currentRequest = () => currentView() && mode === 'esxi' && request === browseRequest && requestedHost === normalizedHost(mediaTarget()?.host);
       try {
         const query = new URLSearchParams({folder});
         if (datastore) query.set('datastore', datastore);
+        if (options.getTarget) query.set('target_host_id', mediaTarget().id);
         const listing = await api(`/api/settings/media/esxi?${query}`);
         if (!currentRequest()) return;
         if (normalizedHost(listing.host) !== requestedHost) throw new Error('The saved ESXi host changed. Reload Setup before choosing an ISO.');
@@ -742,13 +755,18 @@
         esxiListing = null; esxiFileSelect.replaceChildren(el('option', {value: ''}, 'Refresh the folder list to choose an ISO')); folderList.replaceChildren();
         checksum.value = ''; inlineError(browseError, error.message); browseStatus.textContent = 'Check the ESXi connection, datastore permissions, and folder, then refresh.';
       } finally {
-        if (currentRequest()) { browseBusy = false; browseRefresh.replaceChildren(icon('refresh'), 'Refresh folder'); syncControls(); }
+        if (request === browseRequest) {
+          browseBusy = false;
+          if (!currentView()) { esxiListing = null; esxiFileSelect.value = ''; browseStatus.textContent = 'Refresh the folder list to continue browsing.'; }
+          browseRefresh.replaceChildren(icon('refresh'), 'Refresh folder'); syncControls();
+        }
       }
     }
     function renderCatalog(next, preserveCandidate = false) {
       catalog = next;
       const previousId = serverSelect.value;
-      serverSelect.replaceChildren(el('option', {value: ''}, next.items.length ? 'Choose an OS ISO' : 'No ISOs found on this server'), ...next.items.map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${sourceLabel(item)}`)));
+      const items = next.items.filter(item => !options.wizard || item.source === 'server' || item.profile === viewedProfile);
+      serverSelect.replaceChildren(el('option', {value: ''}, items.length ? 'Choose an OS ISO' : 'No matching ISOs found on this server'), ...items.map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${sourceLabel(item)}`)));
       serverSelect.value = (preserveCandidate && next.items.some(item => item.id === previousId) ? previousId : next.selected?.id) || (next.items.some(item => item.id === previousId) ? previousId : '');
       if (mode === 'server') checksum.value = currentItem()?.sha256 || '';
       viewedProfile = next.profile || next.selected?.profile || 'ubuntu-autoinstall'; installer.value = viewedProfile; updateCompatibility();
@@ -760,14 +778,15 @@
         if (next.selected.origin) selectedSummary.append(el('p', {class: 'media-origin'}, el('strong', {}, 'Copied from ESXi'), el('span', {}, originLabel(next.selected.origin))));
         if (!next.ready) selectedSummary.append(el('p', {class: 'media-help'}, 'The saved media is unavailable or needs attention. Choose a valid ISO below before deploying.'));
       } else selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('disc'), el('div', {}, el('strong', {}, `Choose ${osName(viewedProfile)} installation media`), el('p', {}, 'Save an ISO for each OS you want to choose in New deployment.'))));
-      if (next.has_saved_selection) selectedSummary.append(el('div', {class: 'media-clear-selection'}, clearSelection, el('p', {class: 'media-help'}, 'Clear this OS’s saved selection before deleting its ISO. Other OS selections and queued or running deployments keep their media.')));
+      if (!options.wizard && next.has_saved_selection) selectedSummary.append(el('div', {class: 'media-clear-selection'}, clearSelection, el('p', {class: 'media-help'}, 'Clear this OS’s saved selection before deleting its ISO. Other OS selections and queued or running deployments keep their media.')));
       selectedSummary.append(el('div', {id: 'os-media-profile-status', class: 'media-help'}, osProfiles.map(profile => el('p', {}, `${osName(profile)}: ${next.profile_selections?.[profile]?.ready ? next.profile_selections[profile].selected?.name || 'ISO configured' : 'ISO not configured or unavailable'}`))));
       onChange(next);
-      syncControls();
+      scopeMediaPanel(panel, options); syncControls();
     }
     async function load() {
       if (!currentView() || busy || externalBusy) return;
-      busy = 'load'; inlineError(errorBox, ''); syncControls(); setBusy(refresh, 'Refreshing…');
+      const draft = options.wizard && catalog && pendingSelection() ? {id: serverSelect.value, checksum: checksum.value} : null;
+      busy = 'load'; if (options.wizard) onBusy(true); inlineError(errorBox, ''); syncControls(); setBusy(refresh, 'Refreshing…');
       try {
         const [catalogResult] = await Promise.allSettled([api(`/api/settings/media${viewedProfile ? `?profile=${encodeURIComponent(viewedProfile)}` : ''}`), loadStorage()]);
         if (catalogResult.status === 'rejected') throw catalogResult.reason;
@@ -775,8 +794,9 @@
         if (!currentView()) return;
         if (!catalog && !next.items.length) mode = 'upload';
         renderCatalog(next);
+        if (draft) { serverSelect.value = draft.id; checksum.value = draft.checksum; syncControls(); }
       } catch (error) { if (currentView()) { inlineError(errorBox, error.message); badge.textContent = 'Couldn’t load media'; } }
-      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh list'); syncControls(); } }
+      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh list'); if (options.wizard) onBusy(false); syncControls(); } }
     }
     const refresh = button('Refresh list', 'button-small', load, 'refresh');
     const submit = button('Use selected ISO', 'button-primary', null, 'check'); submit.type = 'submit';
@@ -789,7 +809,7 @@
       }
       const uploading = mode === 'upload', importing = mode === 'esxi';
       if (importing && (browseBusy || !currentEsxiHost() || !currentEsxiFile())) { inlineError(errorBox, 'Refresh the ESXi folder list and choose an ISO before copying it.'); return; }
-      const esxiSource = importing ? {host: esxiListing.host, datastore: esxiListing.datastore, path: esxiFileSelect.value} : null;
+      const esxiSource = importing ? {host: esxiListing.host, datastore: esxiListing.datastore, path: esxiFileSelect.value, ...(options.getTarget ? {target_host_id: mediaTarget().id} : {})} : null;
       busy = uploading ? 'upload' : importing ? 'import' : 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true;
       progressBox.hidden = !uploading && !importing; cancel.hidden = !uploading;
       progress.setAttribute('aria-label', importing ? 'OS ISO copy progress' : 'OS ISO upload progress');
@@ -811,7 +831,7 @@
       finally { if (currentView()) { await loadStorage(); busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
     }}, el('div', {class: 'form-body'}, selectedSummary, errorBox, successBox,
       el('fieldset', {class: 'media-source-options'}, el('legend', {}, 'Choose an ISO source'), el('label', {}, serverRadio, 'GDeploy server'), el('label', {}, esxiRadio, 'ESXi datastore'), el('label', {}, uploadRadio, 'Upload an ISO')),
-      field('OS installer', installer, 'Save matching media for Ubuntu and Alma separately. Choose which OS to use in each new deployment.'), serverFields, esxiFields, uploadFields,
+      field('OS installer', installer, options.wizard ? 'Matches this deployment’s OS. Use Back to change the operating system.' : 'Save matching media for Ubuntu and Alma separately. Choose which OS to use in each new deployment.'), serverFields, esxiFields, uploadFields,
       field('Publisher SHA-256 checksum', checksum, el('span', {id: 'os-media-sha256-help'}, 'Copy the checksum from the OS publisher’s download page. GDeploy verifies the file before saving it.')),
       compatibility, progressBox), el('div', {class: 'form-footer'}, el('span', {class: 'media-footer-note'}, 'Saved changes apply to new deployments.'), submit));
     const panel = el('section', {class: 'surface', id: 'os-media-panel', 'aria-labelledby': 'os-media-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'os-media-title'}, 'OS installation media'), el('p', {}, 'Choose and verify the ISO used to install your virtual machines.')), badge), form, storageSection);
@@ -822,18 +842,30 @@
       successBox.hidden = true; inlineError(errorBox, '');
     }
     installer.addEventListener('change', () => { viewedProfile = installer.value; scopeCatalog(viewedProfile); updateCompatibility(); syncControls(); });
-    serverSelect.addEventListener('change', () => { const item = currentItem(); if (['upload', 'esxi'].includes(item?.source) && item.profile !== installer.value) scopeCatalog(item.profile, true); checksum.value = item?.sha256 || ''; updateCompatibility(); successBox.hidden = true; syncControls(); });
+    serverSelect.addEventListener('change', () => { const item = currentItem(); if (!options.wizard && ['upload', 'esxi'].includes(item?.source) && item.profile !== installer.value) scopeCatalog(item.profile, true); checksum.value = item?.sha256 || ''; updateCompatibility(); successBox.hidden = true; syncControls(); });
     fileInput.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
     datastoreSelect.addEventListener('change', () => browseESXi(datastoreSelect.value, ''));
     esxiFileSelect.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
-    checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
-    return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
+    checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); options.onDirty?.(); });
+    if (options.wizard) {
+      storageSection.hidden = true;
+      esxiRadio.closest('label').hidden = mediaTarget()?.hypervisor !== 'esxi';
+    }
+    scopeMediaPanel(panel, options);
+    function pendingSelection() { const saved = catalog?.selected; return mode === 'upload' ? fileInput.files.length > 0 : mode === 'esxi' ? Boolean(esxiFileSelect.value) : Boolean(serverSelect.value && (serverSelect.value !== saved?.id || checksum.value.toLowerCase() !== saved?.sha256)); }
+    return {panel, load, isReady() {
+      return Boolean(catalog?.ready && !busy && !pendingSelection());
+    }, dispose() { disposed = true; panel.remove(); fileInput.value = ''; }, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
-  function createSplunkPackagePanel(onChange, onBusy) {
+  function createSplunkPackagePanel(onChange, onBusy, options = {}) {
     const viewEpoch = state.routeEpoch;
-    let catalog = null, mode = 'upload', busy = '', externalBusy = false;
-    const currentView = () => panel.isConnected && state.session && state.route === 'settings' && state.routeEpoch === viewEpoch;
+    let catalog = null, mode = 'upload', busy = '', externalBusy = false, disposed = false;
+    const currentView = () => !disposed && panel.isConnected && state.session && (options.isCurrent ? options.isCurrent() : state.route === 'settings' && state.routeEpoch === viewEpoch);
     const endpoint = '/api/settings/splunk-package';
+    const profile = options.getProfile?.() || '';
+    const nativeFormat = profile === 'alma10-kickstart' ? 'rpm' : 'deb';
+    const allowedFormats = profile ? [nativeFormat, 'tgz'] : ['tgz', 'deb', 'rpm'];
+    const catalogUrl = profile ? `${endpoint}?profile=${encodeURIComponent(profile)}` : endpoint;
     const sourceLabel = item => item.source === 'upload' ? 'Uploaded' : 'GDeploy server';
     const savedChecksum = item => item?.sha512 || item?.sha256 || '';
     const errorBox = el('div', {class: 'alert alert-error', role: 'alert', hidden: true});
@@ -844,7 +876,7 @@
     const clearSelection = button('Clear saved selection', 'button-small button-ghost', clearPackageSelection);
     clearSelection.id = 'splunk-package-clear-selection';
     const serverSelect = el('select', {id: 'splunk-package-server', name: 'package_id', required: true, 'aria-describedby': 'splunk-package-server-help'});
-    const fileInput = el('input', {id: 'splunk-package-file', name: 'package_file', type: 'file', accept: '.tgz,.deb,.rpm', 'aria-describedby': 'splunk-package-file-help'});
+    const fileInput = el('input', {id: 'splunk-package-file', name: 'package_file', type: 'file', accept: allowedFormats.map(value => `.${value}`).join(','), 'aria-describedby': 'splunk-package-file-help'});
     const fileHelp = el('small', {id: 'splunk-package-file-help'}, 'Upload Splunk Enterprise for Linux x86_64: .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either.');
     const checksum = el('input', {id: 'splunk-package-sha256', name: 'checksum', type: 'text', required: true, minlength: 64, maxlength: 128, pattern: '[a-fA-F0-9]{64}([a-fA-F0-9]{64})?', placeholder: 'Paste the 128-character SHA-512 or 64-character SHA-256 checksum', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', class: 'mono', 'aria-describedby': 'splunk-package-sha256-help'});
     const currentItem = () => catalog?.items?.find(item => item.id === serverSelect.value);
@@ -871,22 +903,23 @@
       for (const control of packageList.querySelectorAll('button[data-delete-id]')) control.disabled = locked || !catalog?.items.find(item => item.id === control.dataset.deleteId)?.can_delete;
       submit.disabled = locked || (mode === 'server' && !serverSelect.value) || (mode === 'upload' && !fileInput.files.length);
       if (!busy) submit.replaceChildren(icon(mode === 'server' ? 'check' : 'layers'), mode === 'upload' ? 'Upload & use package' : 'Use selected package');
-      panel.setAttribute('aria-busy', busy ? 'true' : 'false');
+      panel.setAttribute('aria-busy', busy ? 'true' : 'false'); options.onDirty?.();
     }
     function renderCatalog(next) {
       catalog = next;
       const previousId = serverSelect.value;
-      serverSelect.replaceChildren(el('option', {value: ''}, next.items.length ? 'Choose a Splunk package' : 'No Splunk packages found'), ...next.items.filter(item => item.available !== false).map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${sourceLabel(item)}`)));
+      serverSelect.replaceChildren(el('option', {value: ''}, next.items.length ? 'Choose a Splunk package' : 'No Splunk packages found'), ...next.items.filter(item => item.available !== false && allowedFormats.includes(item.format || item.name.split('.').pop().toLowerCase())).map(item => el('option', {value: item.id}, `${item.name} · ${formatBytes(item.size_bytes)} · ${sourceLabel(item)}`)));
       serverSelect.value = next.selected?.id || (next.items.some(item => item.id === previousId && item.available !== false) ? previousId : '');
       if (mode === 'server') checksum.value = savedChecksum(currentItem());
-      fileHelp.textContent = `Upload a .tgz, .deb or .rpm file up to ${formatBytes(next.max_upload_bytes)}. Uploads are kept with GDeploy’s persistent data.`;
+      fileHelp.textContent = `Upload ${allowedFormats.map(value => '.' + value).join(' or ')} up to ${formatBytes(next.max_upload_bytes)}. Uploads are kept with GDeploy’s persistent data.`;
       badge.className = next.ready ? 'status status-completed' : 'status';
       badge.textContent = next.ready ? 'Ready for preflight' : 'Package required for Splunk';
       if (next.selected) {
         selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('span', {class: 'eyebrow'}, 'SAVED SPLUNK PACKAGE'), el('strong', {}, next.selected.name), el('p', {}, `${formatBytes(next.selected.size_bytes)} · ${sourceLabel(next.selected)}`))), el('details', {class: 'media-integrity'}, el('summary', {}, `Saved ${next.selected.sha512 ? 'SHA-512' : 'SHA-256'} checksum`), el('code', {class: 'certificate-fingerprint'}, savedChecksum(next.selected) || 'Not configured')));
         if (!next.ready) selectedSummary.append(el('p', {class: 'media-help'}, 'The selected package is unavailable or needs attention. Choose and verify a package below before deploying Splunk.'));
       } else selectedSummary.replaceChildren(el('div', {class: 'media-summary-heading'}, icon('layers'), el('div', {}, el('strong', {}, 'Add the Splunk installer'), el('p', {}, 'Required only when your deployment includes Splunk. Use .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either.'))));
-      if (next.has_saved_selection) selectedSummary.append(el('div', {class: 'media-clear-selection'}, clearSelection, el('p', {class: 'media-help'}, 'Clearing the selection keeps the file. Queued and running deployments keep their package; a server-configured package may become the default.')));
+      if (!options.wizard && next.has_saved_selection) selectedSummary.append(el('div', {class: 'media-clear-selection'}, clearSelection, el('p', {class: 'media-help'}, 'Clearing all saved format defaults keeps the files. Queued and running deployments keep their package; a server-configured package may become the default.')));
+      if (!options.wizard) selectedSummary.append(el('div', {class: 'media-help'}, osProfiles.map(profile => el('p', {}, `${osName(profile)}: ${next.profile_selections?.[profile]?.selected?.name || 'No matching package saved'}`))));
       packageList.replaceChildren(el('h4', {}, 'Available packages', el('span', {class: 'count-badge'}, next.items.length)));
       if (!next.items.length) packageList.append(el('p', {class: 'media-help'}, 'No packages saved yet. Upload a Splunk Enterprise package above to get started.'));
       for (const item of next.items) {
@@ -896,20 +929,22 @@
         remove.dataset.deleteId = item.id; remove.disabled = !item.can_delete;
         remove.setAttribute('aria-label', `Delete ${item.name}`);
         if (reason) { remove.setAttribute('aria-describedby', reasonId); remove.title = reason; }
-        packageList.append(el('article', {class: 'stored-media-item'}, el('div', {class: 'stored-media-info'}, el('div', {class: 'stored-media-name'}, icon('layers'), el('strong', {}, item.name), item.selected ? el('span', {class: 'status status-completed'}, 'Selected') : null), el('p', {class: 'media-help'}, `${formatBytes(item.size_bytes)} · ${sourceLabel(item)}${item.available === false ? ' · File unavailable' : ''}`), reason ? el('p', {class: 'media-delete-reason', id: reasonId}, reason) : null), remove));
+        packageList.append(el('article', {class: 'stored-media-item'}, el('div', {class: 'stored-media-info'}, el('div', {class: 'stored-media-name'}, icon('layers'), el('strong', {}, item.name), item.selected || item.saved_default ? el('span', {class: 'status status-completed'}, item.selected ? 'Selected' : 'Saved default') : null), el('p', {class: 'media-help'}, `${formatBytes(item.size_bytes)} · ${sourceLabel(item)}${item.available === false ? ' · File unavailable' : ''}`), reason ? el('p', {class: 'media-delete-reason', id: reasonId}, reason) : null), remove));
       }
-      onChange(next); syncControls();
+      onChange(next); scopeMediaPanel(panel, options); syncControls();
     }
     async function load() {
       if (!currentView() || busy || externalBusy) return;
-      busy = 'load'; inlineError(errorBox, ''); setBusy(refresh, 'Refreshing…'); syncControls();
+      const draft = options.wizard && catalog && pendingSelection() ? {id: serverSelect.value, checksum: checksum.value} : null;
+      busy = 'load'; if (options.wizard) onBusy(true); inlineError(errorBox, ''); setBusy(refresh, 'Refreshing…'); syncControls();
       try {
-        const next = await api(endpoint);
+        const next = await api(catalogUrl);
         if (!currentView()) return;
         if (!catalog && next.items.length) mode = 'server';
         renderCatalog(next);
+        if (draft) { serverSelect.value = draft.id; checksum.value = draft.checksum; syncControls(); }
       } catch (error) { if (currentView()) { inlineError(errorBox, error.message); badge.textContent = 'Couldn’t load packages'; } }
-      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh list'); syncControls(); } }
+      finally { if (currentView()) { busy = ''; refresh.replaceChildren(icon('refresh'), 'Refresh list'); if (options.wizard) onBusy(false); syncControls(); } }
     }
     async function clearPackageSelection() {
       if (!currentView() || busy || externalBusy || !catalog?.has_saved_selection) return;
@@ -940,7 +975,7 @@
         } catch (error) {
           if (currentView()) {
             inlineError(deleteError, error.message);
-            try { const next = await api(endpoint); if (currentView()) renderCatalog(next); } catch { /* Keep the original deletion error visible. */ }
+            try { const next = await api(catalogUrl); if (currentView()) renderCatalog(next); } catch { /* Keep the original deletion error visible. */ }
           }
         } finally {
           delete dialog.dataset.busy; dismiss.disabled = false; remove.disabled = false; remove.replaceChildren('Delete package');
@@ -956,6 +991,7 @@
       event.preventDefault();
       if (!currentView() || busy || externalBusy || !catalog || !form.reportValidity()) return;
       const file = fileInput.files[0], uploading = mode === 'upload';
+      const chosenName = uploading ? file?.name : currentItem()?.name;
       if (uploading && (!file || !(/\.(tgz|deb|rpm)$/i).test(file.name) || !file.size || file.size > catalog.max_upload_bytes)) { inlineError(errorBox, `Choose a nonempty .tgz, .deb or .rpm file no larger than ${formatBytes(catalog.max_upload_bytes)}.`); return; }
       busy = uploading ? 'upload' : 'save'; onBusy(true); inlineError(errorBox, ''); successBox.hidden = true;
       progressBox.hidden = !uploading; progress.value = 0; cancel.disabled = false; progressText.textContent = 'Starting upload…';
@@ -967,10 +1003,10 @@
           if (!currentView()) return;
           if (loaded >= total) { progress.removeAttribute('value'); cancel.disabled = true; progressText.textContent = 'Upload complete. Verifying checksum and Splunk package…'; setBusy(submit, 'Verifying package…'); }
           else { progress.value = Math.round(loaded / total * 100); progressText.textContent = `${formatBytes(loaded)} of ${formatBytes(total)} uploaded`; }
-        }, `${endpoint}/upload`, algorithm) : await api(endpoint, {method: 'PUT', body: {package_id: serverSelect.value, [algorithm]: digest}});
+        }, `${endpoint}/upload`, algorithm, profile) : await api(endpoint, {method: 'PUT', body: {package_id: serverSelect.value, [algorithm]: digest, ...(profile ? {profile} : {})}});
         if (!currentView()) return;
         mode = 'server'; fileInput.value = ''; renderCatalog(next);
-        successBox.textContent = `${next.selected?.name || 'Splunk package'} verified and saved. New Splunk deployments will use this package. Use .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either.`; successBox.hidden = false;
+        successBox.textContent = `${chosenName || 'Splunk package'} verified and saved.${profile && next.selected ? ` This deployment uses ${next.selected.name}.` : ''} GDeploy automatically uses the saved .deb for Ubuntu or .rpm for AlmaLinux, with .tgz as a compatible fallback.`; successBox.hidden = false;
       } catch (error) { if (currentView()) inlineError(errorBox, error.message); }
       finally { if (currentView()) { busy = ''; progressBox.hidden = true; onBusy(false); syncControls(); } }
     }}, el('div', {class: 'form-body'},
@@ -982,8 +1018,13 @@
     const panel = el('section', {class: 'surface', id: 'splunk-package-panel', 'aria-labelledby': 'splunk-package-title'}, el('div', {class: 'surface-header'}, el('div', {}, el('h2', {id: 'splunk-package-title'}, 'Splunk Enterprise'), el('p', {}, 'Add and manage the installer used for Splunk deployments: .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either.')), badge, refresh), form, el('section', {class: 'media-storage'}, el('div', {class: 'media-storage-body'}, packageList)));
     serverSelect.addEventListener('change', () => { checksum.value = savedChecksum(currentItem()); successBox.hidden = true; syncControls(); });
     fileInput.addEventListener('change', () => { checksum.value = ''; successBox.hidden = true; inlineError(errorBox, ''); syncControls(); });
-    checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); });
-    return {panel, load, setExternalBusy(value) { externalBusy = value; syncControls(); }};
+    checksum.addEventListener('input', () => { checksum.value = checksum.value.trim(); options.onDirty?.(); });
+    if (options.wizard) $('.media-storage', panel).hidden = true;
+    scopeMediaPanel(panel, options);
+    function pendingSelection() { const saved = catalog?.selected; return mode === 'upload' ? fileInput.files.length > 0 : Boolean(serverSelect.value && (serverSelect.value !== saved?.id || checksum.value.toLowerCase() !== savedChecksum(saved))); }
+    return {panel, load, isReady() {
+      return Boolean(catalog?.ready && !busy && !pendingSelection());
+    }, dispose() { disposed = true; panel.remove(); fileInput.value = ''; }, setExternalBusy(value) { externalBusy = value; syncControls(); }};
   }
   function fleetManagerVersionSummary(catalog = {}) {
     const version = catalog[osProfile() === 'alma10-kickstart' ? 'online_version_rpm' : 'online_version'];
@@ -1777,7 +1818,7 @@
     }
     mediaControls = createMediaPanel(catalog => { if (state.settings) { state.settings.os_media_profiles = catalog.profile_selections; state.settings.iso_configured = hasInstallationMedia(); state.settings.os_profile = catalog.profile; } fleetControls?.syncProfile(); sensorControls?.syncProfile(); invalidatePreflight(); renderReadiness(); }, value => { mediaBusy = value; syncControls(); });
     sshControls = createSSHAccessPanel(count => { if (state.settings) state.settings.ssh_key_count = count; renderReadiness(); }, value => { sshBusy = value; syncControls(); }, initialSSHdraft);
-    packagesControls = createSplunkPackagePanel(catalog => { if (state.settings) state.settings.splunk_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { packagesBusy = value; syncControls(); });
+    packagesControls = createSplunkPackagePanel(catalog => { if (state.settings) { state.settings.splunk_configured = catalog.ready; state.settings.splunk_package_profiles = catalog.profile_selections; } invalidatePreflight(); renderReadiness(); }, value => { packagesBusy = value; syncControls(); });
     fleetControls = createFleetManagerPanel(catalog => { if (state.settings) { state.settings.fleetmanager_configured = catalog.ready; } invalidatePreflight(); renderReadiness(); }, value => { fleetBusy = value; syncControls(); }, {onDirty: invalidatePreflight, onClear: () => clearSuspendedWizardConfiguration('fleet')});
     sensorControls = createSensorPanel(catalog => { if (state.settings) state.settings.corelight_sensor_configured = catalog.ready; invalidatePreflight(); renderReadiness(); }, value => { sensorBusy = value; syncControls(); }, {onDirty: invalidatePreflight, onClear: () => clearSuspendedWizardConfiguration('sensor')});
     panels.connection = el('div', {id: 'setup-panel-connection', role: 'tabpanel', 'aria-labelledby': 'setup-tab-connection', tabindex: '0'}, createTargetHostsPanel(), settings.host ? el('details', {class: 'surface'}, el('summary', {}, 'Default ESXi connection · legacy settings'), form, defaultsPanel) : null);
@@ -2071,7 +2112,7 @@
     hideCredentials();
     const dialog = $('#wizard-dialog');
     if (state.wizard?.suspended) {
-      state.wizard.suspended = false; invalidatePreflight(); state.wizard.accepted = false; state.wizard.busy = true;
+      state.wizard.suspended = false; state.wizard.renderedStep = -1; invalidatePreflight(); state.wizard.accepted = false; state.wizard.busy = true;
       state.wizard.fleetNeedsRefresh = true; state.wizard.fleetValidated = false; state.wizard.sensorNeedsRefresh = true; state.wizard.sensorValidated = false;
       if (configurationSteps().length && state.wizard.step > 2) state.wizard.step = 2;
     }
@@ -2109,6 +2150,7 @@
     if (wizard) {
       wizard.sensorPairingToken = '';
       wizard.fleetControls?.dispose(); wizard.sensorControls?.dispose();
+      for (const entry of Object.values(wizard.mediaPanels || {})) { entry.iso.dispose(); entry.package.dispose(); }
       wizard.fleetControls = null; wizard.sensorControls = null;
     }
     $('#wizard-dialog').replaceChildren();
@@ -2138,12 +2180,13 @@
   }
   function selectedRoles() { return Object.keys(roles).filter(role => state.wizard.selected.has(role)); }
   function configurationSteps() {
-    return ['fleetmanager', 'corelight_sensor'].filter(role => state.wizard?.selected.has(role));
+    return ['splunk', 'fleetmanager', 'corelight_sensor'].filter(role => state.wizard?.selected.has(role));
   }
   function configurationStep(role) { const index = configurationSteps().indexOf(role); return index < 0 ? -1 : index + 2; }
   function wizardSteps() {
-    return ['Choose software', 'Configure VMs', ...configurationSteps().map(role => role === 'fleetmanager' ? 'FleetManager configuration' : 'Sensor configuration'), 'Review & deploy'];
+    return ['Choose software', 'Configure VMs', ...configurationSteps().map(role => role === 'splunk' ? 'Installation media' : role === 'fleetmanager' ? 'FleetManager configuration' : 'Sensor configuration'), 'Review & deploy'];
   }
+  function isMediaStep() { return configurationStep('splunk') === state.wizard?.step; }
   function isFleetStep() { return configurationStep('fleetmanager') === state.wizard?.step; }
   function isSensorStep() { return configurationStep('corelight_sensor') === state.wizard?.step; }
   function syncConfigurationWizardActions(wizard) {
@@ -2154,6 +2197,46 @@
       next.disabled = wizard.busy || !controls?.canSave();
       next.replaceChildren(...(wizard.busy ? [spinner(), 'Please wait…'] : [icon('arrow'), 'Save & continue']));
     }
+  }
+  function activeMediaPanels(wizard = state.wizard) { return wizard?.mediaPanels?.[`${wizard.osProfile}:${wizard.targetHostId}`]; }
+  function syncMediaWizardActions(wizard) {
+    if (state.wizard !== wizard || !isMediaStep()) return;
+    for (const control of $('#wizard-dialog').querySelectorAll('.wizard-footer button,.dialog-close')) control.disabled = wizard.busy;
+    const next = $('#wizard-next'), entry = activeMediaPanels(wizard);
+    if (next) next.disabled = wizard.busy || !entry?.iso.isReady() || !entry?.package.isReady();
+  }
+  function renderInstallationMedia(content) {
+    const wizard = state.wizard, profile = wizard.osProfile, targetId = wizard.targetHostId;
+    content.append(el('h3', {}, 'Installation media'), el('p', {class: 'muted'}, `Choose the ${osName(profile)} ISO and Splunk installer here before preflight. GDeploy automatically selects the saved ${profile === 'alma10-kickstart' ? '.rpm' : '.deb'} package for this OS, or a compatible .tgz archive. Upload or select replacement files below and verify their publisher checksums.`));
+    wizard.mediaPanels ||= {};
+    const key = `${profile}:${targetId}`;
+    if (!wizard.mediaPanels[key]) {
+      const options = {
+        wizard: true, getProfile: () => profile,
+        isCurrent: () => state.wizard === wizard && !wizard.suspended && isMediaStep() && wizard.osProfile === profile && wizard.targetHostId === targetId,
+        onDirty: () => { invalidatePreflight(); syncMediaWizardActions(wizard); },
+      };
+      const busyChange = value => {
+        if (state.wizard !== wizard) return;
+        wizard.busy = value;
+        const entry = activeMediaPanels(wizard);
+        entry?.iso.setExternalBusy(value); entry?.package.setExternalBusy(value);
+        syncMediaWizardActions(wizard);
+      };
+      const iso = createMediaPanel(catalog => {
+        if (state.wizard !== wizard) return;
+        state.settings.os_media_profiles = catalog.profile_selections;
+        invalidatePreflight(); syncMediaWizardActions(wizard);
+      }, busyChange, {...options, getTarget: () => configuredTargets().find(target => target.id === targetId)});
+      const pkg = createSplunkPackagePanel(catalog => {
+        if (state.wizard !== wizard) return;
+        state.settings.splunk_package_profiles = catalog.profile_selections;
+        invalidatePreflight(); syncMediaWizardActions(wizard);
+      }, busyChange, options);
+      wizard.mediaPanels[key] = {iso, package: pkg, loaded: false};
+    }
+    const entry = activeMediaPanels(wizard);
+    content.append(entry.iso.panel, entry.package.panel);
   }
   function renderFleetConfiguration(content) {
     const wizard = state.wizard;
@@ -2225,15 +2308,17 @@
     const focusedId = $('#wizard-dialog').contains(document.activeElement) ? document.activeElement.id : '';
     ensureVMs();
     const steps = wizardSteps(), reviewStep = steps.length - 1;
+    const enterMedia = isMediaStep() && wizard.renderedStep !== wizard.step; wizard.renderedStep = wizard.step;
     const loadFleet = isFleetStep() && (!wizard.fleetControls || wizard.fleetNeedsRefresh), loadSensor = isSensorStep() && (!wizard.sensorControls || wizard.sensorNeedsRefresh);
     const sidebar = el('aside', {class: 'wizard-sidebar', 'aria-label': 'Deployment steps'});
-    const compactSteps = ['Software', 'VMs', ...configurationSteps().map(role => role === 'fleetmanager' ? 'Fleet setup' : 'Sensor setup'), 'Review'];
+    const compactSteps = ['Software', 'VMs', ...configurationSteps().map(role => role === 'splunk' ? 'Media' : role === 'fleetmanager' ? 'Fleet setup' : 'Sensor setup'), 'Review'];
     steps.forEach((label, index) => sidebar.append(el('div', {class: `wizard-step ${index === wizard.step ? 'active' : index < wizard.step ? 'done' : ''}`, ...(index === wizard.step ? {'aria-current': 'step'} : {})}, el('b', {}, index < wizard.step ? '✓' : index + 1), el('span', {class: 'wizard-step-label'}, label), el('span', {class: 'wizard-step-compact-label'}, compactSteps[index]))));
-    sidebar.append(el('p', {class: 'wizard-aside-note'}, 'Choose Ubuntu or AlmaLinux for this deployment. Each role gets its own VM using the matching ISO saved in Setup.'));
+    sidebar.append(el('p', {class: 'wizard-aside-note'}, 'Choose Ubuntu or AlmaLinux for this deployment. Each role gets its own VM. For Splunk, choose the matching ISO and installer in the Installation media step.'));
     const content = el('div', {class: 'wizard-content', id: 'wizard-content'});
     if (wizard.error && !wizard.vmError) content.append(el('div', {class: 'alert alert-error', role: 'alert'}, wizard.error));
     if (wizard.step === 0) renderBlueprint(content);
     if (wizard.step === 1) renderResources(content);
+    if (isMediaStep()) renderInstallationMedia(content);
     if (isFleetStep()) renderFleetConfiguration(content);
     if (isSensorStep()) renderSensorConfiguration(content);
     if (wizard.step === reviewStep) renderReview(content);
@@ -2250,6 +2335,11 @@
     $('#wizard-dialog').replaceChildren(el('div', {class: 'wizard-frame'}, wizardHeader(), el('div', {class: 'wizard-layout'}, sidebar, content), footer));
     if (wizard.busy) for (const control of $('#wizard-dialog').querySelectorAll('button,input,select')) control.disabled = true;
     else if (focusedId) document.getElementById(focusedId)?.focus({preventScroll: true});
+    if (isMediaStep()) {
+      syncMediaWizardActions(wizard);
+      const entry = activeMediaPanels(wizard);
+      if (!entry.loaded || enterMedia) { entry.loaded = true; (async () => { await entry.iso.load(); await entry.package.load(); })(); }
+    }
     if (isFleetStep() || isSensorStep()) syncConfigurationWizardActions(wizard);
     if (loadFleet) { wizard.fleetNeedsRefresh = false; wizard.fleetControls.load(); }
     if (isFleetStep()) wizard.fleetControls?.activate();
@@ -2285,7 +2375,7 @@
       finally { if (state.wizard === wizard) { wizard.busy = false; renderWizard(); } }
     }}, el('option', {value: ''}, 'Choose a target host'), configuredTargets().map(host => el('option', {value: host.id}, `${host.name} · ${host.hypervisor === 'proxmox' ? 'Proxmox' : 'ESXi'}`)));
     targetSelect.value = wizard.targetHostId;
-    content.append(field('Target virtualization host', targetSelect, 'Host type is detected from its saved configuration. VM storage and networks come from this host.'));
+    content.append(field('Target virtualization host', targetSelect, 'Host type is detected from its saved configuration. VM storage and networks come from this host.'), wizardSetupLink('Manage hosts in Setup', '#settings/connection'));
     const installer = el('select', {id: 'wizard-os-profile', required: true, 'aria-describedby': 'wizard-os-media', onChange: event => {
       if (wizard.busy) return;
       const previousProfile = wizard.osProfile;
@@ -2300,9 +2390,9 @@
     if (wizard.osProfile) {
       const media = deploymentMedia(wizard.osProfile);
       content.append(el('div', {id: 'wizard-os-media', class: media.ready ? 'wizard-callout' : 'wizard-package-notice'},
-        el('p', {class: 'media-help'}, media.ready ? `${osName(wizard.osProfile)} ISO ready${media.selected?.name ? `: ${media.selected.name}` : ''}. Preflight verifies it again before deployment.` : `Save a verified ${osName(wizard.osProfile)} ISO in Setup before deployment. Your draft will be kept.`),
+        el('p', {class: 'media-help'}, media.ready ? `${osName(wizard.osProfile)} ISO ready${media.selected?.name ? `: ${media.selected.name}` : ''}. Preflight verifies it again before deployment.` : wizard.selected.has('splunk') ? `Choose a verified ${osName(wizard.osProfile)} ISO in the Installation media step after VM resources.` : `Save a verified ${osName(wizard.osProfile)} ISO in Setup before deployment. Your draft will be kept.`),
         wizard.osProfile === 'alma10-kickstart' ? el('p', {class: 'media-help'}, 'Requires the standard x86_64 full DVD ISO and x86-64-v3 CPU features.') : null,
-        media.ready ? null : wizardSetupLink('Configure installation media', '#settings/media')));
+        media.ready || wizard.selected.has('splunk') ? null : wizardSetupLink('Configure installation media', '#settings/media')));
     } else content.append(el('p', {id: 'wizard-os-media', class: 'media-help'}, 'Choose Ubuntu or AlmaLinux explicitly for each new deployment.'));
     const grid = el('div', {class: 'role-grid'});
     for (const [role, config] of Object.entries(roles)) {
@@ -2315,13 +2405,13 @@
         if (role === 'elasticsearch' && !event.target.checked) wizard.selected.delete('kibana');
         invalidatePreflight(); renderWizard();
       }});
-      const readiness = role === 'splunk' ? state.settings?.splunk_configured : role === 'fleetmanager' ? state.settings?.fleetmanager_configured : role === 'corelight_sensor' ? state.settings?.corelight_sensor_configured : null;
-      const packageStatus = ['splunk', 'fleetmanager', 'corelight_sensor'].includes(role) ? el('small', {class: `role-package-status ${readiness ? 'ready' : ''}`}, readiness ? role === 'splunk' ? 'Installer package configured' : role === 'corelight_sensor' ? 'Defaults saved · fresh pairing token required' : 'Online repository configured' : role === 'splunk' ? 'Installer package needed in Setup' : 'Configure after VM resources') : null;
+      const readiness = role === 'splunk' ? state.settings?.splunk_package_profiles?.[wizard.osProfile]?.ready : role === 'fleetmanager' ? state.settings?.fleetmanager_configured : role === 'corelight_sensor' ? state.settings?.corelight_sensor_configured : null;
+      const packageStatus = ['splunk', 'fleetmanager', 'corelight_sensor'].includes(role) ? el('small', {class: `role-package-status ${readiness ? 'ready' : ''}`}, readiness ? role === 'splunk' ? 'Installer package configured' : role === 'corelight_sensor' ? 'Defaults saved · fresh pairing token required' : 'Online repository configured' : role === 'splunk' ? 'Choose installer after VM resources' : 'Configure after VM resources') : null;
       grid.append(el('label', {class: 'role-option'}, checkbox, roleIcon(role), el('span', {class: 'role-option-text'}, el('strong', {}, config.name), el('small', {}, config.description), packageStatus)));
     }
     if (osProfile() === 'alma10-kickstart' && (wizard.selected.has('fleetmanager') || wizard.selected.has('corelight_sensor'))) content.append(almaWarning());
     content.append(el('div', {class: 'field-section-label'}, 'Software & roles', el('span', {}, `${wizard.selected.size} ${wizard.selected.size === 1 ? 'VM' : 'VMs'} selected`)), grid, el('div', {class: 'wizard-callout'}, icon('info'), el('span', {}, 'Selecting Kibana also selects Elasticsearch. GDeploy configures their connection, matching versions, and TLS. Each software role runs on its own VM.')));
-    if (wizard.selected.has('splunk') && !state.settings?.splunk_configured) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'Add the Splunk Enterprise Linux x86_64 package (.deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either) and its publisher checksum in Setup. Your deployment draft will be kept while you do this.'), wizardSetupLink('Configure Splunk package')));
+    if (wizard.selected.has('splunk')) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'After VM resources, configure the OS ISO and Splunk package together in Installation media. Saved .deb and .rpm defaults are selected automatically for Ubuntu and AlmaLinux.')));
     if (wizard.selected.has('fleetmanager')) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'After configuring VM resources, you’ll select a FleetManager version and provide its repository token, community string, and license before preflight.')));
     if (wizard.selected.has('corelight_sensor')) content.append(el('div', {class: 'wizard-package-notice'}, el('p', {}, 'Software Sensor requires a static or reserved management address, and a second monitoring NIC. You’ll provide the sensor license key and fresh pairing values from an existing FleetManager instance after VM resources.')));
   }
@@ -2381,6 +2471,7 @@
     for (const vm of spec.vms) review.append(el('div', {class: 'review-vm'}, el('div', {class: 'review-vm-head'}, roleIcon(vm.role), el('strong', {}, vm.name)), el('small', {}, `${roleName(vm.role)} · ${vm.cpu} vCPU · ${vm.ram_gb} GB RAM · ${vm.disk_gb} GB disk`, el('br'), `${vm.datastore} · ${vm.network} · ${vm.ip_mode === 'dhcp' ? vm.dhcp_reserved ? 'Reserved DHCP' : 'DHCP' : vm.address}`, vm.monitor_network ? [el('br'), `Monitoring: ${vm.monitor_network} · second NIC, no IP`] : null, vm.ip_mode === 'static' ? [el('br'), `Gateway ${vm.gateway} · DNS ${vm.dns.join(', ')}`] : null)));
     content.append(el('p', {class: 'media-help'}, `Target: ${wizardTarget()?.name || 'Unavailable'} · ${isProxmox() ? 'Proxmox' : 'ESXi'}`), el('p', {class: 'media-help'}, `Operating system: ${osName(spec.os_profile)}`), review);
     if (spec.os_profile === 'alma10-kickstart' && spec.vms.some(vm => ['fleetmanager', 'corelight_sensor'].includes(vm.role))) content.append(almaWarning());
+    if (wizard.selected.has('splunk')) content.append(el('div', {class: 'wizard-callout', id: 'wizard-media-review'}, icon('disc'), el('span', {}, `OS ISO: ${deploymentMedia(wizard.osProfile).selected?.name || 'Not configured'}. Splunk installer: ${state.settings?.splunk_package_profiles?.[wizard.osProfile]?.selected?.name || 'Not configured'}. The matching media is verified again before deployment.`)));
     if (wizard.selected.has('fleetmanager')) {
       const fleet = wizard.fleetCatalog || {};
       const installation = 'Corelight repository. The VM needs internet access; the repository remains configured for future updates. Version availability is checked on the VM during installation.';
@@ -2398,7 +2489,9 @@
       const checks = el('div', {}, (wizard.preflight.checks || []).map(check => {
         let action = null;
         if (!check.ok && check.action?.href && typeof check.action.label === 'string') {
-          action = check.action.href === '#settings/packages/fleetmanager' && wizard.selected.has('fleetmanager')
+          action = wizard.selected.has('splunk') && ['#settings/media', '#settings/packages', '#settings/packages/splunk'].includes(check.action.href)
+            ? button('Edit installation media', 'button-small wizard-setup-link', () => { if (wizard.busy) return; invalidatePreflight(); wizard.step = configurationStep('splunk'); const entry = activeMediaPanels(wizard); if (entry) entry.loaded = false; renderWizard(); }, 'back')
+            : check.action.href === '#settings/packages/fleetmanager' && wizard.selected.has('fleetmanager')
             ? button('Edit FleetManager configuration', 'button-small wizard-setup-link', () => { if (wizard.busy) return; invalidatePreflight(); wizard.fleetNeedsRefresh = true; wizard.fleetValidated = false; wizard.step = configurationStep('fleetmanager'); renderWizard(); }, 'back')
             : check.action.href === '#settings/packages/corelight-sensor' && wizard.selected.has('corelight_sensor')
               ? button('Edit sensor configuration', 'button-small wizard-setup-link', () => { if (wizard.busy) return; invalidatePreflight(); wizard.sensorNeedsRefresh = true; wizard.sensorValidated = false; wizard.step = configurationStep('corelight_sensor'); renderWizard(); }, 'back')
@@ -2461,6 +2554,11 @@
       }
       else $('#wizard-content')?.scrollTo({top: 0});
       return;
+    }
+    if (isMediaStep()) {
+      const entry = activeMediaPanels(wizard);
+      if (!entry?.iso.isReady() || !entry?.package.isReady()) { syncMediaWizardActions(wizard); return; }
+      wizard.step++; renderWizard(); $('#wizard-content')?.scrollTo({top: 0}); return;
     }
     if (isFleetStep() || isSensorStep()) {
       const sensor = isSensorStep();

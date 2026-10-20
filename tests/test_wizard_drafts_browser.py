@@ -105,7 +105,7 @@ def ui(tmp_path, monkeypatch, chromium):
     license_path = tmp_path / "wizard-license.pem"
     make_license(license_path)
     config = Config(tmp_path / "data", Fernet.generate_key().decode(), hash_password(PASSWORD),
-                    cookie_secure=False, ubuntu_iso=source, ubuntu_sha256=hashlib.sha256(body).hexdigest())
+                    cookie_secure=False, ubuntu_iso=source, splunk_package=source.with_name("splunk.tgz"), ubuntu_sha256=hashlib.sha256(body).hexdigest())
     db = Database(config.data_dir, config.secret_key)
     db.set_settings({"host": "esxi.test", "username": "root", "password": "fixture-esxi-secret", "verify_tls": True})
     reserved = {"name": "existing-reservation", "vms": [{"role": "ubuntu", "name": "reserved-ubuntu", "cpu": 2,
@@ -165,7 +165,7 @@ class WizardUI:
         self.page.get_by_role("button", name="Sign in", exact=False).click()
         expect(self.page.get_by_role("button", name="New deployment", exact=True)).to_be_visible()
 
-    def open(self, role, name="draft-test", *, splunk=True, address="192.0.2.10/24", profile=UBUNTU):
+    def open(self, role, name="draft-test", *, splunk=False, address="192.0.2.10/24", profile=UBUNTU):
         self.role = role
         self.profile = profile
         self.page.get_by_role("button", name="New deployment", exact=True).click()
@@ -250,8 +250,8 @@ class WizardUI:
 
     def suspend(self):
         self.blueprint()
-        self.page.locator("#role-splunk").check()
-        self.wizard.get_by_role("link", name="Configure Splunk package", exact=True).click()
+        self.wizard.get_by_role("link", name="Manage hosts in Setup", exact=True).click()
+        self.page.locator("#setup-tab-packages").click()
         expect(self.wizard).not_to_be_visible()
         expect(self.page.get_by_role("button", name="Return to deployment", exact=True)).to_be_visible()
         duplicates = self.page.evaluate("() => { const a = [...document.querySelectorAll('[id]')].map(n => n.id); return a.filter((id, i) => a.indexOf(id) !== i); }")

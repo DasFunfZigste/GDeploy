@@ -155,6 +155,7 @@ class MediaSelection(StrictModel):
 
 
 class SplunkPackageSelection(StrictModel):
+    profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] | None = None
     package_id: str = Field(min_length=1, max_length=1024)
     sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
     sha512: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{128}$")
@@ -167,6 +168,7 @@ class SplunkPackageSelection(StrictModel):
 
 
 class ESXiMediaSelection(CertificateHost):
+    target_host_id: str | None = Field(default=None, max_length=128)
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
     datastore: str = Field(min_length=1, max_length=128)
     path: str = Field(min_length=1, max_length=2048)

@@ -86,7 +86,7 @@ def test_saved_host_required_and_local_catalog_remains_independent(signed_in, mo
     for method in ("GET", "POST"):
         response = signed_in.request(method, "/api/settings/media/esxi", json=PAYLOAD)
         assert response.status_code == 400
-        assert "Save the ESXi connection" in response.json()["detail"]
+        assert "Choose a configured ESXi host" in response.json()["detail"]
     factory.assert_not_called()
 
 
@@ -176,3 +176,31 @@ def test_browse_permissions_error_is_reported(signed_in, esxi, monkeypatch):
     response = signed_in.get("/api/settings/media/esxi")
     assert response.status_code == 400
     assert "permission denied" in response.json()["detail"]
+
+
+def test_named_esxi_media_uses_selected_host_instead_of_default(signed_in, esxi):
+    db = signed_in.app.state.db
+    target = {'id': 'other-esxi', 'name': 'Second ESXi', 'hypervisor': 'esxi', 'host': 'second-esxi.test',
+              'username': 'deploy', 'password': 'second-secret', 'verify_tls': True}
+    db.set_target_host(target['id'], target)
+    response = signed_in.get('/api/settings/media/esxi', params={'target_host_id': target['id']})
+    assert response.status_code == 200 and response.json()['host'] == target['host']
+    assert esxi.factory.call_args.kwargs['host'] == target['host']
+    assert esxi.factory.call_args.kwargs['password'] == target['password']
+    response = signed_in.post('/api/settings/media/esxi', json={**PAYLOAD, 'host': target['host'], 'target_host_id': target['id']})
+    assert response.status_code == 200, response.text
+    assert response.json()['selected']['origin']['host'] == target['host']
+    esxi.factory.reset_mock()
+    response = signed_in.post('/api/settings/media/esxi', json={**PAYLOAD, 'target_host_id': target['id']})
+    assert response.status_code == 409
+    esxi.factory.assert_not_called()
+
+
+@pytest.mark.parametrize('method', ['GET', 'POST'])
+@pytest.mark.parametrize('target', ['missing', 'proxmox'])
+def test_esxi_media_rejects_removed_or_proxmox_target_before_contact(signed_in, esxi, method, target):
+    if target == 'proxmox':
+        signed_in.app.state.db.set_target_host(target, {'hypervisor': 'proxmox', 'host': 'pve.test', 'node': 'pve'})
+    response = signed_in.get('/api/settings/media/esxi', params={'target_host_id': target}) if method == 'GET' else signed_in.post('/api/settings/media/esxi', json={**PAYLOAD, 'target_host_id': target})
+    assert response.status_code == (404 if target == 'missing' else 400)
+    esxi.factory.assert_not_called()

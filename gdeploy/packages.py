@@ -14,6 +14,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
 from .guest import GuestError, _validate_splunk_archive
+from .os_profiles import ALMA10, PROFILES
 from .splunk_native import FORMATS, NativePackageError, compatible, validate_native
 
 
@@ -187,8 +188,24 @@ class SplunkPackageManager:
         except OSError as exc:
             raise PackageError("The Splunk package is missing or unreadable. Select or upload it in Setup → Software packages.") from exc
 
-    def selected(self):
-        return self.db.splunk_package_settings() or self.legacy()
+    def selected(self, os_profile=None):
+        if os_profile is None:
+            return self.db.splunk_package_settings() or self.legacy()
+        return self._resolve(os_profile, self.db.splunk_package_format_settings(), self.legacy())
+
+    @staticmethod
+    def _resolve(os_profile, selections, legacy):
+        native = "rpm" if os_profile == ALMA10 else "deb"
+        if native in selections:
+            return selections[native]
+        if legacy and Path(legacy["path"]).suffix.lower() == "." + native:
+            return legacy
+        return selections.get("tgz") or (legacy if legacy and Path(legacy["path"]).suffix.lower() == ".tgz" else None)
+
+    @staticmethod
+    def _require_profile(package_format, os_profile):
+        if os_profile is not None and (os_profile not in PROFILES or not compatible(package_format, os_profile)):
+            raise PackageError("Select .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either operating system.")
 
     def legacy(self):
         """Keep explicit environment configuration and pre-selection deployments working."""
@@ -226,14 +243,21 @@ class SplunkPackageManager:
         candidates.extend(self.db.splunk_package_files())
         return sorted(candidates, key=lambda item: (item["name"].lower(), item["id"]))
 
-    def catalog(self):
+    def catalog(self, os_profile=None):
         state = self.db.splunk_package_storage_state()
         saved = state["selected"]
-        selected = saved or self.legacy()
+        legacy = self.legacy()
+        selections = state["format_selections"]
+        selected = (saved or legacy) if os_profile is None else self._resolve(os_profile, selections, legacy)
+        profiles = {}
+        for profile in PROFILES:
+            choice = self._resolve(profile, selections, legacy)
+            profiles[profile] = {"ready": bool(choice and self._available(choice)),
+                                 "selected": {key: choice.get(key) for key in ("id", "name", "format")} if choice else None}
         items = []
         for item in self._files():
             chosen = bool(selected and item["id"] == selected["id"])
-            reason = self.db.splunk_package_delete_reason(item, selected, state["references"])
+            reason = self.db.splunk_package_delete_reason(item, selected, state["references"], selections=selections.values())
             if item["source"] != "upload":
                 reason = "Server-mounted packages must be managed on the Docker host."
             available = False
@@ -253,28 +277,31 @@ class SplunkPackageManager:
                 "sha256": selected.get("sha256", "") if chosen else item["sha256"],
                 "sha512": selected.get("sha512", "") if chosen else item.get("sha512", ""),
                 "selected": chosen, "available": available,
+                "saved_default": any(choice["id"] == item["id"] for choice in selections.values()),
                 "can_delete": reason is None, "delete_reason": reason,
             })
         return {
             "items": items, "selected": selected, "ready": bool(selected and self._available(selected)),
-            "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": PROFILE, "has_saved_selection": saved is not None,
+            "max_upload_bytes": MAX_UPLOAD_BYTES, "profile": PROFILE, "has_saved_selection": bool(selections),
+            "os_profile": os_profile, "profile_selections": profiles,
         }
 
-    def select(self, package_id, sha256=None, *, sha512=None):
+    def select(self, package_id, sha256=None, *, sha512=None, os_profile=None):
         algorithm, checksum = _publisher_checksum(sha256, sha512)
         candidate = next((item for item in self._files() if item["id"] == package_id), None)
         if candidate is None:
             raise PackageError("That Splunk package is no longer available. Refresh and select it again.", 404)
         path = self._path(candidate)
+        self._require_profile(FORMATS[path.suffix.lower()], os_profile)
         digests = self._verify_package(path, checksum, algorithm=algorithm)
         candidate = self._snapshot(
             path, name=candidate["name"], source=candidate["source"], package_id=candidate["id"], **digests
         )
         self.db.set_splunk_package_settings(candidate)
-        return self.catalog()
+        return self.catalog(os_profile)
 
-    def clear_selection(self):
-        self.db.clear_splunk_package_settings()
+    def clear_selection(self, package_format=None):
+        self.db.clear_splunk_package_settings(package_format)
         return self.catalog()
 
     def delete(self, package_id):
@@ -312,8 +339,9 @@ class SplunkPackageManager:
         if shutil.disk_usage(self.upload_dir).free < (length or 0) + FREE_SPACE_RESERVE:
             raise PackageError("Not enough disk space for this Splunk package. Free space in the GDeploy data volume.", 507)
 
-    async def upload(self, request, filename, sha256=None, *, sha512=None):
+    async def upload(self, request, filename, sha256=None, *, sha512=None, os_profile=None):
         filename = _filename(filename)
+        self._require_profile(FORMATS[Path(filename).suffix.lower()], os_profile)
         algorithm, checksum = _publisher_checksum(sha256, sha512)
         raw_length = request.headers.get("content-length")
         try:
@@ -365,7 +393,7 @@ class SplunkPackageManager:
             snapshot = self._snapshot(final, name=filename, source="upload", package_id="upload_" + token, **digests)
             self.db.set_splunk_package_settings(snapshot, uploaded=True)
             committed = True
-            return self.catalog()
+            return self.catalog(os_profile)
         except ClientDisconnect as exc:
             raise PackageError("The upload was interrupted. Try uploading the Splunk package again.") from exc
         except OSError as exc:

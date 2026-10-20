@@ -98,7 +98,7 @@ def test_removed_draft_target_requires_explicit_reselection(ui):
     ui.wizard.locator('#deployment-name').fill('retain-target-draft')
     ui.wizard.locator('#wizard-os-profile').select_option('ubuntu-autoinstall')
     ui.wizard.locator('#role-splunk').check()
-    ui.wizard.get_by_role('link', name='Configure Splunk package', exact=True).click()
+    ui.wizard.get_by_role('link', name='Manage hosts in Setup', exact=True).click()
     expect(ui.wizard).not_to_be_visible()
     ui.db.remove_target_host('pve-lab')
     ui.page.get_by_role('link', name='Deployments', exact=True).click()

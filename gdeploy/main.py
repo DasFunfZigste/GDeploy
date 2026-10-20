@@ -265,6 +265,7 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         saved = request.app.state.db.settings() or {}
         fleetmanager = request.app.state.fleetmanager.catalog(include_packages=False)
         media = request.app.state.media.catalog()
+        packages = request.app.state.packages.catalog()
         return {
             "host": saved.get("host", ""),
             "username": saved.get("username", ""),
@@ -276,7 +277,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             "os_profile": media["profile"],
             "os_media_profiles": media["profile_selections"],
             "ssh_key_count": len(request.app.state.db.ssh_public_keys()),
-            "splunk_configured": request.app.state.packages.catalog()["ready"],
+            "splunk_configured": packages["ready"],
+            "splunk_package_profiles": packages["profile_selections"],
             "fleetmanager_configured": fleetmanager["ready"],
             "fleetmanager_mode": fleetmanager["mode"],
             "corelight_sensor_configured": request.app.state.corelight_sensor.catalog()["ready"],
@@ -301,8 +303,9 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         return {"keys": keys, "count": len(keys)}
 
     @app.get("/api/settings/splunk-package")
-    def splunk_package_settings(request: Request, current=Depends(authenticated)):
-        return request.app.state.packages.catalog()
+    def splunk_package_settings(request: Request, profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] | None = None,
+                                current=Depends(authenticated)):
+        return request.app.state.packages.catalog(profile)
 
     @app.get("/api/settings/corelight-sensor")
     def corelight_sensor_settings(request: Request, current=Depends(authenticated)):
@@ -344,18 +347,19 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.put("/api/settings/splunk-package")
     def select_splunk_package(payload: SplunkPackageSelection, request: Request, current=Depends(authenticated)):
-        return request.app.state.packages.select(payload.package_id, payload.sha256, sha512=payload.sha512)
+        return request.app.state.packages.select(payload.package_id, payload.sha256, sha512=payload.sha512, os_profile=payload.profile)
 
     @app.delete("/api/settings/splunk-package")
-    def clear_splunk_package(request: Request, current=Depends(authenticated)):
-        return request.app.state.packages.clear_selection()
+    def clear_splunk_package(request: Request, package_format: Literal["tgz", "deb", "rpm"] | None = None,
+                             current=Depends(authenticated)):
+        return request.app.state.packages.clear_selection(package_format)
 
     @app.post("/api/settings/splunk-package/upload")
     async def upload_splunk_package(
         request: Request, filename: str, sha256: str | None = None, sha512: str | None = None,
-        current=Depends(authenticated),
+        profile: Literal["ubuntu-autoinstall", "alma10-kickstart"] | None = None, current=Depends(authenticated),
     ):
-        return await request.app.state.packages.upload(request, filename, sha256, sha512=sha512)
+        return await request.app.state.packages.upload(request, filename, sha256, sha512=sha512, os_profile=profile)
 
     @app.delete("/api/settings/splunk-package/{package_id}")
     def delete_splunk_package(package_id: str, request: Request, current=Depends(authenticated)):
@@ -409,11 +413,11 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.get("/api/settings/media/esxi")
     def browse_esxi_media(
         request: Request, datastore: str | None = Query(default=None, max_length=128),
-        folder: str = Query(default="", max_length=2048), current=Depends(authenticated),
+        folder: str = Query(default="", max_length=2048), target_host_id: str | None = Query(default=None, max_length=128), current=Depends(authenticated),
     ):
-        saved = request.app.state.db.settings()
-        if not saved:
-            raise MediaError("Save the ESXi connection in Setup before browsing its installation media.")
+        saved = request.app.state.service._settings({"target_host_id": target_host_id}) if target_host_id else request.app.state.db.settings()
+        if not saved or saved.get("hypervisor", "esxi") != "esxi":
+            raise MediaError("Choose a configured ESXi host before browsing its installation media.")
         try:
             with request.app.state.service.client(saved) as esxi:
                 datastores = esxi.inventory()["datastores"]
@@ -427,9 +431,9 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.post("/api/settings/media/esxi")
     def import_esxi_media(payload: ESXiMediaSelection, request: Request, current=Depends(authenticated)):
-        saved = request.app.state.db.settings()
-        if not saved:
-            raise MediaError("Save the ESXi connection in Setup before selecting its installation media.")
+        saved = request.app.state.service._settings({"target_host_id": payload.target_host_id}) if payload.target_host_id else request.app.state.db.settings()
+        if not saved or saved.get("hypervisor", "esxi") != "esxi":
+            raise MediaError("Choose a configured ESXi host before selecting its installation media.")
         if certificate_endpoint(saved["host"])[2] != certificate_endpoint(payload.host)[2]:
             raise MediaError("The saved ESXi host changed. Browse its datastores again before selecting an ISO.", 409)
         try:

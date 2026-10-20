@@ -62,6 +62,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS target_hosts (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS media_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS splunk_package_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS splunk_package_format_settings (format TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS splunk_package_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS fleetmanager_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS fleetmanager_files (id TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -370,6 +371,20 @@ class Database:
             row = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
         return self.unseal(row[0]) if row else None
 
+    def _splunk_format_settings(self, connection):
+        rows = connection.execute("SELECT format,value FROM splunk_package_format_settings").fetchall()
+        values = {row["format"]: self.unseal(row["value"]) for row in rows}
+        current = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
+        if current:
+            value = self.unseal(current[0])
+            values[value.get("format", Path(value["path"]).suffix.lower().lstrip("."))] = value
+        return values
+
+    def splunk_package_format_settings(self):
+        with self.connect() as connection:
+            connection.execute("BEGIN")
+            return self._splunk_format_settings(connection)
+
     def splunk_package_files(self):
         with self.connect() as connection:
             rows = connection.execute("SELECT value FROM splunk_package_files ORDER BY id").fetchall()
@@ -382,15 +397,32 @@ class Database:
                 connection.execute("INSERT INTO splunk_package_files VALUES(?,?)", (value["id"], self.seal(value)))
             else:
                 self._require_registered_splunk_package(connection, value)
+            # Retain every previously approved format, including a singleton
+            # updated by an older worker sharing this data volume.
+            for package_format, previous in self._splunk_format_settings(connection).items():
+                connection.execute("INSERT OR REPLACE INTO splunk_package_format_settings VALUES(?,?)",
+                                   (package_format, self.seal(previous)))
+            package_format = value.get("format", Path(value["path"]).suffix.lower().lstrip("."))
+            connection.execute("INSERT OR REPLACE INTO splunk_package_format_settings VALUES(?,?)",
+                               (package_format, self.seal(value)))
             connection.execute("INSERT OR REPLACE INTO splunk_package_settings VALUES(1,?)", (self.seal(value),))
             connection.execute(
                 "INSERT INTO audit VALUES(?,?)", (now(), f"Splunk package selected: {value['name']}; SHA-256 {value['sha256']}"),
             )
 
-    def clear_splunk_package_settings(self):
+    def clear_splunk_package_settings(self, package_format=None):
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            removed = connection.execute("DELETE FROM splunk_package_settings WHERE id=1").rowcount
+            if package_format is None:
+                removed = connection.execute("DELETE FROM splunk_package_format_settings").rowcount
+                removed += connection.execute("DELETE FROM splunk_package_settings WHERE id=1").rowcount
+            else:
+                removed = connection.execute("DELETE FROM splunk_package_format_settings WHERE format=?", (package_format,)).rowcount
+                current = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
+                if current:
+                    value = self.unseal(current[0])
+                    if value.get("format", Path(value["path"]).suffix.lower().lstrip(".")) == package_format:
+                        removed += connection.execute("DELETE FROM splunk_package_settings WHERE id=1").rowcount
             if removed:
                 connection.execute("INSERT INTO audit VALUES(?,?)", (now(), "Saved Splunk package selection cleared"))
 
@@ -423,16 +455,17 @@ class Database:
             return {
                 "items": [self.unseal(row[0]) for row in rows],
                 "selected": self.unseal(selected[0]) if selected else None,
+                "format_selections": self._splunk_format_settings(connection),
                 "references": self._active_splunk_packages(connection),
             }
 
     @staticmethod
-    def splunk_package_delete_reason(value, selected, references):
+    def splunk_package_delete_reason(value, selected, references, *, selections=()):
         def matches(other):
             return other and (value["id"] == other.get("id") or value["path"] == other.get("path"))
 
-        if matches(selected):
-            return "Clear the saved selection or choose another Splunk package before deleting this one."
+        if matches(selected) or any(matches(selection) for selection in selections):
+            return "Clear the saved selection or choose another Splunk package for this format before deleting this one."
         if any(matches(reference) for reference in references):
             return "Used by a queued, running, or cleaning deployment (including pending stop requests)."
         return None
@@ -447,7 +480,8 @@ class Database:
             value = self.unseal(row[0])
             selected = connection.execute("SELECT value FROM splunk_package_settings WHERE id=1").fetchone()
             reason = self.splunk_package_delete_reason(
-                value, self.unseal(selected[0]) if selected else fallback_selected, self._active_splunk_packages(connection)
+                value, self.unseal(selected[0]) if selected else fallback_selected,
+                self._active_splunk_packages(connection), selections=self._splunk_format_settings(connection).values()
             )
             if reason:
                 raise PackageStateError(reason)

@@ -2,6 +2,21 @@
 
 Each numbered release has a matching Git tag, Docker image, installation bundle and GitHub Release page. Versions follow semantic versioning; the 0.x series is for lab validation before production use.
 
+## [0.19.0] - 2026-10-20
+
+### Added and fixed
+
+- Add **Installation media** after **Configure VMs** when Splunk is selected. Choose, upload and verify the OS ISO and Splunk installer inside the deployment wizard before preflight. Matching saved files are selected automatically; missing-media preflight actions return to this step.
+- Save verified Splunk defaults independently by format. Ubuntu automatically uses its `.deb`, AlmaLinux its `.rpm`; a verified `.tgz` remains a fallback when no matching native default exists. The most recently configured OS no longer replaces the other OS's installer. Wrong-OS native uploads/selections are rejected before saving.
+- Retain pending media files/checksums through Back navigation and resource corrections. Block continuation while media is unverified or an upload/save is running, show exact selected filenames in review, and preserve the optional preflight-and-deploy action and required Splunk license acceptance.
+- In the wizard, ESXi ISO browsing/import uses the selected named ESXi target's credentials and approved certificate. Proxmox retains upload/server ISO sources. Setup keeps its existing management controls and protects every saved package-format default from deletion.
+
+### Installation and compatibility
+
+- Update from the same clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. No registry login or environment edits are required.
+- Add an encrypted package-format defaults table automatically; retain the existing selection without re-upload. Preserve the complete persistent data volume, original encryption key, credentials and media. Queued deployments keep their snapshots. Older releases see only the most recent legacy package pointer, so finish active work and verify OS/package defaults before rollback. Updating does not change existing VMs or resume failed jobs.
+- Browser/API regressions cover both OS choices, uploads/server selection, saved defaults, checksum failures, retained files, mobile layout, target-aware ESXi imports and immutable queued packages. Real licensed Splunk installs and unattended boots remain lab acceptance.
+
 ## [0.18.0] - 2026-10-20
 
 ### Added and fixed
