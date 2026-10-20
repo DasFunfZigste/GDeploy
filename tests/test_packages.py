@@ -277,7 +277,7 @@ def test_same_name_reupload_never_overwrites_queued_snapshot(manager, spec):
     assert len(manager.catalog()["items"]) == 2
 
 
-@pytest.mark.parametrize("filename", ["../installer.tgz", "/installer.tgz", "folder\\installer.tgz", "bad\n.tgz", "bad.deb", ".tgz"])
+@pytest.mark.parametrize("filename", ["../installer.tgz", "/installer.tgz", "folder\\installer.tgz", "bad\n.tgz", "bad.zip", ".tgz"])
 def test_upload_rejects_unsafe_or_wrong_filenames_before_writing(manager, filename):
     with pytest.raises(PackageError, match="filename"):
         asyncio.run(manager.upload(StreamRequest([]), filename, "0" * 64))

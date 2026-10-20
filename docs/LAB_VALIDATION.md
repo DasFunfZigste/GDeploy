@@ -200,3 +200,10 @@ Automated contract/browser/loopback TLS tests are separate from these live check
 - Stop during queueing, upload, OS wait and applications; verify safe acknowledgement, retained resources/credentials and skipped later work. Test task timeouts and find UUID-owned VMs before retrying.
 - Fail early and late, edit/remove Setup profiles and verify cleanup/redeployment uses the original endpoint/node/ISO store. Reject foreign disks/state/ISOs, changed configuration, hidden/inaccessible VMs and ISOs attached on another cluster node. Verify original media and unrelated VMs/disks remain intact.
 - Test the amd64 Docker image and source-build update with existing ESXi jobs, settings, certificates, encryption keys and media intact. Back up complete data before migration/rollback; older workers cannot process Proxmox jobs.
+
+## Native Splunk packages
+
+- Upload the official Splunk Enterprise Linux amd64 `.deb` and x86_64 `.rpm` using their respective publisher checksums. Confirm both can be selected on macOS and retained in Setup's list; select the package matching the next VM's OS. Existing `.tgz` uploads still work.
+- Verify a wrong checksum, forwarder, ARM package or mismatched native OS fails before VM creation. Changing the Setup selection must not alter a queued job's package.
+- Deploy `.deb` on Ubuntu 24.04 and `.rpm` on AlmaLinux 10 with a vendor-compatible licensed release. Confirm dependency installation, Splunk's dedicated service account/systemd service, generated administrator login, HTTPS web/management checks and intended firewall rules. The native package manager must report payload or dependency failures in the expanded logs.
+- Verify retained packages and credentials survive container recreation. Complete real vendor-package installations separately from synthetic CI/browser tests; do not infer vendor certification from format checks.

@@ -1,6 +1,6 @@
 # GDeploy operations and reference
 
-Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers network settings, accounts, media, software, storage, backups and advanced launch methods for **GDeploy 0.17.0**. Commands assume the same clone at `~/GDeploy` and use `sudo docker`; users authorized to run Docker directly may omit `sudo`. New guests can use Ubuntu 24.04 or AlmaLinux 10; see the [Alma setup and testing guide](ALMALINUX.md).
+Install or update GDeploy using the [short Ubuntu 24.04 guide](INSTALL.md). This reference covers network settings, accounts, media, software, storage, backups and advanced launch methods for **GDeploy 0.18.0**. Commands assume the same clone at `~/GDeploy` and use `sudo docker`; users authorized to run Docker directly may omit `sudo`. New guests can use Ubuntu 24.04 or AlmaLinux 10; see the [Alma setup and testing guide](ALMALINUX.md).
 
 - [Network binding](#optional-restrict-the-bind-address-or-change-the-port) and [HTTPS/SSH access](#https-and-optional-ssh-access)
 - [Account setup](#complete-the-first-sign-in) and [startup recovery](#fix-an-existing-source-checkout-that-cannot-start)
@@ -84,7 +84,7 @@ On the Ubuntu server, working in `~/GDeploy`:
 
 1. Obtain **Ubuntu Server 24.04 LTS amd64 live-server** media from [Ubuntu's official release directory](https://releases.ubuntu.com/24.04/), or **AlmaLinux 10 standard x86_64 full DVD** from [AlmaLinux](https://almalinux.org/get-almalinux/), or use an existing ESXi copy. Verify the publisher checksum using [Ubuntu's instructions](https://ubuntu.com/tutorials/how-to-verify-ubuntu) or [Alma's installation guide](https://wiki.almalinux.org/documentation/installation-guide.html). Keep its verified SHA-256 for Setup. Alma requires x86-64-v3 CPU features and excludes boot/minimal/netinstall/live and x86_64_v2 media.
 2. Choose an existing ESXi ISO through Setup's datastore browser, upload it from your computer after sign-in, or copy it into the GDeploy server's **`media/`** directory for the server picker. An `.iso` filename such as `os.iso` is suitable; no specific name is required for the picker.
-3. To deploy Splunk, obtain your licensed **Splunk Enterprise Linux x86_64 `.tgz`** from [Splunk](https://www.splunk.com/en_us/download/splunk-enterprise.html) and its publisher SHA-512 checksum. Splunk publishes that value at the package's official download URL with `.sha512` appended; see [Configure the Splunk package](#configure-the-splunk-package) for the steps. An existing verified publisher SHA-256 is also supported. Upload the package through **Setup → Software packages** after sign-in, or copy it to **`media/`** for the server picker. Keep its vendor filename if desired; renaming it to `splunk.tgz` is unnecessary. GDeploy does not download the package for you or provide a license.
+3. To deploy Splunk, obtain your licensed **Splunk Enterprise Linux x86_64 installer** (`.deb` for Ubuntu, `.rpm` for AlmaLinux, or `.tgz` for either) from [Splunk](https://www.splunk.com/en_us/download/splunk-enterprise.html) and its publisher SHA-512 checksum. Splunk publishes that value at the package's official download URL with `.sha512` appended; see [Configure the Splunk package](#configure-the-splunk-package) for the steps. An existing verified publisher SHA-256 is also supported. Upload the package through **Setup → Software packages** after sign-in, or copy it to **`media/`** for the server picker. Keep its vendor filename if desired; renaming it to `splunk.tgz` is unnecessary. GDeploy does not download the package for you or provide a license.
 4. To deploy **Corelight FleetManager**, obtain its product identity `.pem` from Corelight and choose a strong shared community string. Installation uses the online repository and requires the customer repository token from [Corelight Cloud](https://my.corelight.cloud/) under **Downloads → Fleet Manager**. Keep the private PEM out of the server media directory and select it through the dedicated license field. See [Configure FleetManager](#configure-fleetmanager) below.
 
 For example, replace these source paths with the files you downloaded:
@@ -189,11 +189,13 @@ If available space is still insufficient, arrange more capacity on the filesyste
 
 Open **Setup → Software packages**, or `http://SERVER_LAN_IP:8000/#settings/packages`. Under **Splunk Enterprise**:
 
-1. Choose **Upload a package** to select the licensed Linux x86_64 `.tgz` on your computer, or **GDeploy server** to select an existing `.tgz` from the read-only server media directory. Vendor filenames are supported.
+1. Choose **Upload a package** to select the licensed Linux x86_64 installer (`.deb` for Ubuntu, `.rpm` for AlmaLinux, or `.tgz` for either) on your computer, or **GDeploy server** to select an existing `.tgz`, `.deb` or `.rpm` from the read-only server media directory. Vendor filenames are supported.
 2. Paste the publisher's checksum into **Publisher checksum (SHA-512 or SHA-256)**. Use Splunk's **SHA-512** value (128 hexadecimal characters) or an existing verified **SHA-256** value (64 hexadecimal characters). GDeploy recognizes the algorithm from the length.
-3. Select **Upload & use package** or **Use selected package**. GDeploy verifies bytes and expected Splunk Enterprise x86_64 binaries before saving. A rejected checksum or archive keeps the prior selection. Choose a Splunk version compatible with the selected Ubuntu or Alma guest; archive validation does not establish that licensed version's OS compatibility.
+3. Select **Upload & use package** or **Use selected package**. GDeploy verifies the publisher checksum and Splunk Enterprise x86_64 identity before saving: native package metadata for `.deb`/`.rpm`, or binaries and safe archive paths for `.tgz`. A rejected checksum or package keeps the prior selection. Preflight rejects a native package for the wrong OS before creating VMs. Choose a Splunk version supported on your guest OS; checking a package format does not establish vendor certification.
 
-To get Splunk's publisher checksum, copy the exact direct download URL for your chosen `.tgz` from Splunk's official download page. Open that URL in a browser with **`.sha512` appended**: a URL ending in `.tgz` becomes `.tgz.sha512`. Copy only the **128 hexadecimal characters** from the checksum file into GDeploy, without the filename or the rest of the line. These are [Splunk's documented checksum instructions](https://help.splunk.com/en/splunk-enterprise/administer/install-and-upgrade/10.4/secure-your-splunk-enterprise-installation/install-splunk-enterprise-securely). You do not need to calculate a checksum yourself: GDeploy hashes the uploaded or selected package and compares it with the publisher's value. A hash calculated from an unverified download alone would not verify its source.
+To get Splunk's publisher checksum, copy the exact direct download URL for your chosen `.tgz`, `.deb` or `.rpm` from Splunk's official download page. Open that URL in a browser with **`.sha512` appended**: for example, `.deb` becomes `.deb.sha512` and `.rpm` becomes `.rpm.sha512`. Copy only the **128 hexadecimal characters** from the checksum file into GDeploy, without the filename or the rest of the line. These are [Splunk's documented checksum instructions](https://help.splunk.com/en/splunk-enterprise/administer/install-and-upgrade/10.4/secure-your-splunk-enterprise-installation/install-splunk-enterprise-securely). You do not need to calculate a checksum yourself: GDeploy hashes the uploaded or selected package and compares it with the publisher's value. A hash calculated from an unverified download alone would not verify its source.
+
+Both native formats can be retained in the package list. Select **Use selected package** for the one matching your next deployment. The saved default is one package; queued jobs keep their original package. Native packages install with APT on Ubuntu or DNF on AlmaLinux. GDeploy reads their metadata without installing or extracting them on the app server. The guest package manager validates the payload during installation; its errors appear in the deployment logs.
 
 Uploads accept packages up to **4 GiB**, need free space on GDeploy's data filesystem and persist under `/data/packages`. No `.env` edit, container restart or package rename is needed. Include uploaded packages in complete data-volume backups; back up server-mounted packages separately. GDeploy does not bundle or automatically download Splunk, supply a license, or bypass the license acceptance required in each Splunk deployment. Elasticsearch and Kibana continue to use the Elastic package repository.
 
@@ -341,7 +343,7 @@ After OS readiness passes, GDeploy detaches and deletes that VM's temporary inst
 
 Update GDeploy using the [source-update commands](INSTALL.md#update-gdeploy), keeping its data volume and configuration. Keep the same verified `ubuntu-24.04.5-live-server-amd64.iso`; the readiness fix does not require a new ISO upload. Existing failed jobs are not resumed automatically, and this release adds no resume/finalize button. Preserve a healthy VM and use **Hide from Deployments** to remove its record from the default view if desired. Rebuilding the app container and hiding history do not delete the VM or complete its outstanding work.
 
-This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.17.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
+This is a lab release. Automated tests and a healthy app container do not validate a full unattended installation against your ESXi host. Complete the repository's [lab acceptance checklist](https://github.com/DasFunfZigste/GDeploy/blob/v0.18.0/docs/LAB_VALIDATION.md) before relying on it for workloads.
 
 ### Check AlmaLinux readiness after a deployment error
 
@@ -413,10 +415,10 @@ For an existing installation, reuse its current `/data` volume and encryption co
 
 The public [GitHub Releases page](https://github.com/DasFunfZigste/GDeploy/releases) provides each version's changelog, Docker image details and downloadable files. Building from source remains the default installation path. Repository visibility does not determine GHCR package visibility; the archive option below loads the image locally without a registry pull.
 
-For a **fresh archive-based installation**, download these three files from release **v0.17.0** in your browser and copy them into a new directory on the Ubuntu server:
+For a **fresh archive-based installation**, download these three files from release **v0.18.0** in your browser and copy them into a new directory on the Ubuntu server:
 
-- `gdeploy-0.17.0-deploy.tar.gz`
-- `gdeploy-0.17.0-linux-amd64.image.tar.gz`
+- `gdeploy-0.18.0-deploy.tar.gz`
+- `gdeploy-0.18.0-linux-amd64.image.tar.gz`
 - `SHA256SUMS`
 
 From that directory, verify both archives:
@@ -428,12 +430,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Continue only if both downloaded archives report **OK**, then extract the bundle and load the image:
 
 ```sh
-tar -xzf gdeploy-0.17.0-deploy.tar.gz
-sudo docker load --input gdeploy-0.17.0-linux-amd64.image.tar.gz
+tar -xzf gdeploy-0.18.0-deploy.tar.gz
+sudo docker load --input gdeploy-0.18.0-linux-amd64.image.tar.gz
 sudo docker compose up -d --wait --pull never
 ```
 
-The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.17.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
+The deploy bundle includes `compose.yaml`, `.env.example`, the optional configuration script, documentation and an empty `media/` directory. It contains no credentials, database, operating-system ISO, vendor installer or product license. The image is tagged `ghcr.io/dasfunfzigste/gdeploy:0.18.0` when loaded, matching the release Compose file. The release page records its immutable digest. No registry login is needed for this path.
 
 Open `http://YOUR_SERVER_IP:8000` and complete the first sign-in. Existing installations should follow [backup and update guidance](#check-stop-upgrade-and-recover) and retain their existing configuration and volume rather than extracting a new bundle over live files.
 
@@ -464,8 +466,8 @@ Common startup issues:
 | ESXi datastore source is absent or cannot load | Check the app footer shows v0.4.0 or later, save and test the ESXi connection, and confirm certificate trust, `Datastore.Browse` and file download access. Refresh the listing after changing hosts. |
 | ESXi ISO import fails | Check the selected file still exists, its publisher checksum matches, its size is at most 16 GiB, and the GDeploy data volume has room for the copy. Review the displayed TLS, permission or transfer error before retrying. The original datastore file and previous saved selection remain intact. |
 | Media verification or preflight fails | Check the selected ISO in Setup, its publisher checksum, available disk space and UID 10001's read access to server files. Keep media used by queued/running jobs present and unchanged. |
-| Splunk preflight reports a missing package such as `/media/splunk.tgz` | Open **Setup → Software packages** or follow **Configure Splunk package** from preflight. Upload or select your licensed Linux x86_64 `.tgz` with its publisher SHA-512 or verified SHA-256; vendor filenames are supported. Use **Return to deployment** and rerun preflight. UI selection needs no environment edit or restart. |
-| Splunk package upload or verification fails | Check the package is at most 4 GiB, free space is sufficient, the publisher checksum matches, and the archive is Splunk Enterprise for Linux x86_64. Enter only the 128-character SHA-512 or 64-character SHA-256, without the filename from the checksum file. Use v0.8.1 or later for Splunk's `.sha512` value. Review the displayed archive error; a `.tgz` extension alone does not establish compatibility. The previous selection is retained. |
+| Splunk preflight reports a missing package such as `/media/splunk.tgz` | Open **Setup → Software packages** or follow **Configure Splunk package** from preflight. Upload or select your licensed Linux x86_64 installer (.deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either) with its publisher SHA-512 or verified SHA-256; vendor filenames are supported. Use **Return to deployment** and rerun preflight. UI selection needs no environment edit or restart. |
+| Splunk package upload or verification fails | Check the package is at most 4 GiB, free space is sufficient, the publisher checksum matches, and the package is Splunk Enterprise for Linux x86_64. Enter only the 128-character SHA-512 or 64-character SHA-256, without the filename from the checksum file. Use v0.8.1 or later for Splunk's `.sha512` value. Review the displayed package error; an extension alone does not establish compatibility. Use .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either. The previous selection is retained. |
 | A saved Splunk package cannot be deleted | Clear its saved selection or choose another package. Queued, running or cleaning jobs retain deletion protection for their own package snapshots. Only unused app uploads can be deleted; mounted server files remain outside this control. |
 | Sensor preflight requests a pairing token | New deployments require a unique token from an existing Fleet Manager's new sensor record. In **Delete & redeploy**, a replacement token is optional only when sensor installation never started: leave it blank to reuse the original encrypted configuration. Later or unknown attempts require a fresh token before cleanup. |
 | Sensor creation fails with `ESXi did not return valid generated sensor network addresses` | This older error concerns virtual NIC **MAC addresses**, not IP availability. Standalone ESXi may not generate both addresses before first boot. Update to **v0.15.4 or later** and use **Delete & redeploy**; new sensor VMs receive explicit MACs before ISO preparation. Leave the pairing token blank if the recovery dialog confirms installation never started. The new logs identify both adapter MACs and any specific readback failure. |

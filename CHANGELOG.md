@@ -2,6 +2,21 @@
 
 Each numbered release has a matching Git tag, Docker image, installation bundle and GitHub Release page. Versions follow semantic versioning; the 0.x series is for lab validation before production use.
 
+## [0.18.0] - 2026-10-20
+
+### Added and fixed
+
+- Accept Splunk Enterprise Linux x86_64 **`.deb` and `.rpm`** packages in the browser upload picker, upload API and server media selector. macOS file pickers can now select both native formats; `.tgz` remains supported.
+- Install `.deb` through APT on Ubuntu and `.rpm` through DNF on AlmaLinux, retaining generated credentials, HTTPS, service setup and health checks. Reject native packages for the wrong guest OS during preflight before creating a VM.
+- Verify the complete publisher SHA-512 or SHA-256 checksum and bounded native package identity metadata without extracting files or executing installer scripts on GDeploy. Reject forwarder packages and unsupported architectures. The guest verifies the queued SHA-256 again before installation; its package manager checks the native payload.
+- Preserve original upload names, format-specific storage, persistent selections, immutable queued packages, and deletion/active-job protections for all formats. Both native installers can remain in the list; select the package matching your next deployment. Add API, browser, guest-integrity and real Linux package-builder regressions.
+
+### Installation and compatibility
+
+- Update with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh the browser. No registry login, package rename or environment edit is required. Upload through **Setup → Software packages → Splunk Enterprise**, using `.deb` for Ubuntu, `.rpm` for AlmaLinux or `.tgz` for either, plus the checksum for that exact download.
+- No database migration. The image includes a pinned Zstandard reader for modern Debian package metadata. Keep the complete persistent data volume and original encryption key. Existing `.tgz` defaults and jobs continue to work. Finish or resolve native-package jobs before rolling back to a release that only understands `.tgz`; select a compatible archive before rollback. Updates do not change installed VMs or resume failed deployments.
+- Automated checks use synthetic packages. Installation of licensed Splunk releases and vendor compatibility on real Ubuntu/Alma VMs remain lab validation.
+
 ## [0.17.0] - 2026-10-19
 
 ### Added

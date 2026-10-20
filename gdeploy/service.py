@@ -220,9 +220,9 @@ class DeploymentService:
             package = self.packages.selected() if splunk_package is None else splunk_package
             try:
                 if not package:
-                    raise PackageError("Upload or select a Splunk Enterprise Linux x86_64 .tgz and verify its publisher SHA-512 or SHA-256 checksum.")
-                self.packages.validate_snapshot(package)
-                check("Splunk Linux x86_64 package", True, f"{package['name']} is available; SHA-256 and archive checks passed.")
+                    raise PackageError("Upload or select a Splunk Enterprise Linux x86_64 .tgz, .deb (Ubuntu) or .rpm (AlmaLinux) and verify its publisher SHA-512 or SHA-256 checksum.")
+                self.packages.validate_snapshot(package, profile)
+                check("Splunk Linux x86_64 package", True, f"{package['name']} is available; SHA-256 and package checks passed.")
             except (PackageError, OSError) as exc:
                 check("Splunk Linux x86_64 package", False, f"Open Setup → Software packages. {exc}")
                 checks[-1]["action"] = {"label": "Configure Splunk package", "href": "#settings/packages"}
@@ -655,7 +655,7 @@ class DeploymentService:
                     credential = secret_data["vm_credentials"][vm["name"]]
                     # OS installation may take time: a mounted installer can be
                     # replaced since preflight. Recheck the snapshotted bytes.
-                    package_path = self.packages.validate_snapshot(splunk_package or {}) if vm["role"] == "splunk" else None
+                    package_path = self.packages.validate_snapshot(splunk_package or {}, vm["os_profile"]) if vm["role"] == "splunk" else None
                     fleet_options = {}
                     if vm["role"] == "fleetmanager":
                         self.fleetmanager.validate_snapshot(fleetmanager or {})

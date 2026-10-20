@@ -16,8 +16,8 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.lock && pip install -e '.[test]'
-      - name: Install ISO regression tools
-        run: sudo apt-get update && sudo apt-get install -y xorriso
+      - name: Install ISO and native package regression tools
+        run: sudo apt-get update && sudo apt-get install -y xorriso rpm
       - run: pytest -q
       - run: ruff check .
       - run: docker build -t gdeploy:test .

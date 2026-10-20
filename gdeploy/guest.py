@@ -33,6 +33,7 @@ from passlib.hash import sha512_crypt
 
 from .ssh_keys import SSHKeyError, normalize_ssh_public_keys
 from .os_profiles import ALMA10, PROFILES, UBUNTU, profile_name
+from .splunk_native import FORMATS, NativePackageError, compatible, validate_native
 
 
 class GuestError(RuntimeError):
@@ -607,7 +608,10 @@ _SPLUNK_SCRIPT = (
 python3 - <<'PY'
 import hashlib, hmac, json, pathlib
 p = json.loads(pathlib.Path('payload.json').read_text())
-with pathlib.Path('splunk.tgz').open('rb') as package:
+package_format = p.get('package_format', 'tgz')
+if package_format not in ('tgz', 'deb', 'rpm'):
+    raise SystemExit('Unsupported Splunk package format.')
+with pathlib.Path('splunk.'+package_format).open('rb') as package:
     actual = hashlib.file_digest(package, 'sha256').hexdigest()
 if not hmac.compare_digest(actual, p['package_sha256']):
     raise SystemExit('Splunk package SHA-256 changed during transfer; no package was installed. Review Software packages in Setup.')
@@ -616,7 +620,13 @@ apt-get -q update
 apt-get -q install -y ca-certificates openssl python3 libnuma1
 test ! -e /opt/splunk
 id -u splunk >/dev/null 2>&1 || useradd --system --home-dir /opt/splunk --shell /usr/sbin/nologin splunk
-tar --extract --gzip --file splunk.tgz --directory /opt --no-same-owner
+package_format="$(python3 -c "import json; print(json.load(open('payload.json')).get('package_format', 'tgz'))")"
+case "$package_format" in
+  deb) apt-get -q install -y -- ./splunk.deb ;;
+  rpm) timeout --kill-after=15s 900s dnf -q --setopt=timeout=60 --setopt=retries=3 install -y -- ./splunk.rpm ;;
+  tgz) tar --extract --gzip --file splunk.tgz --directory /opt --no-same-owner ;;
+  *) echo 'Unsupported Splunk package format.' >&2; exit 1 ;;
+esac
 install -d -m 700 /opt/splunk/etc/auth/gdeploy
 install -d -m 750 /opt/splunk/etc/system/local
 python3 - <<'PY'
@@ -1082,8 +1092,9 @@ class GuestSession:
                     sftp.chmod(f"{remote}/{filename}", 0o600)
                 if package is not None:
                     self._check_cancelled()
-                    sftp.put(str(package), f"{remote}/splunk.tgz", callback=lambda sent, total: self._check_cancelled())
-                    sftp.chmod(f"{remote}/splunk.tgz", 0o600)
+                    package_name = "splunk." + FORMATS.get(package.suffix.lower(), "tgz")
+                    sftp.put(str(package), f"{remote}/{package_name}", callback=lambda sent, total: self._check_cancelled())
+                    sftp.chmod(f"{remote}/{package_name}", 0o600)
             quoted = shlex.quote(remote)
             # Scripts and their secret payload become root-owned before execution.
             # A trap removes all staging files on either success or failure.
@@ -1248,11 +1259,22 @@ class GuestSession:
         if role == "splunk":
             _safe_text(secrets["splunk_password"], "Splunk admin password")
             if splunk_package is None:
-                raise GuestError("A Splunk Enterprise Linux x86_64 .tgz package must be configured.")
+                raise GuestError("A Splunk Enterprise Linux x86_64 .tgz, .deb or .rpm package must be configured.")
             if not isinstance(splunk_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", splunk_sha256):
                 raise GuestError("A verified Splunk package SHA-256 is required before installation.")
             payload["package_sha256"] = splunk_sha256
-            _validate_splunk_archive(Path(splunk_package))
+            package_format = FORMATS.get(Path(splunk_package).suffix.lower())
+            if not compatible(package_format, self.os_profile):
+                raise GuestError("Splunk package does not match the VM OS: use .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either.")
+            payload["package_format"] = package_format
+            if package_format == "tgz":
+                _validate_splunk_archive(Path(splunk_package))
+            else:
+                try:
+                    with Path(splunk_package).open("rb") as handle:
+                        validate_native(handle, package_format)
+                except (NativePackageError, OSError) as exc:
+                    raise GuestError(str(exc)) from None
             log("Installing the supplied Splunk package, enabling HTTPS and its systemd service.")
             self._run_script(application_script(role, _SPLUNK_SCRIPT), payload, Path(splunk_package))
             return {

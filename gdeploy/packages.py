@@ -14,6 +14,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
 from .guest import GuestError, _validate_splunk_archive
+from .splunk_native import FORMATS, NativePackageError, compatible, validate_native
 
 
 MAX_UPLOAD_BYTES = 4 * 1024**3
@@ -53,9 +54,9 @@ def _filename(value):
         or "/" in value
         or "\\" in value
         or value.startswith(".")
-        or not value.lower().endswith(".tgz")
+        or Path(value).suffix.lower() not in FORMATS
     ):
-        raise PackageError("Choose a Splunk Enterprise .tgz package with a filename containing no directory paths.")
+        raise PackageError("Choose a Splunk Enterprise .tgz, .deb or .rpm package with a filename containing no directory paths.")
     return value
 
 
@@ -84,7 +85,7 @@ class SplunkPackageManager:
             logger.warning("Unable to inspect incomplete Splunk uploads; check the GDeploy packages directory permissions")
             return
         for path in candidates:
-            if not re.fullmatch(r"[0-9a-f]{32}\.(partial|tgz)", path.name) or path in protected:
+            if not re.fullmatch(r"[0-9a-f]{32}\.(partial|tgz|deb|rpm)", path.name) or path in protected:
                 continue
             try:
                 if stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
@@ -106,13 +107,14 @@ class SplunkPackageManager:
             "id": package_id or self._server_id(path),
             "path": str(path), "name": name or path.name, "source": source,
             "sha256": sha256, "profile": PROFILE,
+            "format": FORMATS[path.suffix.lower()],
             **({"sha512": sha512} if sha512 else {}),
             "size_bytes": info.st_size, "mtime_ns": info.st_mtime_ns,
         }
 
     def _path(self, snapshot):
         if not isinstance(snapshot, dict) or snapshot.get("profile") != PROFILE:
-            raise PackageError("Select a Splunk Enterprise Linux x86_64 .tgz package in Setup → Software packages.")
+            raise PackageError("Select a Splunk Enterprise Linux x86_64 .tgz, .deb or .rpm package in Setup → Software packages.")
         path = Path(snapshot.get("path", ""))
         source = snapshot.get("source")
         if source == "server":
@@ -121,24 +123,27 @@ class SplunkPackageManager:
             valid = (
                 path.parent == self.upload_dir
                 and re.fullmatch(r"upload_[0-9a-f]{32}", snapshot.get("id", ""))
-                and path.name == snapshot["id"].split("_", 1)[1] + ".tgz"
+                and path.name == snapshot["id"].split("_", 1)[1] + path.suffix.lower()
             )
         else:
             valid = False
         if (
-            not valid or not path.is_absolute() or path.suffix.lower() != ".tgz"
+            not valid or not path.is_absolute() or path.suffix.lower() not in FORMATS
+            or snapshot.get("format", FORMATS.get(path.suffix.lower())) != FORMATS.get(path.suffix.lower())
             or path.is_symlink() or path.parent.is_symlink() or path.parent.resolve() != path.parent
         ):
             raise PackageError("The Splunk package is outside the managed package directories or is a symbolic link.")
         return path
 
-    def validate_snapshot(self, snapshot):
+    def validate_snapshot(self, snapshot, os_profile=None):
         path = self._path(snapshot)
+        if os_profile is not None and not compatible(FORMATS[path.suffix.lower()], os_profile):
+            raise PackageError("The saved Splunk package does not match this VM's OS. Select .deb for Ubuntu, .rpm for AlmaLinux, or .tgz for either in Setup → Software packages.")
         self._verify_package(path, _checksum(snapshot.get("sha256")))
         return path
 
     @staticmethod
-    def _verify_package(path, expected, *, algorithm="sha256"):
+    def _verify_package(path, expected, *, algorithm="sha256", package_format=None):
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(descriptor, "rb") as handle:
@@ -161,7 +166,11 @@ class SplunkPackageManager:
                     label = "SHA-512" if algorithm == "sha512" else "SHA-256"
                     raise PackageError(f"Splunk package {label} does not match the publisher checksum. Download it again or check the checksum.")
                 handle.seek(0)
-                _validate_splunk_archive(path, fileobj=handle)
+                package_format = package_format or FORMATS.get(path.suffix.lower(), "tgz")
+                if package_format == "tgz":
+                    _validate_splunk_archive(path, fileobj=handle)
+                else:
+                    validate_native(handle, package_format)
                 validated = os.fstat(handle.fileno())
                 if (after.st_size, after.st_mtime_ns) != (validated.st_size, validated.st_mtime_ns):
                     raise PackageError("The Splunk package changed during verification. Select it again.")
@@ -171,7 +180,7 @@ class SplunkPackageManager:
             ):
                 raise PackageError("The Splunk package changed during verification. Select it again.")
             return digests
-        except GuestError as exc:
+        except (GuestError, NativePackageError) as exc:
             raise PackageError(str(exc)) from exc
         except EOFError as exc:
             raise PackageError("The Splunk .tgz package is incomplete. Download it again from Splunk.") from exc
@@ -186,7 +195,7 @@ class SplunkPackageManager:
         path = self.server_dir / self.config.splunk_package.name
         try:
             return self._snapshot(path, sha256=self.config.splunk_sha256)
-        except (OSError, PackageError):
+        except (OSError, PackageError, KeyError):
             return None
 
     def _available(self, snapshot):
@@ -206,7 +215,7 @@ class SplunkPackageManager:
         candidates = []
         try:
             for path in self.server_dir.iterdir():
-                if path.suffix.lower() == ".tgz" and not path.name.startswith("."):
+                if path.suffix.lower() in FORMATS and not path.name.startswith("."):
                     try:
                         candidates.append(self._snapshot(path))
                     except (OSError, PackageError):
@@ -240,6 +249,7 @@ class SplunkPackageManager:
                 reason = "This package is unreadable or unsafe to delete; check the GDeploy data volume."
             items.append({
                 **{key: item[key] for key in ("id", "name", "size_bytes", "source")},
+                "format": item.get("format", "tgz"),
                 "sha256": selected.get("sha256", "") if chosen else item["sha256"],
                 "sha512": selected.get("sha512", "") if chosen else item.get("sha512", ""),
                 "selected": chosen, "available": available,
@@ -318,7 +328,7 @@ class SplunkPackageManager:
             raise PackageError("Unable to prepare uploads. Check the GDeploy data volume's free space and permissions.", 507) from exc
         token = uuid.uuid4().hex
         partial = self.upload_dir / (token + ".partial")
-        final = self.upload_dir / (token + ".tgz")
+        final = self.upload_dir / (token + Path(filename).suffix.lower())
         committed = owns_partial = owns_final = False
         count = 0
 
@@ -330,7 +340,7 @@ class SplunkPackageManager:
         def finish(handle):
             handle.flush()
             os.fsync(handle.fileno())
-            return self._verify_package(partial, checksum, algorithm=algorithm)
+            return self._verify_package(partial, checksum, algorithm=algorithm, package_format=FORMATS[Path(filename).suffix.lower()])
 
         try:
             descriptor = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)

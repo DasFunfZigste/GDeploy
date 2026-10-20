@@ -602,3 +602,20 @@ def test_sensor_redeploy_rechecks_stale_optional_policy_before_cleanup(ui):
     token.fill(FRESH_PAIRING_TOKEN)
     submit.click()
     assert_replacement_token(ui, job, FRESH_PAIRING_TOKEN)
+
+
+@pytest.mark.parametrize("fmt", ["deb", "rpm"])
+def test_splunk_native_file_picker_upload(ui, fmt):
+    from test_splunk_native import deb_bytes, rpm_bytes
+    body = deb_bytes() if fmt == "deb" else rpm_bytes()
+    ui.page.goto(ui.base + "/#settings/packages")
+    picker = ui.page.locator("#splunk-package-file")
+    expect(picker).to_be_visible()
+    expect(picker).to_have_attribute("accept", ".tgz,.deb,.rpm")
+    picker.set_input_files({"name": "splunk-10.0.0." + fmt, "mimeType": "application/octet-stream", "buffer": body})
+    ui.page.locator("#splunk-package-sha256").fill(hashlib.sha512(body).hexdigest())
+    ui.page.get_by_role("button", name="Upload & use package", exact=True).click()
+    expect(ui.page.locator("#splunk-package-summary")).to_contain_text("splunk-10.0.0." + fmt)
+    expect(ui.page.locator("#splunk-package-panel .alert-success")).to_be_visible()
+    saved = ui.db.splunk_package_settings()
+    assert saved["format"] == fmt and saved["sha256"] == hashlib.sha256(body).hexdigest()

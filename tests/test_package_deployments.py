@@ -202,3 +202,35 @@ def test_invalid_tar_is_rejected_during_preflight(package_job):
     assert not result["ok"]
     assert calls == []
     assert next(check for check in result["checks"] if "Splunk" in check["name"])["action"]["href"] == "#settings/packages"
+
+
+def test_native_ubuntu_job_keeps_queued_deb_after_setup_changes_to_rpm(package_job):
+    from test_splunk_native import deb_bytes, rpm_bytes
+    service, db, spec, config, calls = package_job
+    deb = config.splunk_package.with_name("splunk.deb")
+    deb.write_bytes(deb_bytes())
+    selected = choose(service, deb, hashlib.sha256(deb.read_bytes()).hexdigest())
+    identifier = service.enqueue(spec)["id"]
+    rpm = config.splunk_package.with_name("splunk.rpm")
+    rpm.write_bytes(rpm_bytes())
+    choose(service, rpm, hashlib.sha256(rpm.read_bytes()).hexdigest())
+    db.claim()
+    service.run(identifier)
+    assert db.get(identifier)["status"] == "completed"
+    assert db.get(identifier, private=True)["secrets"]["splunk_package"] == selected
+    assert ("install", deb, selected["sha256"]) in calls
+
+
+def test_rpm_for_ubuntu_fails_preflight_before_queue_or_vm_creation(package_job):
+    from test_splunk_native import rpm_bytes
+    service, db, spec, config, calls = package_job
+    rpm = config.splunk_package.with_name("splunk.rpm")
+    rpm.write_bytes(rpm_bytes())
+    choose(service, rpm, hashlib.sha256(rpm.read_bytes()).hexdigest())
+    result = service.preflight(spec)
+    failure = next(check for check in result["checks"] if check["name"] == "Splunk Linux x86_64 package")
+    assert not failure["ok"] and "does not match" in failure["message"]
+    assert failure["action"]["label"] == "Configure Splunk package"
+    with pytest.raises(DeploymentError, match="does not match"):
+        service.enqueue(spec)
+    assert db.list() == [] and calls == []

@@ -223,5 +223,6 @@ def application_script(role: str) -> str:
         script = _replace(script, "systemctl enable --now kibana", _policy_steps(role) + "systemctl enable --now kibana")
     else:
         script = _replace(script, "apt-get -q update\napt-get -q install -y ca-certificates openssl python3 libnuma1", _DNF_DEPENDENCIES + "timeout --kill-after=15s 600s dnf -q --setopt=timeout=60 --setopt=retries=3 install -y numactl-libs")
+        script = _replace(script, "deb) apt-get -q install -y -- ./splunk.deb ;;", "deb) echo 'Debian Splunk packages require Ubuntu.' >&2; exit 1 ;;")
         script = _replace(script, "runuser -u splunk -- /opt/splunk/bin/splunk start", _policy_steps(role) + "runuser -u splunk -- /opt/splunk/bin/splunk start")
     return script

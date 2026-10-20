@@ -197,7 +197,7 @@ def test_worker_installs_snapshot_on_every_role_without_changing_automation(conf
     config.splunk_package.write_bytes(b"package fixture")
     package = service.packages._snapshot(config.splunk_package, sha256="0" * 64)
     monkeypatch.setattr(service.packages, "selected", lambda: package)
-    monkeypatch.setattr(service.packages, "validate_snapshot", lambda snapshot: config.splunk_package)
+    monkeypatch.setattr(service.packages, "validate_snapshot", lambda snapshot, os_profile=None: config.splunk_package)
     item = service.enqueue(spec, {"host": "esxi.example.test"})
     if legacy:
         secret_data = db.get(item["id"], private=True)["secrets"]
