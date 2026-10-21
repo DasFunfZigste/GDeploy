@@ -214,3 +214,11 @@ Automated contract/browser/loopback TLS tests are separate from these live check
 - Test pending files/checksums through Back, resource validation and OS switches, plus keyboard/mobile layouts. Check wrong native formats are excluded, stale requests cannot affect another OS/target, failures retain the prior defaults, and upload/save disables navigation until complete.
 - Save both native defaults, restart the container, and deploy each OS while the opposite package was saved last. Verify `.tgz` fallback when the native default is absent, errors for a broken saved default, package protection in Setup, and queued snapshots after later edits.
 - With two ESXi hosts, browse/import from the wizard’s selected named target, validate its certificate and recorded ISO origin, and reject removed/changed hosts. With Proxmox, offer only upload/server ISO sources. Record actual host acceptance separately from synthetic tests.
+
+## Password Manager and roles
+
+- Upgrade a backed-up existing volume, including hidden deployments. Confirm generated OS/SSH and application logins appear with correct source, address, ports and deployment status. Exercise all deployable roles on Ubuntu and Alma; an entry alone does not prove installation succeeded.
+- Add/edit/reveal/copy/delete a manual entry on HTTP LAN and HTTPS origins. Verify desktop/mobile layouts, search and type/source filters. Confirm secrets hide after one minute and clear on navigation, tab hiding and sign-out.
+- Edit a provisioned saved copy, then progress a deployment: untouched addresses update, edited fields stay, and original worker/remote credentials remain valid. Delete its manager entry and recreate the app container; it must stay deleted without affecting the VM.
+- Create each GUI role, replace temporary passwords, and verify editor/viewer API restrictions as well as hidden infrastructure navigation. Test disabling, role changes, resets, session revocation and protected primary administrator behavior. All authorized roles intentionally share the credential collection.
+- Recreate the container with its original volume/key. Confirm entries, user accounts and roles persist and secrets decrypt. Test backup restoration separately; do not regenerate the encryption key. No SSH/VNC/RDP connection function is included in this release.

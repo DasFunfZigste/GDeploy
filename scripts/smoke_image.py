@@ -83,6 +83,7 @@ checks = (
     ('/api/health', ('application/json',), 'health'),
     ('/', ('text/html',), 'id="login-screen"'),
     (f'/static/app.js?v={__version__}', ('text/javascript', 'application/javascript'), 'must_change_credentials'),
+    (f'/static/password-manager.js?v={__version__}', ('text/javascript', 'application/javascript'), 'GDeployPasswordManager'),
     (f'/static/app.css?v={__version__}', ('text/css',), ':root'),
 )
 for path, expected_types, marker in checks:
@@ -154,7 +155,7 @@ def verify_login_and_storage(url, credentials, write=False):
     if session["must_change_credentials"]:
         assert write, "The chosen administrator account did not survive container recreation"
         assert request("/api/session")["must_change_credentials"] is True
-        for path in ("/api/settings", "/api/settings/ssh-keys", "/api/settings/splunk-package", "/api/settings/fleetmanager", "/api/settings/corelight-sensor", "/api/deployments"):
+        for path in ("/api/settings", "/api/settings/ssh-keys", "/api/settings/splunk-package", "/api/settings/fleetmanager", "/api/settings/corelight-sensor", "/api/deployments", "/api/password-manager", "/api/users"):
             try:
                 request(path)
             except urllib.error.HTTPError as error:
@@ -197,6 +198,9 @@ def verify_login_and_storage(url, credentials, write=False):
     publisher_checksum = hashlib.sha512(package_body).hexdigest()
     fleet_pem = smoke_fleet_pem()
     if write:
+        request("/api/password-manager", {"title": "Container smoke login", "username": "lab-user", "password": "smoke-vault-password",
+                                         "host": "lab.example.invalid", "connection_type": "SSH", "port": 22}, "POST", session["csrf_token"])
+        request("/api/users", {"username": "smoke-vault-viewer", "role": "credential_viewer", "password": "smoke-viewer-only-passphrase"}, "POST", session["csrf_token"])
         request(
             "/api/settings",
             {"host": "esxi.example.invalid", "username": "test", "password": "smoke-only"},
@@ -226,6 +230,15 @@ def verify_login_and_storage(url, credentials, write=False):
             "PUT", session["csrf_token"],
         )
         assert saved_keys["count"] == 1, "Duplicate SSH keys must be saved once"
+    vault = request("/api/password-manager")
+    assert len(vault["entries"]) == 1 and vault["entries"][0]["title"] == "Container smoke login"
+    assert "smoke-vault-password" not in json.dumps(vault)
+    revealed = request("/api/password-manager/" + vault["entries"][0]["id"] + "/reveal", {}, "POST", session["csrf_token"])
+    assert revealed["password"] == "smoke-vault-password", "Encrypted Password Manager entries did not survive container recreation"
+    users = request("/api/users")
+    viewer = next(user for user in users["users"] if user["username"] == "smoke-vault-viewer")
+    assert viewer["role"] == "credential_viewer" and viewer["must_change_credentials"]
+    assert "smoke-viewer-only-passphrase" not in json.dumps(users)
     settings = request("/api/settings")
     assert settings["host"] == "esxi.example.invalid" and settings["configured"] is True
     assert "password" not in settings

@@ -14,6 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, StrictBool
 
 from . import __version__
+from .accounts import Accounts, AccountError, UserInput, PasswordChange
+from .password_manager import PasswordManager, CredentialError, CredentialInput, CredentialUpdate
 from .certificate_trust import CertificateTrust, CertificateTrustError, certificate_endpoint
 from .config import Config, hash_password, verify_password
 from .corelight_sensor import CorelightSensorError, CorelightSensorManager
@@ -62,6 +64,8 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         app.state.db.ensure_administrator(
             app.state.config.admin_username, app.state.config.admin_password_hash
         )
+        app.state.accounts = Accounts(app.state.db)
+        app.state.password_manager = PasswordManager(app.state.db)
         app.state.service = service_factory(app.state.db, app.state.config)
         app.state.deployment_defaults = DeploymentDefaults(app.state.db, app.state.service)
         app.state.targets = TargetHosts(app.state.db, app.state.service)
@@ -90,22 +94,34 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         with request.app.state.login_lock:
             db = request.app.state.db
             current = db.session(request.cookies.get(COOKIE))
-            administrator = db.administrator()
-            if not current or current["username"] != administrator["username"]:
+            account = request.app.state.accounts.account(current["username"]) if current else None
+            if not current or not account or not account["enabled"]:
                 raise HTTPException(401, "Sign in to continue.")
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 token = request.headers.get("X-CSRF-Token", "")
                 if not hmac.compare_digest(token.encode(), current["csrf"].encode()):
                     raise HTTPException(403, "Session verification failed. Refresh and try again.")
-            if administrator["must_change_credentials"] and not allow_pending:
+            if account["must_change_credentials"] and not allow_pending:
                 raise HTTPException(403, detail={
                     "code": "credentials_change_required",
-                    "message": "Choose new administrator credentials before continuing.",
+                    "message": "Choose new account credentials before continuing.",
                 })
-            return current
+            return {**current, "role": account["role"], "is_primary": account["id"] == "primary"}
 
     def authenticated(request: Request):
+        current = session_details(request)
+        if current["role"] != "administrator":
+            raise HTTPException(403, "Administrator access is required.")
+        return current
+
+    def credential_access(request: Request):
         return session_details(request)
+
+    def credential_edit(request: Request):
+        current = session_details(request)
+        if current["role"] == "credential_viewer":
+            raise HTTPException(403, "Your role can view credentials but cannot change them.")
+        return current
 
     def signed_in(request: Request):
         return session_details(request, allow_pending=True)
@@ -146,6 +162,11 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
     @app.exception_handler(DeploymentError)
     async def deployment_error(request, exc):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(AccountError)
+    @app.exception_handler(CredentialError)
+    async def account_or_credential_error(request, exc):
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
     @app.exception_handler(TargetHostError)
     async def target_host_error(request, exc):
@@ -195,14 +216,15 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         with request.app.state.login_lock:
             db = request.app.state.db
             current = db.session(request.cookies.get(COOKIE))
-            administrator = db.administrator()
-            if not current or current["username"] != administrator["username"]:
+            account = request.app.state.accounts.account(current["username"]) if current else None
+            if not current or not account or not account["enabled"]:
                 return {"authenticated": False}
             return {
                 "authenticated": True,
                 "username": current["username"],
                 "csrf_token": current["csrf"],
-                "must_change_credentials": administrator["must_change_credentials"],
+                "must_change_credentials": bool(account["must_change_credentials"]),
+                "role": account["role"], "is_primary": account["id"] == "primary",
             }
 
     @app.post("/api/login")
@@ -216,15 +238,15 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         with request.app.state.login_lock:
             if not db.login_allowed(ip):
                 raise HTTPException(429, "Too many failed sign-in attempts. Try again in 15 minutes.")
-            administrator = db.administrator()
-            valid_password = verify_password(payload.password, administrator["password_hash"])
-            if not hmac.compare_digest(payload.username.encode(), administrator["username"].encode()) or not valid_password:
+            account = request.app.state.accounts.account(payload.username)
+            valid_password = verify_password(payload.password, (account or db.administrator())["password_hash"])
+            if not account or not account["enabled"] or not valid_password:
                 db.failed_login(ip)
                 raise HTTPException(401, "Incorrect username or password.")
             if request.cookies.get(COOKIE):
                 db.delete_session(request.cookies[COOKIE])
-            token, csrf = db.new_session(administrator["username"], cfg.session_hours)
-            db.audit("Administrator signed in")
+            token, csrf = db.new_session(account["username"], cfg.session_hours)
+            db.audit(f"GUI account signed in: {account['id']}")
         response.set_cookie(
             COOKIE,
             token,
@@ -235,16 +257,24 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
             path="/",
         )
         return {
-            "authenticated": True, "username": administrator["username"], "csrf_token": csrf,
-            "must_change_credentials": administrator["must_change_credentials"],
+            "authenticated": True, "username": account["username"], "csrf_token": csrf,
+            "must_change_credentials": bool(account["must_change_credentials"]),
+            "role": account["role"], "is_primary": account["id"] == "primary",
         }
 
     @app.post("/api/account/setup")
     def complete_setup(payload: AccountSetup, request: Request, response: Response, current=Depends(signed_in)):
         with request.app.state.login_lock:
-            completed = request.app.state.db.complete_initial_setup(
-                request.cookies.get(COOKIE), payload.username, hash_password(payload.password)
-            )
+            if current["is_primary"]:
+                completed = request.app.state.db.complete_initial_setup(
+                    request.cookies.get(COOKIE), payload.username, hash_password(payload.password)
+                )
+            else:
+                if payload.username != current["username"]:
+                    raise HTTPException(422, "Keep your assigned username. An administrator can rename your account.")
+                completed = request.app.state.accounts.complete_setup(
+                    request.cookies.get(COOKIE), payload.username, payload.password
+                )
             if not completed:
                 raise HTTPException(409, "Initial account setup is already complete or your session expired. Sign in again.")
         response.delete_cookie(
@@ -258,6 +288,66 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
         response.delete_cookie(
             COOKIE, path="/", secure=request.app.state.config.cookie_secure, httponly=True, samesite="strict"
         )
+        return {"ok": True}
+
+    @app.post("/api/account/password")
+    def change_account_password(payload: PasswordChange, request: Request, response: Response, current=Depends(credential_access)):
+        with request.app.state.login_lock:
+            db = request.app.state.db
+            ip = request.client.host if request.client else "unknown"
+            if not db.login_allowed(ip):
+                raise HTTPException(429, "Too many failed password attempts. Try again in 15 minutes.")
+            try:
+                request.app.state.accounts.change_password(current["username"], payload)
+            except AccountError as exc:
+                if exc.status_code == 403:
+                    db.failed_login(ip)
+                raise
+        response.delete_cookie(COOKIE, path="/", secure=request.app.state.config.cookie_secure, httponly=True, samesite="strict")
+        return {"ok": True}
+
+    @app.get("/api/users")
+    def list_users(request: Request, current=Depends(authenticated)):
+        return {"users": request.app.state.accounts.list()}
+
+    @app.post("/api/users", status_code=201)
+    def create_user(payload: UserInput, request: Request, current=Depends(authenticated)):
+        with request.app.state.login_lock:
+            identifier = request.app.state.accounts.save(payload, current["username"])
+        return {"id": identifier}
+
+    @app.put("/api/users/{user_id}")
+    def update_user(user_id: UUID, payload: UserInput, request: Request, current=Depends(authenticated)):
+        with request.app.state.login_lock:
+            identifier = request.app.state.accounts.save(payload, current["username"], str(user_id))
+        return {"id": identifier}
+
+    @app.delete("/api/users/{user_id}")
+    def delete_user(user_id: UUID, request: Request, current=Depends(authenticated)):
+        with request.app.state.login_lock:
+            request.app.state.accounts.delete(str(user_id), current["username"])
+        return {"ok": True}
+
+    @app.get("/api/password-manager")
+    def list_credentials(request: Request, current=Depends(credential_access)):
+        return {"entries": request.app.state.password_manager.list(current["username"]),
+                "can_edit": current["role"] != "credential_viewer", "can_manage_users": current["role"] == "administrator"}
+
+    @app.post("/api/password-manager", status_code=201)
+    def create_credential(payload: CredentialInput, request: Request, current=Depends(credential_edit)):
+        return request.app.state.password_manager.save(payload, current["username"])
+
+    @app.post("/api/password-manager/{entry_id}/reveal")
+    def reveal_credential(entry_id: UUID, request: Request, current=Depends(credential_access)):
+        return request.app.state.password_manager.reveal(str(entry_id), current["username"])
+
+    @app.put("/api/password-manager/{entry_id}")
+    def update_credential(entry_id: UUID, payload: CredentialUpdate, request: Request, current=Depends(credential_edit)):
+        return request.app.state.password_manager.save(payload, current["username"], str(entry_id))
+
+    @app.delete("/api/password-manager/{entry_id}")
+    def delete_credential(entry_id: UUID, request: Request, revision: int = Query(ge=1), current=Depends(credential_edit)):
+        request.app.state.password_manager.delete(str(entry_id), revision, current["username"])
         return {"ok": True}
 
     @app.get("/api/settings")

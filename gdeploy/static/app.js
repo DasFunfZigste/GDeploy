@@ -188,6 +188,11 @@
     node.replaceChildren(spinner(), document.createTextNode(text));
   }
   const setupRequired = () => state.session?.must_change_credentials === true;
+  const isAdministrator = () => (state.session?.role || 'administrator') === 'administrator';
+  let passwordUI;
+  function passwordManager() {
+    return passwordUI ||= window.GDeployPasswordManager({el, button, field, heading, api, copyText, notify, state, page, showLogin});
+  }
   function resetSetupForm() {
     $('#setup-form').reset();
     for (const input of $('#setup-form').querySelectorAll('input')) input.setCustomValidity('');
@@ -195,6 +200,7 @@
   }
   function closeWorkspace() {
     state.routeEpoch++;
+    passwordUI?.clearSecrets();
     state.mediaUpload?.abort();
     hideCredentials();
     discardWizard();
@@ -246,7 +252,15 @@
     $('.skip-link').href = '#setup-title';
     if (entering) {
       resetSetupForm();
-      $('#setup-username').focus();
+      const primary = session.is_primary !== false;
+      $('#setup-username').readOnly = !primary;
+      if (!primary) $('#setup-username').value = session.username;
+      $('#setup-username').closest('label').querySelector('span').textContent = primary ? 'New username' : 'Username';
+      $('#setup-username-help').textContent = primary ? '3–100 letters, numbers, dots, underscores or hyphens. Start with a letter or number and choose a name other than admin.' : 'Your assigned username. An administrator can rename your account.';
+      $('#setup-title').textContent = primary ? 'Choose your administrator login' : 'Choose your own password';
+      $('#setup-form .muted').textContent = primary ? 'Replace the default username and password to open your deployment workspace.' : 'Replace your temporary password before opening Password Manager. Keep your assigned username.';
+      $('#setup-submit').replaceChildren(primary ? 'Save administrator login ' : 'Save account password ', icon('arrow'));
+      (primary ? $('#setup-username') : $('#setup-password')).focus();
     }
     if (message) inlineError($('#setup-error'), message);
   }
@@ -261,6 +275,8 @@
     $('.skip-link').href = '#main-content';
     $('#account-name').textContent = session.username || 'Administrator';
     $('#account-avatar').textContent = (session.username || 'A').slice(0, 1);
+    for (const node of document.querySelectorAll('[data-admin-only]')) node.hidden = !isAdministrator();
+    $('.sidebar .brand').href = isAdministrator() ? '#deployments' : '#password-manager';
     await route();
   }
   async function logout() {
@@ -268,7 +284,7 @@
     catch (error) { if (setupRequired()) inlineError($('#setup-error'), error.message); else globalError(error.message); }
   }
   function markNav(name) {
-    const deploymentBranch = name !== 'settings';
+    const deploymentBranch = ['deployments', 'previous', 'detail'].includes(name);
     $('#deployments-subnav').hidden = !deploymentBranch;
     $('#nav-deployments').setAttribute('aria-expanded', String(deploymentBranch));
     $('#nav-deployments').classList.toggle('branch-active', deploymentBranch);
@@ -283,6 +299,7 @@
     if (!state.session) return;
     if (setupRequired()) { showSetup(); return; }
     const epoch = ++state.routeEpoch;
+    passwordUI?.clearSecrets();
     state.mediaUpload?.abort();
     globalError('');
     hideCredentials();
@@ -291,8 +308,16 @@
     state.detailId = null;
     page.replaceChildren(loading('Loading your workspace…'));
     const hash = location.hash.slice(1);
+    if (!isAdministrator() && hash !== 'password-manager') {
+      location.hash = 'password-manager'; return;
+    }
     const setupRoute = /^(?:settings|setup)(?:\/(connection|media|ssh|packages)(?:\/(splunk|fleetmanager|corelight-sensor))?)?$/.exec(hash);
-    if (setupRoute) {
+    if (hash === 'password-manager' || hash === 'password-manager/users') {
+      state.route = 'password-manager'; markNav('password-manager');
+      $('#breadcrumb').textContent = hash.endsWith('/users') ? 'Password Manager / Users & roles' : 'Password Manager';
+      try { await passwordManager().render(hash.endsWith('/users')); }
+      catch (error) { if (epoch === state.routeEpoch) renderLoadError(error, route); }
+    } else if (setupRoute) {
       state.route = 'settings';
       markNav('settings');
       $('#breadcrumb').textContent = 'Setup';
@@ -2679,7 +2704,7 @@
     setBusy(submit, 'Saving your login…');
     try {
       await api('/api/account/setup', {method: 'POST', body: {username, password, password_confirm: passwordConfirm}});
-      showLogin('', {username, success: 'Administrator login updated. Sign in with your new credentials.'});
+      showLogin('', {username, success: state.session?.is_primary !== false ? 'Administrator login updated. Sign in with your new credentials.' : 'Password updated. Sign in with your new credentials.'});
       $('#login-password').focus();
     } catch (error) {
       if (setupRequired()) inlineError($('#setup-error'), error.message);
@@ -2687,16 +2712,18 @@
       state.setupBusy = false;
       $('#setup-logout').disabled = false;
       submit.disabled = false;
-      submit.replaceChildren('Save administrator login ', icon('arrow'));
+      submit.replaceChildren(state.session?.is_primary !== false ? 'Save administrator login ' : 'Save account password ', icon('arrow'));
     }
   });
   $('#setup-logout').addEventListener('click', logout);
   $('#logout').addEventListener('click', logout);
+  $('#account-password').addEventListener('click', () => passwordManager().changePassword());
   const mobileLogout = el('button', {type: 'button', class: 'icon-button mobile-logout', 'aria-label': 'Sign out', onClick: logout}, icon('logout'));
-  $('.topbar').append(mobileLogout);
+  const mobilePassword = el('button', {type: 'button', class: 'icon-button', 'aria-label': 'Change your password', onClick: () => passwordManager().changePassword()}, icon('key'));
+  $('.topbar').append(el('span', {class: 'mobile-account-actions'}, mobilePassword, mobileLogout));
   window.addEventListener('hashchange', route);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) hideCredentials(); else poll(); });
-  window.addEventListener('pagehide', hideCredentials);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { hideCredentials(); passwordUI?.clearSecrets(); } else poll(); });
+  window.addEventListener('pagehide', () => { hideCredentials(); passwordUI?.clearSecrets(); });
   setInterval(poll, 5000);
   api('/api/session').then(session => session?.authenticated ? showApp(session) : showLogin()).catch(error => showLogin(error.message));
 })();

@@ -2,6 +2,22 @@
 
 Each numbered release has a matching Git tag, Docker image, installation bundle and GitHub Release page. Versions follow semantic versioning; the 0.x series is for lab validation before production use.
 
+## [0.20.0] - 2026-10-21
+
+### Added
+
+- Add **Password Manager** to the left sidebar with searchable, encrypted provisioned and manually added homelab entries. Edit the name, user, password, application, address, optional port, connection type, notes and optional SSH private key. Support SSH, HTTP/HTTPS, API, RDP, VNC and Other metadata.
+- Collect logins from existing and new deployments, including hidden jobs: OS passwords/automation keys, Splunk, Elasticsearch/Kibana, Kibana service-account tokens and returned Corelight service credentials. Fill discovered addresses while retaining saved edits. Keep original provisioning credentials and queued/running snapshots unchanged.
+- Add administrator-managed GUI accounts and fixed **Administrator**, **Credential Editor** and **Credential Viewer** roles. Editors/viewers have Password Manager access only; viewers cannot change entries. Enforce permissions in the API, require new users/reset accounts to replace temporary passwords, revoke sessions on account edits/removal and protect the original instance administrator. Add self-service GUI password changes.
+- Mask secrets until explicit reveal/edit, audit reveals and mutations without values, hide revealed credentials after 60 seconds, and clear displayed secrets/dialogs on navigation, sign-out or page hiding. Add clipboard fallback, conflict detection, explicit deletion confirmation and persistent protection against reimporting deleted entries.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh. No registry login is needed. Open **Password Manager**; administrators manage access under **Users & roles**. See the included [Password Manager guide](docs/PASSWORD_MANAGER.md).
+- Add encrypted credential entries/source snapshots and GUI user hashes in two additive tables. Preserve the complete data volume and original encryption configuration; existing administrator credentials and deployments remain intact. Old releases do not expose additional users or the manager. Retain the matching backup and finish/resolve active work before rollback.
+- Saved entry edits do not change remote passwords or installed guests. All authorized roles share one collection; per-entry permissions and embedded SSH/VNC/RDP connections remain future work. Existing deployment status remains visible, including failed/reverted jobs; storing a credential does not certify service readiness.
+- Automated API/browser regressions cover collection, encryption, saved-copy isolation, RBAC, temporary passwords, session revocation, concurrent edits, desktop/mobile flows, clipboard fallback, timers and deletion/restart behavior. Container checks verify the new asset and saved user/credential persistence across recreation. Live hypervisor or licensed guest provisioning is not changed by this feature.
+
 ## [0.19.1] - 2026-10-20
 
 ### Fixed

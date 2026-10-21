@@ -14,7 +14,7 @@ Planned scope:
 - Open an embedded SSH terminal for Linux VM administration from the same screen. GDeploy must be able to reach the guest's SSH service.
 - Use GDeploy's encrypted saved guest credentials or automation SSH key for associated deployments. When suitable credentials are unavailable, prompt the administrator for an SSH username and password or private key. Any credentials retained by GDeploy must receive the same encryption and access controls as existing guest credentials.
 
-The first connection method is SSH. Full hypervisor consoles and VM lifecycle controls can be considered separately when this feature is designed.
+The first connection method is SSH, with browser VNC/RDP and hypervisor consoles to be designed later. Password Manager is available from v0.20.0 as the foundation: encrypted provisioning/manual credentials, editable connection metadata and role-based access. It does not open connections yet. Future connection operations will need their own authorization and lifecycle controls; saved credentials alone do not grant a browser session. See [Password Manager](PASSWORD_MANAGER.md).
 
 Proxmox VE 9.2 deployment is available starting with v0.17.0 and is no longer planned. See [Proxmox setup](PROXMOX.md).
 

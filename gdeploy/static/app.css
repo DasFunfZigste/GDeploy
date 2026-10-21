@@ -3621,3 +3621,35 @@ td {
 @media (max-width: 600px) {
   .target-host-list, #target-hosts-panel .settings-form { padding: 16px; }
 }
+
+/* Password Manager */
+.vault-tabs { display: flex; gap: 1.25rem; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+.vault-tabs a { padding: .75rem 0; text-decoration: none; color: var(--muted); }
+.vault-tabs a.active { color: var(--accent); border-bottom: 2px solid currentColor; }
+.vault-toolbar { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0 1rem; }
+.vault-toolbar input,.vault-toolbar select { background: #141e21; border: 1px solid #304247; color: #d9e4e4; border-radius: 8px; padding: .7rem .85rem; min-width: 0; }
+.vault-toolbar input { flex: 1; min-width: 200px; }
+.vault-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,380px),1fr)); gap: 1.25rem; }
+.vault-card { min-width: 0; align-self: start; }
+.vault-card h2 { font-size: 1rem; overflow-wrap: anywhere; }
+.vault-card .surface-header { align-items: flex-start; }
+.vault-card .form-body { padding: 1.25rem; }
+.vault-metadata { display: grid; grid-template-columns: 110px minmax(0,1fr); gap: .6rem; margin: 0 0 1rem; }
+.vault-metadata dt { color: #8ea6aa; }
+.vault-metadata dd { margin: 0; overflow-wrap: anywhere; }
+.vault-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+.vault-secrets { border-top: 1px solid #304247; margin-top: 1rem; padding-top: 1rem; }
+.vault-secret { display: grid; gap: .5rem; margin: 1rem 0; }
+.vault-secret pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; max-height: 220px; overflow: auto; background: #101718; padding: .75rem; border-radius: 6px; font-size: .8rem; }
+.vault-secret button { justify-self: start; }
+.vault-notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+.vault-dialog { width: min(720px,calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; }
+.vault-dialog .field { margin-top: 1rem; }
+.vault-user-list { padding: 0 1.5rem 1.5rem; }
+.vault-user-row { display: flex; gap: 1rem; justify-content: space-between; align-items: center; padding: 1rem 0; border-top: 1px solid #304247; }
+@media (max-width: 600px) { .vault-toolbar > * { width: 100%; } .vault-user-row { align-items: flex-start; flex-direction: column; } .vault-dialog .field-grid { grid-template-columns: 1fr; } }
+
+.vault-dialog .field input[type=checkbox] { width: 18px; min-height: 18px; height: 18px; padding: 0; }
+
+.mobile-account-actions { display: none; }
+@media (max-width: 700px) { .mobile-account-actions { display: inline-flex; margin-left: auto; gap: 8px; } .mobile-account-actions .mobile-logout { margin-left: 0; } }

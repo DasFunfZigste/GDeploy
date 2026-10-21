@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gdeploy"
-version = "0.19.1"
+version = "0.20.0"
 description = "Deploy operating systems and application VMs to ESXi and Proxmox VE"
 requires-python = ">=3.12"
 dependencies = [

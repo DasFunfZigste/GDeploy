@@ -36,6 +36,7 @@ DEPLOYMENT_FILES = (
     ("docs/CORELIGHT_SENSOR.md", "docs/CORELIGHT_SENSOR.md"),
     ("docs/ALMALINUX.md", "docs/ALMALINUX.md"),
     ("docs/PROXMOX.md", "docs/PROXMOX.md"),
+    ("docs/PASSWORD_MANAGER.md", "docs/PASSWORD_MANAGER.md"),
     ("docs/ARCHITECTURE.md", "docs/ARCHITECTURE.md"),
     ("docs/ROADMAP.md", "docs/ROADMAP.md"),
     ("docs/overview.png", "docs/overview.png"),

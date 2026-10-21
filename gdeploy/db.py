@@ -18,6 +18,7 @@ from .bootstrap import verify_password
 from .corelight_sensor import pairing_reuse_policy
 from .os_profiles import PROFILES, UBUNTU
 from .ssh_keys import normalize_ssh_public_keys
+from .password_manager import sync_deployment
 
 
 class MediaStateError(ValueError):
@@ -95,6 +96,16 @@ class Database:
                     id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL, password_hash TEXT NOT NULL,
                     must_change_credentials INTEGER NOT NULL CHECK(must_change_credentials IN (0,1))
                 );
+                CREATE TABLE IF NOT EXISTS gui_users (
+                    id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('administrator','credential_editor','credential_viewer')),
+                    enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+                    must_change_credentials INTEGER NOT NULL CHECK(must_change_credentials IN (0,1))
+                );
+                CREATE TABLE IF NOT EXISTS credential_entries (
+                    id TEXT PRIMARY KEY, source_key TEXT UNIQUE, value TEXT NOT NULL, source_value TEXT,
+                    revision INTEGER NOT NULL, deleted INTEGER NOT NULL CHECK(deleted IN (0,1))
+                );
             """)
             # Existing volumes retain every deployment and its encrypted data.
             # Serialize the schema check with another process starting up.
@@ -106,6 +117,8 @@ class Database:
             # already-approved snapshot into additive encrypted per-OS state.
             self._sync_legacy_media_settings(conn)
             self._migrate_legacy_splunk_packages(conn)
+            for row in conn.execute("SELECT * FROM deployments").fetchall():
+                sync_deployment(self, conn, self._decode(row, private=True))
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -892,6 +905,7 @@ class Database:
             )
             c.execute("INSERT INTO events(deployment_id,at,level,message) VALUES(?,?,?,?)",
                       (deployment_id, stamp, "info", "Deployment queued"))
+            sync_deployment(self, c, self._decode(c.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone(), private=True))
             if sensor_replacement:
                 c.execute("UPDATE deployments SET status='reverted',stage='reverted',resources='[]',error=NULL,updated_at=? WHERE id=?",
                           (stamp, parent_id))
@@ -977,10 +991,15 @@ class Database:
             encoded["hidden_at"] = None
         encoded["updated_at"] = now()
         with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
             c.execute(
                 "UPDATE deployments SET " + ",".join(k + "=?" for k in encoded) + " WHERE id=?",
                 (*encoded.values(), deployment_id),
             )
+            if {"vms", "secrets"} & values.keys():
+                row = c.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+                if row:
+                    sync_deployment(self, c, self._decode(row, private=True))
 
     def event(self, deployment_id, message, level="info"):
         with self.connect() as c:
@@ -1067,6 +1086,9 @@ class Database:
                 "UPDATE deployments SET status=?,stage=?,updated_at=?,vms=?,resources=?,secrets=?,error=? WHERE id=?",
                 (status, status, stamp, json.dumps(vms), json.dumps(resources), encrypted, error, deployment_id),
             )
+            sync_deployment(self, connection, self._decode(
+                connection.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone(), private=True
+            ))
             if status == "stopped":
                 if error:
                     connection.execute(

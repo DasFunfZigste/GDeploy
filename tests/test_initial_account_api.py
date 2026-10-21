@@ -52,6 +52,16 @@ def test_every_business_endpoint_is_blocked_before_setup(default_client, spec):
     identifier = str(uuid4())
     requests = [
         ("GET", "/api/settings", None),
+        ("GET", "/api/password-manager", None),
+        ("POST", "/api/password-manager", {"title": "Lab"}),
+        ("POST", f"/api/password-manager/{identifier}/reveal", None),
+        ("PUT", f"/api/password-manager/{identifier}", {"title": "Lab", "revision": 1}),
+        ("DELETE", f"/api/password-manager/{identifier}?revision=1", None),
+        ("POST", "/api/account/password", {"current_password": "admin", "password": "a-long-new-password", "password_confirm": "a-long-new-password"}),
+        ("GET", "/api/users", None),
+        ("POST", "/api/users", {"username": "lab-user", "password": "temporary-passphrase"}),
+        ("PUT", f"/api/users/{identifier}", {"username": "lab-user"}),
+        ("DELETE", f"/api/users/{identifier}", None),
         ("GET", "/api/settings/deployment-defaults", None),
         ("PUT", "/api/settings/deployment-defaults", {"host": "esxi.invalid", "default_network": "Servers"}),
         ("DELETE", "/api/settings/deployment-defaults", None),
