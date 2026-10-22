@@ -6,6 +6,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Literal
+from uuid import UUID
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -20,7 +21,52 @@ class CredentialError(Exception):
         self.status_code = status_code
 
 
-class CredentialInput(BaseModel):
+class OrganizationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    section_id: UUID | None = None
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("tags")
+    @classmethod
+    def normalized_tags(cls, values):
+        result = []
+        for value in values:
+            if any(ord(c) < 32 or ord(c) == 127 for c in value) or "," in value:
+                raise ValueError("Tags cannot contain commas or control characters.")
+            value = " ".join(value.split()).casefold()
+            if not value or len(value) > 40:
+                raise ValueError("Each tag must contain 1 to 40 characters.")
+            if value not in result:
+                result.append(value)
+        return result
+
+
+class OrganizationUpdate(OrganizationInput):
+    revision: int = Field(ge=1, strict=True)
+
+
+class SectionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def section_name(cls, value):
+        if any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("Section names cannot contain control characters.")
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("Enter a section name.")
+        if value.casefold() in {"unsectioned", "all sections"}:
+            raise ValueError("Choose a name other than All sections or Unsectioned.")
+        return value
+
+
+class SectionUpdate(SectionInput):
+    revision: int = Field(ge=1, strict=True)
+
+
+class CredentialInput(OrganizationInput):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
     title: str = Field(min_length=1, max_length=160)
     application: str = Field(default="", max_length=160)
@@ -84,7 +130,7 @@ def provisioned_entries(deployment):
 
         def entry(kind, **values):
             identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, f"gdeploy:{deployment['id']}:{name}:{kind}"))
-            return identifier, {**CredentialInput(title=name).model_dump(), **origin, **values}
+            return identifier, {**CredentialInput(title=name).model_dump(exclude={"section_id", "tags"}), **origin, **values}
 
         if credential.get("password") or credential.get("private_key"):
             yield entry("os", title=f"{name} · OS", application="Operating system", username=credential.get("username", "gdeploy"),
@@ -158,6 +204,8 @@ class PasswordManager:
     def _public(self, c, row):
         value = self.db.unseal(row["value"])
         result = {key: val for key, val in value.items() if key not in SECRET_FIELDS}
+        result.setdefault("section_id", None)
+        result.setdefault("tags", [])
         result.update(id=row["id"], revision=row["revision"], has_password=bool(value.get("password")), has_private_key=bool(value.get("private_key")))
         if value.get("deployment_id"):
             origin = c.execute("SELECT status FROM deployments WHERE id=?", (value["deployment_id"],)).fetchone()
@@ -169,13 +217,24 @@ class PasswordManager:
             self._require(c, actor)
             return [self._public(c, row) for row in c.execute("SELECT * FROM credential_entries WHERE deleted=0 ORDER BY rowid DESC").fetchall()]
 
+    def catalog(self, actor):
+        with self.db.connect() as c:
+            c.execute("BEGIN")
+            self._require(c, actor)
+            entries = [self._public(c, row) for row in c.execute("SELECT * FROM credential_entries WHERE deleted=0 ORDER BY rowid DESC").fetchall()]
+            sections = self._sections(c)
+            for section in sections:
+                section["count"] = sum(item["section_id"] == section["id"] for item in entries)
+            tags = sorted({tag for item in entries for tag in item["tags"]})
+            return {"entries": entries, "sections": sections, "tags": tags}
+
     def reveal(self, identifier, actor):
         with self.db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
             self._require(c, actor)
             row = self._get(c, identifier)
             c.execute("INSERT INTO audit VALUES(?,?)", (stamp(), f"Password Manager entry revealed: {identifier}; actor={actor}"))
-            return {**self.db.unseal(row["value"]), "id": identifier, "revision": row["revision"]}
+            return {"section_id": None, "tags": [], **self.db.unseal(row["value"]), "id": identifier, "revision": row["revision"]}
 
     @staticmethod
     def _get(c, identifier):
@@ -185,10 +244,15 @@ class PasswordManager:
         return row
 
     def save(self, payload, actor, identifier=None):
-        value = payload.model_dump(exclude={"revision"})
+        value = payload.model_dump(mode="json", exclude={"revision"})
+        # Older clients do not send organization fields; retain existing choices.
+        if identifier:
+            for key in {"section_id", "tags"} - payload.model_fields_set:
+                value.pop(key)
         with self.db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
             self._require(c, actor, write=True)
+            self._validate_section(c, value.get("section_id"))
             if identifier:
                 row = self._get(c, identifier)
                 if row["revision"] != payload.revision:
@@ -217,3 +281,69 @@ class PasswordManager:
             else:
                 c.execute("DELETE FROM credential_entries WHERE id=?", (identifier,))
             c.execute("INSERT INTO audit VALUES(?,?)", (stamp(), f"Password Manager entry deleted: {identifier}; actor={actor}"))
+
+    @staticmethod
+    def _validate_section(c, section_id):
+        if section_id and not c.execute("SELECT 1 FROM credential_sections WHERE id=?", (section_id,)).fetchone():
+            raise CredentialError("This section no longer exists. Refresh and choose another section.")
+
+    def organize(self, identifier, payload, actor):
+        value = payload.model_dump(mode="json", exclude={"revision"}, exclude_unset=True)
+        with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._require(c, actor, write=True)
+            self._validate_section(c, value.get("section_id"))
+            row = self._get(c, identifier)
+            if row["revision"] != payload.revision:
+                raise CredentialError("This entry changed. Reopen Organize to review the latest values.")
+            saved = self.db.unseal(row["value"])
+            c.execute("UPDATE credential_entries SET value=?,revision=revision+1 WHERE id=?",
+                      (self.db.seal({**saved, **value, "updated_at": stamp()}), identifier))
+            c.execute("INSERT INTO audit VALUES(?,?)", (stamp(), f"Password Manager entry organized: {identifier}; actor={actor}"))
+            return self._public(c, self._get(c, identifier))
+
+    def _sections(self, c):
+        return sorted(({**self.db.unseal(row["value"]), "id": row["id"], "revision": row["revision"]}
+                       for row in c.execute("SELECT * FROM credential_sections").fetchall()), key=lambda item: item["name"].casefold())
+
+    def save_section(self, payload, actor, identifier=None):
+        with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._require(c, actor, write=True)
+            existing = c.execute("SELECT * FROM credential_sections WHERE id=?", (identifier,)).fetchone() if identifier else None
+            if identifier and not existing:
+                raise CredentialError("Section not found.", 404)
+            if existing and existing["revision"] != payload.revision:
+                raise CredentialError("This section changed. Refresh before renaming it.")
+            if any(item["id"] != identifier and item["name"].casefold() == payload.name.casefold() for item in self._sections(c)):
+                raise CredentialError("A section with that name already exists.")
+            if existing:
+                c.execute("UPDATE credential_sections SET value=?,revision=revision+1 WHERE id=?",
+                          (self.db.seal({**self.db.unseal(existing["value"]), "name": payload.name, "updated_at": stamp()}), identifier))
+            else:
+                identifier = str(uuid.uuid4())
+                created = stamp()
+                c.execute("INSERT INTO credential_sections VALUES(?,?,1)",
+                          (identifier, self.db.seal({"name": payload.name, "created_at": created, "updated_at": created})))
+            c.execute("INSERT INTO audit VALUES(?,?)", (stamp(), f"Password Manager section {'updated' if existing else 'created'}: {identifier}; actor={actor}"))
+            return next(item for item in self._sections(c) if item["id"] == identifier)
+
+    def delete_section(self, identifier, revision, actor):
+        with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._require(c, actor, write=True)
+            row = c.execute("SELECT * FROM credential_sections WHERE id=?", (identifier,)).fetchone()
+            if not row:
+                raise CredentialError("Section not found.", 404)
+            if row["revision"] != revision:
+                raise CredentialError("This section changed. Refresh before removing it.")
+            moved = 0
+            for entry in c.execute("SELECT * FROM credential_entries WHERE deleted=0").fetchall():
+                value = self.db.unseal(entry["value"])
+                if value.get("section_id") == identifier:
+                    value.update(section_id=None, updated_at=stamp())
+                    c.execute("UPDATE credential_entries SET value=?,revision=revision+1 WHERE id=?", (self.db.seal(value), entry["id"]))
+                    moved += 1
+            c.execute("DELETE FROM credential_sections WHERE id=?", (identifier,))
+            c.execute("INSERT INTO audit VALUES(?,?)", (stamp(), f"Password Manager section removed: {identifier}; actor={actor}; entries retained={moved}"))
+            return moved

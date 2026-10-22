@@ -198,8 +198,10 @@ def verify_login_and_storage(url, credentials, write=False):
     publisher_checksum = hashlib.sha512(package_body).hexdigest()
     fleet_pem = smoke_fleet_pem()
     if write:
+        credential_section = request("/api/password-manager/sections", {"name": "Smoke lab"}, "POST", session["csrf_token"])
         request("/api/password-manager", {"title": "Container smoke login", "username": "lab-user", "password": "smoke-vault-password",
-                                         "host": "lab.example.invalid", "connection_type": "SSH", "port": 22}, "POST", session["csrf_token"])
+                                         "host": "lab.example.invalid", "connection_type": "SSH", "port": 22,
+                                         "section_id": credential_section["id"], "tags": ["container", "lab"]}, "POST", session["csrf_token"])
         request("/api/users", {"username": "smoke-vault-viewer", "role": "credential_viewer", "password": "smoke-viewer-only-passphrase"}, "POST", session["csrf_token"])
         request(
             "/api/settings",
@@ -233,6 +235,9 @@ def verify_login_and_storage(url, credentials, write=False):
     vault = request("/api/password-manager")
     assert len(vault["entries"]) == 1 and vault["entries"][0]["title"] == "Container smoke login"
     assert "smoke-vault-password" not in json.dumps(vault)
+    assert len(vault["sections"]) == 1 and vault["sections"][0]["name"] == "Smoke lab" and vault["sections"][0]["count"] == 1
+    assert vault["entries"][0]["section_id"] == vault["sections"][0]["id"] and vault["entries"][0]["tags"] == ["container", "lab"]
+    assert vault["tags"] == ["container", "lab"], "Credential organization did not survive container recreation"
     revealed = request("/api/password-manager/" + vault["entries"][0]["id"] + "/reveal", {}, "POST", session["csrf_token"])
     assert revealed["password"] == "smoke-vault-password", "Encrypted Password Manager entries did not survive container recreation"
     users = request("/api/users")

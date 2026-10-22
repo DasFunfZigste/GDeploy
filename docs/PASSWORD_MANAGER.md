@@ -6,6 +6,18 @@ Each entry has an editable name, user, password, application, IP address or host
 
 **Edits change the saved Password Manager copy only.** They do not change passwords, SSH keys or configuration on a remote machine, and do not change the original credentials used by a queued/running deployment. If you change a password yourself on a machine, edit its saved entry here to match. An empty password/key field deliberately clears that field.
 
+## Sections and tags
+
+Use **Password Manager → Sections → Add section** to create groups such as Network, Servers or Applications. Sections can be created before adding entries, renamed later, or removed. Removing a section keeps all its credentials under **Unsectioned**, with passwords, keys and tags intact. An entry belongs to one section at a time, or Unsectioned.
+
+When adding or editing a credential, choose a section or **+ Create a new section** to add one without leaving the form. Enter any number of comma-separated tags up to 20 per credential, for example `homelab, linux, production`. Each tag is limited to 40 characters; extra spaces and duplicate tags are removed, and tags are saved in lowercase. To remove a tag, delete it from the entry's Tags field; an empty field clears all tags. Unused tags disappear from the filter automatically.
+
+**Organize** changes just an entry's section and tags without retrieving its password or key. Administrators and Credential Editors can organize entries and manage sections. Credential Viewers can browse sections and filter entries.
+
+The Credentials tab groups entries by section. Select **All sections**, **Unsectioned** or an individual section; combine that with the tag, connection-type and source filters or text search. Click a tag on a card to filter by it. **Clear filters** returns to all entries. Filters remain while you work in this browser session and reset on sign-out/reload. The Sections tab's **View credentials** opens that section. All organization changes persist across container updates/restarts and are preserved when provisioning discovers new addresses or service details. Existing entries start Unsectioned without tags.
+
+Sections and tags organize the shared collection; they do not provide private folders or change who may reveal a credential. Section names and tags use the existing encryption key, and label values are not written to audit messages. The `credential_sections` table is additive in v0.21.0; older releases do not expose this organization UI. Keep the original volume/key and a matching backup when upgrading or rolling back.
+
 ## Provisioned credentials
 
 GDeploy collects generated OS logins and automation SSH keys, Splunk administrator credentials, Elasticsearch/Kibana logins, the Kibana service-account token, and returned FleetManager administrator credentials. Corelight service community strings exposed by the existing deployment credential view are saved as API entries, with the community string in the password field. Installation inputs such as vendor repository tokens, licenses and application encryption keys retain their existing protected configuration storage; they are not login entries.

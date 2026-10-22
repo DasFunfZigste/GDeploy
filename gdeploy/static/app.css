@@ -3653,3 +3653,15 @@ td {
 
 .mobile-account-actions { display: none; }
 @media (max-width: 700px) { .mobile-account-actions { display: inline-flex; margin-left: auto; gap: 8px; } .mobile-account-actions .mobile-logout { margin-left: 0; } }
+
+.vault-group-title { font-size: 1.1rem; margin: 1.5rem 0 .9rem; overflow-wrap: anywhere; }
+.vault-labels { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; }
+.vault-label { border: 1px solid #304247; background: #1d3032; color: #a7dacf; border-radius: 16px; padding: .3rem .65rem; font: inherit; font-size: .75rem; cursor: pointer; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+.vault-label:hover { border-color: var(--accent); }
+.vault-section-label { background: #203139; color: #b2d9ea; }
+.vault-filters { margin-top: -.25rem; }
+.vault-section-list { display: grid; gap: 1rem; margin-top: 1.5rem; }
+.vault-section-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 1.25rem; }
+.vault-section-row h2 { margin: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+.vault-section-row .vault-actions { margin: 0; }
+@media (max-width: 600px) { .vault-section-row { flex-direction: column; align-items: flex-start; } .vault-filters select { max-width: 100%; } .vault-tabs { flex-wrap: wrap; gap: 1rem; } }

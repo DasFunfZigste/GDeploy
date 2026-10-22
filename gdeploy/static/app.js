@@ -308,14 +308,14 @@
     state.detailId = null;
     page.replaceChildren(loading('Loading your workspace…'));
     const hash = location.hash.slice(1);
-    if (!isAdministrator() && hash !== 'password-manager') {
+    if (!isAdministrator() && !['password-manager', 'password-manager/sections'].includes(hash)) {
       location.hash = 'password-manager'; return;
     }
     const setupRoute = /^(?:settings|setup)(?:\/(connection|media|ssh|packages)(?:\/(splunk|fleetmanager|corelight-sensor))?)?$/.exec(hash);
-    if (hash === 'password-manager' || hash === 'password-manager/users') {
+    if (['password-manager', 'password-manager/users', 'password-manager/sections'].includes(hash)) {
       state.route = 'password-manager'; markNav('password-manager');
-      $('#breadcrumb').textContent = hash.endsWith('/users') ? 'Password Manager / Users & roles' : 'Password Manager';
-      try { await passwordManager().render(hash.endsWith('/users')); }
+      $('#breadcrumb').textContent = hash.endsWith('/users') ? 'Password Manager / Users & roles' : hash.endsWith('/sections') ? 'Password Manager / Sections' : 'Password Manager';
+      try { await passwordManager().render(hash.endsWith('/sections') ? 'sections' : hash.endsWith('/users')); }
       catch (error) { if (epoch === state.routeEpoch) renderLoadError(error, route); }
     } else if (setupRoute) {
       state.route = 'settings';

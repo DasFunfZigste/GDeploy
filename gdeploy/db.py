@@ -102,6 +102,9 @@ class Database:
                     enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
                     must_change_credentials INTEGER NOT NULL CHECK(must_change_credentials IN (0,1))
                 );
+                CREATE TABLE IF NOT EXISTS credential_sections (
+                    id TEXT PRIMARY KEY, value TEXT NOT NULL, revision INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS credential_entries (
                     id TEXT PRIMARY KEY, source_key TEXT UNIQUE, value TEXT NOT NULL, source_value TEXT,
                     revision INTEGER NOT NULL, deleted INTEGER NOT NULL CHECK(deleted IN (0,1))

@@ -222,3 +222,10 @@ Automated contract/browser/loopback TLS tests are separate from these live check
 - Edit a provisioned saved copy, then progress a deployment: untouched addresses update, edited fields stay, and original worker/remote credentials remain valid. Delete its manager entry and recreate the app container; it must stay deleted without affecting the VM.
 - Create each GUI role, replace temporary passwords, and verify editor/viewer API restrictions as well as hidden infrastructure navigation. Test disabling, role changes, resets, session revocation and protected primary administrator behavior. All authorized roles intentionally share the credential collection.
 - Recreate the container with its original volume/key. Confirm entries, user accounts and roles persist and secrets decrypt. Test backup restoration separately; do not regenerate the encryption key. No SSH/VNC/RDP connection function is included in this release.
+
+## Password Manager organization
+
+- Create empty sections, rename them and verify counts; add/edit manual or provisioned entries with a section and multiple tags. Check inline section creation retains draft values on validation errors. Test Unicode/long labels, duplicate/reserved names and normalized tags.
+- Combine search, section/tag/type/source filters; use card tags, Clear filters and section View credentials. Verify desktop/mobile layouts and keyboard navigation. Organize must not call the secret reveal API.
+- Remove a populated section and verify every entry becomes Unsectioned with secrets/tags preserved. Open stale dialogs and confirm revision conflicts or deleted-section errors prevent restoring old assignments. Viewer roles cannot mutate organization; editor/admin roles can.
+- Recreate the container with the original data/key, and progress an existing deployment. Sections/tags and empty sections must remain, while untouched discovered addresses still update. Existing pre-v0.21.0 entries must remain readable as Unsectioned/untagged. No guest or hypervisor operation should result from organization changes.

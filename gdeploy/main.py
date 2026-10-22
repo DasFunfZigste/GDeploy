@@ -15,7 +15,9 @@ from pydantic import BaseModel, ConfigDict, StrictBool
 
 from . import __version__
 from .accounts import Accounts, AccountError, UserInput, PasswordChange
-from .password_manager import PasswordManager, CredentialError, CredentialInput, CredentialUpdate
+from .password_manager import (
+    PasswordManager, CredentialError, CredentialInput, CredentialUpdate, OrganizationUpdate, SectionInput, SectionUpdate,
+)
 from .certificate_trust import CertificateTrust, CertificateTrustError, certificate_endpoint
 from .config import Config, hash_password, verify_password
 from .corelight_sensor import CorelightSensorError, CorelightSensorManager
@@ -330,8 +332,25 @@ def create_app(config: Config | None = None, start_worker=True, service_factory=
 
     @app.get("/api/password-manager")
     def list_credentials(request: Request, current=Depends(credential_access)):
-        return {"entries": request.app.state.password_manager.list(current["username"]),
+        return {**request.app.state.password_manager.catalog(current["username"]),
                 "can_edit": current["role"] != "credential_viewer", "can_manage_users": current["role"] == "administrator"}
+
+    @app.post("/api/password-manager/sections", status_code=201)
+    def create_credential_section(payload: SectionInput, request: Request, current=Depends(credential_edit)):
+        return request.app.state.password_manager.save_section(payload, current["username"])
+
+    @app.put("/api/password-manager/sections/{section_id}")
+    def update_credential_section(section_id: UUID, payload: SectionUpdate, request: Request, current=Depends(credential_edit)):
+        return request.app.state.password_manager.save_section(payload, current["username"], str(section_id))
+
+    @app.delete("/api/password-manager/sections/{section_id}")
+    def delete_credential_section(section_id: UUID, request: Request, revision: int = Query(ge=1), current=Depends(credential_edit)):
+        moved = request.app.state.password_manager.delete_section(str(section_id), revision, current["username"])
+        return {"ok": True, "entries_retained": moved}
+
+    @app.patch("/api/password-manager/{entry_id}/organization")
+    def organize_credential(entry_id: UUID, payload: OrganizationUpdate, request: Request, current=Depends(credential_edit)):
+        return request.app.state.password_manager.organize(str(entry_id), payload, current["username"])
 
     @app.post("/api/password-manager", status_code=201)
     def create_credential(payload: CredentialInput, request: Request, current=Depends(credential_edit)):

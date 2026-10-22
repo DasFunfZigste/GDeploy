@@ -53,6 +53,10 @@ def test_every_business_endpoint_is_blocked_before_setup(default_client, spec):
     requests = [
         ("GET", "/api/settings", None),
         ("GET", "/api/password-manager", None),
+        ("POST", "/api/password-manager/sections", {"name": "Lab"}),
+        ("PUT", f"/api/password-manager/sections/{identifier}", {"name": "Lab", "revision": 1}),
+        ("DELETE", f"/api/password-manager/sections/{identifier}?revision=1", None),
+        ("PATCH", f"/api/password-manager/{identifier}/organization", {"revision": 1, "tags": []}),
         ("POST", "/api/password-manager", {"title": "Lab"}),
         ("POST", f"/api/password-manager/{identifier}/reveal", None),
         ("PUT", f"/api/password-manager/{identifier}", {"title": "Lab", "revision": 1}),

@@ -2,6 +2,20 @@
 
 Each numbered release has a matching Git tag, Docker image, installation bundle and GitHub Release page. Versions follow semantic versioning; the 0.x series is for lab validation before production use.
 
+## [0.21.0] - 2026-10-22
+
+### Added
+
+- Organize Password Manager credentials into optional sections and multiple tags. Group cards by section, search section/tag labels, and combine section, tag, source and connection-type filters. Click tags to filter, clear filters, or open a section's credentials directly.
+- Add **Sections** management for creating, renaming and removing groups, including empty sections and per-section counts. Create sections inline when adding/editing an entry. Removing a section retains its credentials under **Unsectioned**, preserving secrets and tags.
+- Add **Organize** to change section/tags without revealing passwords or private keys. Administrators and Credential Editors can manage organization; Viewers can browse/filter. Section labels do not change shared access permissions.
+
+### Installation and compatibility
+
+- Update the existing clone with `git pull --ff-only` and `sudo docker compose up -d --build --wait`, then refresh. Open **Password Manager → Sections** to create groups, or choose **Organize** on an existing entry. See the [Password Manager guide](docs/PASSWORD_MANAGER.md).
+- Store section names in an additive encrypted table and tags/assignments inside encrypted entries. Existing entries start Unsectioned without tags. Organization survives provisioning updates and container recreation, and remains separate from original deployment/guest credentials. Preserve the complete volume and original encryption key; older versions do not expose organization controls.
+- Validate section/tag inputs, reject stale revisions and removed sections, and serialize organization changes with section removal. Older API clients that omit organization fields retain existing assignments/tags. API/browser regressions and Docker persistence checks cover these flows; no live guest or hypervisor behavior changes.
+
 ## [0.20.0] - 2026-10-21
 
 ### Added

@@ -6,6 +6,8 @@ window.GDeployPasswordManager = function ({el, button, field, heading, api, copy
   const types = ['SSH', 'HTTPS', 'HTTP', 'RDP', 'VNC', 'API', 'OTHER'];
   const cleanups = new Set();
   let secretEpoch = 0;
+  let filterSession;
+  let filters = {};
   const isAdmin = () => (state.session?.role || 'administrator') === 'administrator';
   function clearSecrets() {
     secretEpoch++;
@@ -46,43 +48,137 @@ window.GDeployPasswordManager = function ({el, button, field, heading, api, copy
   dialog.addEventListener('close', () => { if (!dialog.open) clearSecrets(); });
   async function copied(value) { notify(await copyText(value) ? 'Copied to clipboard.' : 'Clipboard access was blocked. Select the displayed value and copy it manually.'); }
   function input(id, value = '', options = {}) { return el('input', {id, value, type: 'text', autocomplete: 'off', ...options}); }
-  function tabs(users) {
+  function tabs(view) {
+    const tab = (name, label, href) => el('a', {href, class: view === name ? 'active' : '', 'aria-current': view === name ? 'page' : null}, label);
     return el('nav', {class: 'vault-tabs', 'aria-label': 'Password Manager sections'},
-      el('a', {href: '#password-manager', class: !users ? 'active' : '', 'aria-current': !users ? 'page' : null}, 'Credentials'),
-      isAdmin() ? el('a', {href: '#password-manager/users', class: users ? 'active' : '', 'aria-current': users ? 'page' : null}, 'Users & roles') : null);
+      tab('credentials', 'Credentials', '#password-manager'), tab('sections', 'Sections', '#password-manager/sections'),
+      isAdmin() ? tab('users', 'Users & roles', '#password-manager/users') : null);
   }
-  function chrome(users, action) {
-    page.replaceChildren(heading('Password Manager', users ? 'Manage who can use your GDeploy workspace and shared credentials.' : 'Your provisioned logins and homelab connections, together.', action), tabs(users));
+  function chrome(view, action) {
+    if (typeof view === 'boolean') view = view ? 'users' : 'credentials';
+    page.replaceChildren(heading('Password Manager', view === 'users' ? 'Manage who can use your GDeploy workspace and shared credentials.' :
+      view === 'sections' ? 'Organize your shared credentials into sections.' : 'Your provisioned logins and homelab connections, together.', action), tabs(view));
   }
-  async function render(users = false) {
+  async function render(view = false) {
     const current = currentView();
-    if (users) return renderUsers(current);
+    if (filterSession !== state.session) { filterSession = state.session; filters = {}; }
+    if (view === true) return renderUsers(current);
     const catalog = await api('/api/password-manager');
     if (!current()) return;
-    chrome(false, catalog.can_edit ? button('Add credential', 'button-primary', () => editCredential(null, current), 'plus') : null);
-    const search = input('credential-search', '', {type: 'search', placeholder: 'Search name, application, user or address', 'aria-label': 'Search credentials'});
+    if (view === 'sections') return renderSections(catalog, current);
+    chrome(false, catalog.can_edit ? button('Add credential', 'button-primary', () => editCredential(null, current, catalog), 'plus') : null);
+    const sectionNames = new Map(catalog.sections.map(section => [section.id, section.name]));
+    if (filters.section && filters.section !== 'unsectioned' && !sectionNames.has(filters.section)) filters.section = '';
+    if (filters.tag && filters.tag !== ',untagged,' && !catalog.tags.includes(filters.tag)) filters.tag = '';
+    const search = input('credential-search', filters.search || '', {type: 'search', placeholder: 'Search credentials, sections or tags', 'aria-label': 'Search credentials'});
     const filter = el('select', {id: 'credential-type-filter', 'aria-label': 'Connection type'}, el('option', {value: ''}, 'All connection types'), types.map(type => el('option', {value: type}, type)));
     const source = el('select', {id: 'credential-source-filter', 'aria-label': 'Credential source'}, el('option', {value: ''}, 'All sources'), el('option', {value: 'deployment'}, 'Provisioned by GDeploy'), el('option', {value: 'manual'}, 'Added manually'));
-    const list = el('div', {class: 'vault-grid', id: 'credential-list'});
+    const section = el('select', {id: 'credential-section-filter', 'aria-label': 'Section filter'}, el('option', {value: ''}, 'All sections'), el('option', {value: 'unsectioned'}, 'Unsectioned'),
+      catalog.sections.map(item => el('option', {value: item.id}, `${item.name} (${item.count})`)));
+    const tag = el('select', {id: 'credential-tag-filter', 'aria-label': 'Tag filter'}, el('option', {value: ''}, 'All tags'), el('option', {value: ',untagged,'}, 'Untagged'), catalog.tags.map(name => el('option', {value: name}, name)));
+    filter.value = filters.type || ''; source.value = filters.source || ''; section.value = filters.section || ''; tag.value = filters.tag || '';
+    const list = el('div', {id: 'credential-list'});
+    const count = el('p', {class: 'muted', role: 'status', 'aria-live': 'polite'});
     page.append(el('p', {class: 'alert alert-info'}, 'Editing an entry updates this saved copy only. It does not change a VM or application password. Browser connections are planned.'),
-      el('div', {class: 'vault-toolbar'}, search, filter, source, button('Refresh', 'button-small', () => reload(current), 'refresh')),
-      el('p', {class: 'muted'}, `Your role: ${roleNames[state.session.role] || 'Administrator'}. Authorized users share this collection.`), list);
+      el('div', {class: 'vault-toolbar'}, search, button('Refresh', 'button-small', () => reload(current), 'refresh')),
+      el('div', {class: 'vault-toolbar vault-filters'}, section, tag, filter, source, button('Clear filters', 'button-small button-ghost', () => {
+        search.value = ''; section.value = ''; tag.value = ''; filter.value = ''; source.value = ''; draw();
+      })),
+      el('p', {class: 'muted'}, `Your role: ${roleNames[state.session.role] || 'Administrator'}. Authorized users share this collection. Sections and tags do not change access permissions.`), count, list);
+    function choose(kind, value) { (kind === 'section' ? section : tag).value = value; draw(); }
     function draw() {
       clearSecrets();
+      filters = {search: search.value, section: section.value, tag: tag.value, type: filter.value, source: source.value};
       const query = search.value.toLowerCase();
       const matches = catalog.entries.filter(item => (!filter.value || item.connection_type === filter.value) && (!source.value || item.source === source.value) &&
-        [item.title, item.application, item.username, item.host, item.vm_name, item.deployment_name].join(' ').toLowerCase().includes(query));
-      list.replaceChildren(...matches.map(item => card(item, catalog.can_edit, current)));
+        (!section.value || (section.value === 'unsectioned' ? !item.section_id : item.section_id === section.value)) &&
+        (!tag.value || (tag.value === ',untagged,' ? !item.tags.length : item.tags.includes(tag.value))) &&
+        [item.title, item.application, item.username, item.host, item.vm_name, item.deployment_name, sectionNames.get(item.section_id), ...item.tags].join(' ').toLowerCase().includes(query));
+      count.textContent = `${matches.length} of ${catalog.entries.length} credentials`;
+      list.replaceChildren();
+      for (const group of [...catalog.sections, {id: null, name: 'Unsectioned'}]) {
+        const entries = matches.filter(item => item.section_id === group.id);
+        if (!entries.length) continue;
+        list.append(el('section', {class: 'vault-section-group'}, el('h2', {class: 'vault-group-title'}, group.name, el('span', {class: 'muted'}, ` (${entries.length})`)),
+          el('div', {class: 'vault-grid'}, entries.map(item => card(item, catalog.can_edit, current, catalog, choose)))));
+      }
       if (!matches.length) list.append(el('div', {class: 'empty-state'}, el('h2', {}, catalog.entries.length ? 'No matching credentials' : 'No credentials yet'), el('p', {}, catalog.entries.length ? 'Try another search or filter.' : 'Add a homelab entry, or create a deployment to collect its generated credentials here.')));
     }
-    search.addEventListener('input', draw); filter.addEventListener('change', draw); source.addEventListener('change', draw); draw();
+    for (const control of [search, filter, source, section, tag]) control.addEventListener(control === search ? 'input' : 'change', draw);
+    draw();
   }
   async function reload(current) {
     if (!current()) return;
     clearSecrets();
     try { await render(false); } catch (caught) { if (current()) notify(caught.message); }
   }
-  function card(item, canEdit, current) {
+  function organizationFields(value, catalog) {
+    const section = el('select', {id: 'credential-section'}, el('option', {value: ''}, 'Unsectioned'),
+      catalog.sections.map(item => el('option', {value: item.id}, item.name)), el('option', {value: '__new__'}, '+ Create a new section'));
+    section.value = value.section_id || '';
+    const newName = input('credential-new-section', '', {maxlength: 80, placeholder: 'For example: Network or Lab servers'});
+    const newField = field('New section name', newName); newField.hidden = true;
+    section.addEventListener('change', () => { newField.hidden = section.value !== '__new__'; newName.required = !newField.hidden; if (!newField.hidden) newName.focus(); });
+    const tags = input('credential-tags', (value.tags || []).join(', '), {maxlength: 1200, placeholder: 'homelab, linux, production'});
+    const body = el('div', {}, field('Section', section, 'One section per credential. Sections organize the shared collection.'), newField,
+      field('Tags', tags, 'Separate tags with commas. Up to 20 tags, 40 characters each; tags are normalized to lowercase.'));
+    async function values(current, active) {
+      if (section.value === '__new__') {
+        const created = await api('/api/password-manager/sections', {method: 'POST', body: {name: newName.value}});
+        if (!current() || !active()) return null;
+        section.insertBefore(el('option', {value: created.id}, created.name), section.lastElementChild);
+        section.value = created.id; newName.value = ''; newName.required = false; newField.hidden = true;
+      }
+      return {section_id: section.value || null, tags: tags.value.split(',').map(value => value.trim()).filter(Boolean)};
+    }
+    return {body, values};
+  }
+  function organizeCredential(item, current, catalog) {
+    clearSecrets();
+    const fields = organizationFields(item, catalog);
+    modal('Organize credential', el('div', {}, el('p', {}, item.title), fields.body), async active => {
+      if (!current() || !active()) return;
+      const values = await fields.values(current, active); if (!values || !current() || !active()) return;
+      await api(`/api/password-manager/${encodeURIComponent(item.id)}/organization`, {method: 'PATCH', body: {...values, revision: item.revision}});
+      if (!current() || !active()) return;
+      dialog.close(); notify('Credential organization saved.'); await reload(current);
+    }, 'Save organization');
+  }
+  function renderSections(catalog, current) {
+    chrome('sections', catalog.can_edit ? button('Add section', 'button-primary', () => editSection(null, current), 'plus') : null);
+    const list = el('div', {class: 'vault-section-list'});
+    page.append(el('p', {class: 'alert alert-info'}, 'Sections group credentials; tags can span several sections. All authorized users still share this collection. Removing a section keeps its credentials under Unsectioned.'), list);
+    const rows = [...catalog.sections, {id: null, name: 'Unsectioned', count: catalog.entries.filter(item => !item.section_id).length}];
+    for (const section of rows) {
+      const view = button('View credentials', 'button-small', () => { filters = {section: section.id || 'unsectioned'}; location.hash = 'password-manager'; });
+      list.append(el('article', {class: 'surface vault-section-row', 'data-section-id': section.id || 'unsectioned'},
+        el('div', {}, el('h2', {}, section.name), el('p', {class: 'muted'}, `${section.count} credential${section.count === 1 ? '' : 's'}`)),
+        el('div', {class: 'vault-actions'}, view,
+          section.id && catalog.can_edit ? button('Rename', 'button-small', () => editSection(section, current)) : null,
+          section.id && catalog.can_edit ? button('Remove section', 'button-small button-danger', () => removeSection(section, current)) : null)));
+    }
+  }
+  function editSection(section, current) {
+    clearSecrets();
+    const name = input('section-name', section?.name || '', {required: true, maxlength: 80});
+    modal(section ? 'Rename section' : 'Add section', field('Section name', name), async active => {
+      if (!current() || !active()) return;
+      await api('/api/password-manager/sections' + (section ? '/' + encodeURIComponent(section.id) : ''), {
+        method: section ? 'PUT' : 'POST', body: {name: name.value, ...(section ? {revision: section.revision} : {})}});
+      if (!current() || !active()) return;
+      dialog.close(); notify('Section saved.'); await render('sections');
+    }, 'Save section');
+  }
+  function removeSection(section, current) {
+    clearSecrets();
+    modal('Remove section?', el('p', {}, `Remove “${section.name}”? All credentials in it will be kept under Unsectioned, with their tags and secrets unchanged.`), async active => {
+      if (!current() || !active()) return;
+      await api(`/api/password-manager/sections/${encodeURIComponent(section.id)}?revision=${section.revision}`, {method: 'DELETE'});
+      if (!current() || !active()) return;
+      dialog.close(); notify('Section removed. Credentials retained.'); await render('sections');
+    }, 'Remove section');
+  }
+  function card(item, canEdit, current, catalog, choose) {
     const details = el('div', {class: 'vault-secrets', hidden: true});
     const failure = errorBox();
     const reveal = button('Reveal credentials', 'button-small', async () => {
@@ -110,14 +206,17 @@ window.GDeployPasswordManager = function ({el, button, field, heading, api, copy
         item.has_private_key ? [el('dt', {}, 'SSH key'), el('dd', {}, 'Stored securely')] : null),
       el('p', {class: 'media-help'}, item.source === 'deployment' ? `${item.deployment_name} · ${item.vm_name} · Deployment: ${item.deployment_status}` : 'Added manually'),
       item.source === 'deployment' && isAdmin() ? el('a', {href: `#deployment/${encodeURIComponent(item.deployment_id)}`}, 'View deployment') : null,
+      el('div', {class: 'vault-labels'}, button(catalog.sections.find(section => section.id === item.section_id)?.name || 'Unsectioned', 'vault-label vault-section-label', () => choose('section', item.section_id || 'unsectioned')),
+        item.tags.map(tag => { const control = button(tag, 'vault-label', () => choose('tag', tag)); control.setAttribute('aria-label', `Filter tag: ${tag}`); return control; })),
       failure, details, el('div', {class: 'vault-actions'}, reveal, button('Copy username', 'button-small button-ghost', () => copied(item.username), 'copy'),
-        canEdit ? button('Edit', 'button-small', () => editCredential(item, current)) : null,
+        canEdit ? button('Organize', 'button-small', () => organizeCredential(item, current, catalog)) : null,
+        canEdit ? button('Edit', 'button-small', () => editCredential(item, current, catalog)) : null,
         canEdit ? button('Delete', 'button-small button-danger', () => deleteCredential(item, current)) : null)));
   }
-  async function editCredential(item, current) {
+  async function editCredential(item, current, catalog) {
     const epoch = secretEpoch;
     try {
-      let initial = item ? await api(`/api/password-manager/${encodeURIComponent(item.id)}/reveal`, {method: 'POST'}) : {};
+      let initial = item ? await api(`/api/password-manager/${encodeURIComponent(item.id)}/reveal`, {method: 'POST'}) : {section_id: catalog.sections.some(section => section.id === filters.section) ? filters.section : null};
       if (!current() || epoch !== secretEpoch || document.hidden) return;
       clearSecrets();
       const controls = {
@@ -132,9 +231,10 @@ window.GDeployPasswordManager = function ({el, button, field, heading, api, copy
         private_key: el('textarea', {id: 'credential-private-key', maxlength: 65536, rows: 5, spellcheck: 'false', autocomplete: 'off'}, initial.private_key || ''),
       };
       controls.connection_type.value = initial.connection_type || 'SSH';
+      const organization = organizationFields(initial, catalog);
       const revision = initial.revision; initial = null;
       const fields = el('div', {}, el('p', {class: 'alert alert-info'}, 'Saved entry only. These edits do not change the remote machine or application.'),
-        field('Entry name', controls.title), el('div', {class: 'field-grid'}, field('Application', controls.application), field('Connection type', controls.connection_type)),
+        field('Entry name', controls.title), organization.body, el('div', {class: 'field-grid'}, field('Application', controls.application), field('Connection type', controls.connection_type)),
         el('div', {class: 'field-grid'}, field('User', controls.username), field('Password', controls.password, 'An empty field saves an empty password.')),
         el('div', {class: 'field-grid'}, field('IP / hostname', controls.host), field('Port', controls.port, 'Optional.')),
         field('Notes', controls.notes), el('details', {class: 'media-integrity'}, el('summary', {}, 'SSH private key (optional)'), field('Private key', controls.private_key)));
@@ -143,6 +243,8 @@ window.GDeployPasswordManager = function ({el, button, field, heading, api, copy
         const body = Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value]));
         body.port = body.port ? Number(body.port) : null;
         if (item) body.revision = revision;
+        const values = await organization.values(current, active); if (!values || !current() || !active()) return;
+        Object.assign(body, values);
         await api('/api/password-manager' + (item ? '/' + encodeURIComponent(item.id) : ''), {method: item ? 'PUT' : 'POST', body});
         if (!current() || !active()) return;
         dialog.close(); if (current()) { notify('Credential saved. Remote credentials were not changed.'); await reload(current); }
